@@ -8,7 +8,7 @@ Purchase Desk is Saltstayz's procurement app: request → approval → PO → go
 
 **Status (8 Oct 2026):** phases 1 to 5 are all built and tested end to end. The client tests them one at a time: `RELEASE_PHASE` in `.env` switches the app to a phase (see "Rollout phases" below). It is set to 1 for the first handover. Pushing to Zoho stays off (`ZOHO_PUSH_ENABLED=false`) until the Zoho org has the bill custom field `cf_purchase_desk_id` and a "Property" reporting tag. Read calls to Zoho are verified live; write calls are not yet.
 
-**Stack:** Go 1.27 (chi v5, pgx v5 pool, golang-jwt v5, bcrypt, excelize v2), Postgres 16, React 19 + TypeScript + Vite + react-router 7 with plain CSS, nginx, Docker Compose. Files go to local disk or Supabase Storage. The project is not a git repo.
+**Stack:** Go 1.27 (chi v5, pgx v5 pool, golang-jwt v5, bcrypt, excelize v2), Postgres 16, React 19 + TypeScript + Vite + react-router 7 with plain CSS, nginx, Docker Compose. Files go to local disk or Supabase Storage. Git: branch `main`, first commit made on 8 Oct 2026; commit at the end of each delivered phase.
 
 ## Run, reset, verify
 
