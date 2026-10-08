@@ -210,7 +210,7 @@ Purchase_Desk/
 | `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`, `SUPABASE_BUCKET`                     | Supabase Storage. Create a**private** bucket; the API uses the service key, and files are served only through the API with rights checks. |
 | `ZOHO_ACCOUNTS_URL`, `ZOHO_API_URL`                                             | India data centre by default.                                                                                                                   |
 | `ZOHO_ORG_ID`, `ZOHO_CLIENT_ID`, `ZOHO_CLIENT_SECRET`, `ZOHO_REFRESH_TOKEN` | Copied into the database (secrets encrypted) on first start. Change them later under Settings › Zoho Books.                                    |
-| `ZOHO_PUSH_ENABLED`                                                               | `false` blocks every write to Zoho (bills, journals). Sync, mappings and previews still work.                                                 |
+| `ZOHO_PUSH_ENABLED`                                                               | `false` blocks every write to Zoho: bills, journals and the "Create in Zoho" buttons. Sync, mappings and previews still work, because they only read.                                                 |
 | `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_FROM`       | Email for POs, vendor sheets and sign-in codes. Ports 587 (STARTTLS) and 465 (TLS) work.                                                        |
 | `MSG91_AUTH_KEY`, `MSG91_WHATSAPP_NUMBER`, `MSG91_OTP_TEMPLATE_ID`            | WhatsApp and SMS sign-in codes through MSG91.                                                                                                   |
 

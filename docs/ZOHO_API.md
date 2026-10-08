@@ -69,7 +69,7 @@ Things learned while testing:
 
 ## Write calls (run only in a test organisation)
 
-Nothing below runs while `ZOHO_PUSH_ENABLED=false`, except creating an account, a vendor or a tag option. Those happen only when Finance clicks the matching "Create in Zoho" button.
+Nothing below runs while `ZOHO_PUSH_ENABLED=false`, including the "Create in Zoho" buttons for an account, a vendor or a tag option. With it off, Purchase Desk only reads from Zoho.
 
 | # | Purpose | Call | Code | Verified live |
 |---|---|---|---|---|

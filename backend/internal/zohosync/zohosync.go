@@ -795,6 +795,9 @@ func (s *Service) matchProperties(w http.ResponseWriter, r *http.Request) error 
 }
 
 func (s *Service) createTagOption(w http.ResponseWriter, r *http.Request) error {
+	if !s.PushEnabled { // ZOHO_PUSH_ENABLED=false keeps Purchase Desk read-only towards Zoho
+		return httpjson.Bad("Writing to Zoho is switched off on this server (ZOHO_PUSH_ENABLED=false). Create it in Zoho, then click Sync now.")
+	}
 	u := access.From(r)
 	if err := needMap(u); err != nil {
 		return err
@@ -839,6 +842,9 @@ func (s *Service) createTagOption(w http.ResponseWriter, r *http.Request) error 
 }
 
 func (s *Service) createAccount(w http.ResponseWriter, r *http.Request) error {
+	if !s.PushEnabled { // ZOHO_PUSH_ENABLED=false keeps Purchase Desk read-only towards Zoho
+		return httpjson.Bad("Writing to Zoho is switched off on this server (ZOHO_PUSH_ENABLED=false). Create it in Zoho, then click Sync now.")
+	}
 	u := access.From(r)
 	if err := needMap(u); err != nil {
 		return err
@@ -929,6 +935,9 @@ func (s *Service) unlinkVendor(w http.ResponseWriter, r *http.Request) error {
 
 // createVendor creates the vendor in Zoho from details verified in Purchase Desk. Bank details are not sent.
 func (s *Service) createVendor(w http.ResponseWriter, r *http.Request) error {
+	if !s.PushEnabled { // ZOHO_PUSH_ENABLED=false keeps Purchase Desk read-only towards Zoho
+		return httpjson.Bad("Writing to Zoho is switched off on this server (ZOHO_PUSH_ENABLED=false). Create it in Zoho, then click Sync now.")
+	}
 	u := access.From(r)
 	if err := needMap(u); err != nil {
 		return err
