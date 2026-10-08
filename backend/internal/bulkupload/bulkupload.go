@@ -485,16 +485,22 @@ func (s *Service) define() map[string]*kind {
 		"zoho_tags": {
 			title: "Property to Zoho reporting tag", module: "Zoho", allowed: func(u *access.User) bool { return u.IsAdmin || u.HasStep("finance") },
 			required: []string{"property_code", "reporting_tag_option"},
-			sample:   "property_code,property_name,reporting_tag_option\nP01,Sector 45 Gurugram,Sector 45 Gurugram\n",
+			sample:   "property_code,property_name,reporting_tag,reporting_tag_option\nP01,Sector 45 Gurugram,Haryana,Sector 45 Gurugram\n",
 			check: func(ctx context.Context, x *run, row csvfile.Row) result {
 				var pid int64
 				if err := x.q.QueryRow(ctx, `SELECT id FROM property WHERE upper(code)=upper($1)`, row.Get("property_code")).Scan(&pid); err != nil {
 					return bad("Unknown property code")
 				}
+				// The option may sit under any reporting tag. reporting_tag is optional; it settles a name used under two tags.
 				var oid string
-				if err := x.q.QueryRow(ctx, `SELECT o.option_id FROM zoho_tag_option o JOIN zoho_connection z ON z.property_tag_id=o.tag_id WHERE o.active AND norm_key(o.name)=norm_key($1)`,
-					row.Get("reporting_tag_option")).Scan(&oid); err != nil {
-					return bad("This option is not in the Zoho reporting tag. Sync from Zoho first if you just added it")
+				var n int
+				if err := x.q.QueryRow(ctx, `SELECT count(*), coalesce(min(o.option_id),'') FROM zoho_tag_option o JOIN zoho_tag t ON t.tag_id=o.tag_id
+					WHERE o.active AND t.active AND norm_key(o.name)=norm_key($1) AND ($2='' OR norm_key(t.name)=norm_key($2))`,
+					row.Get("reporting_tag_option"), row.Get("reporting_tag")).Scan(&n, &oid); err != nil || n == 0 {
+					return bad("This option is not in any Zoho reporting tag. Sync from Zoho first if you just added it")
+				}
+				if n > 1 {
+					return bad("This option name is used under more than one reporting tag. Fill the reporting_tag column")
 				}
 				if x.dup(fmt.Sprint(pid)) {
 					return bad("Duplicate row in the file")

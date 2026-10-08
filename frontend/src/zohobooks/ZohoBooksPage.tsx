@@ -92,10 +92,10 @@ function Connection({ c, lists, onDone }: { c: any; lists: Lists | null; onDone:
         </dl>
         {c.last_error && <p className="note bad">{c.last_error}</p>}
         {!c.push_enabled && <p className="note warn">Pushing is off (ZOHO_PUSH_ENABLED=false). Sync, mappings and previews work. Switch it on after testing in a Zoho test organisation.</p>}
-        <label className="field"><span>Reporting tag that identifies the property</span>
+        <label className="field"><span>Reporting tag for new options (optional)</span>
           <select value={c.property_tag_id} disabled={!admin} onChange={(e) => a.run(() => put('/zoho/connection', { property_tag_id: e.target.value }), () => { onDone(); return 'Saved' })}>
             <option value="">Not chosen</option>{lists?.tags.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}</select>
-          <span className="hint">{lists?.tags.length ? 'Read from Zoho.' : 'No reporting tag exists in this Zoho organisation yet. Create one named Property in Zoho (Settings › Reporting Tags), then Sync now.'}</span></label>
+          <span className="hint">{lists?.tags.length ? 'Properties can map to an option of any reporting tag on the Properties tab. This tag is used only when a missing option is created from Purchase Desk.' : 'No reporting tag exists in this Zoho organisation yet. Create one in Zoho (Settings › Reporting Tags), then Sync now.'}</span></label>
         <Errors list={a.errors} />
         {admin && <div className="btns">
           <button className="btn ghost" onClick={() => setEdit(true)}>Change credentials</button>
@@ -143,19 +143,21 @@ function Properties({ m, lists, onDone }: { m: Maps; lists: Lists; onDone: () =>
   const [gap, setGap] = useState(false)
   const [upload, setUpload] = useState(false)
   const conn = useApi<any>('/zoho/connection')
-  const opts = lists.tag_options.filter((o) => o.active && o.tag_id === conn.data?.property_tag_id)
+  // A property may map to an option of any reporting tag, for example one tag per region; the bill carries that option's tag.
+  const tags = lists.tags.filter((t) => t.active && lists.tag_options.some((o) => o.tag_id === t.id && o.active))
+  const canCreate = !!conn.data?.property_tag_id && !!conn.data?.push_enabled
   const rows = m.properties.filter((p) => !gap || !p.tag_option_id)
   return (
     <>
-      <p className="note">Each property is identified by an option of the property reporting tag. The tag is sent on the bill and on every line, so expenses report hotel by hotel in Zoho. A property without a tag cannot have its bills pushed.</p>
+      <p className="note">Each property is identified by a reporting tag option, from any tag. The option and its tag are sent on the bill and on every line, so expenses report hotel by hotel in Zoho. A property without an option cannot have its bills pushed.</p>
       <div className="tools"><label className="ck"><input type="checkbox" checked={gap} onChange={(e) => setGap(e.target.checked)} />Only properties without a tag</label>
         {m.can_edit && <><button className="btn ghost" onClick={() => a.run(() => post('/zoho/properties/match'), (r: any) => { onDone(); return r.message })}>Match by name</button>
           <button className="btn ghost" onClick={() => setUpload(true)}>Upload mapping</button></>}</div>
       <Errors list={a.errors} />
       <section className="card flush"><div className="scroll"><table><thead><tr><th>Property</th><th>Cluster</th><th>State</th><th>Reporting tag option</th><th>Zoho location (optional)</th></tr></thead>
         <tbody>{rows.map((p) => <tr key={p.property_id}><td className="id">{p.name}<br /><span className="hint">{p.code}</span></td><td>{p.cluster}</td><td>{p.state_code}</td>
-          <td><select disabled={!m.can_edit} value={p.tag_option_id} onChange={(e) => save('property_tag', String(p.property_id), e.target.value)}><option value="">Not mapped</option>{opts.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}</select>
-            {!p.tag_option_id && <> <Pill tone="bad">Bills held</Pill>{m.can_edit && <> <button className="link" onClick={() => a.run(() => post(`/zoho/properties/${p.property_id}/create-option`), (r: any) => { onDone(); return r.message })}>Create in Zoho</button></>}</>}
+          <td><select disabled={!m.can_edit} value={p.tag_option_id} onChange={(e) => save('property_tag', String(p.property_id), e.target.value)}><option value="">Not mapped</option>{tags.map((t) => <optgroup key={t.id} label={t.name}>{lists.tag_options.filter((o) => o.tag_id === t.id && (o.active || o.id === p.tag_option_id)).map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}</optgroup>)}</select>
+            {!p.tag_option_id && <> <Pill tone="bad">Bills held</Pill>{m.can_edit && canCreate && <> <button className="link" onClick={() => a.run(() => post(`/zoho/properties/${p.property_id}/create-option`), (r: any) => { onDone(); return r.message })}>Create in Zoho</button></>}</>}
             {p.shared_with > 0 && <> <Pill tone="warn">Shared with {p.shared_with} other</Pill></>}</td>
           <td><select disabled={!m.can_edit} value={p.location_id} onChange={(e) => save('property_location', String(p.property_id), e.target.value)}><option value="">None</option>{lists.locations.filter((l) => l.active).map((l) => <option key={l.id} value={l.id}>{l.name}{l.extra ? ` (${l.extra})` : ''}</option>)}</select></td></tr>)}</tbody></table></div></section>
       {upload && <UploadModal kind="zoho_tags" title="Upload property to reporting tag mapping" onClose={() => setUpload(false)} onDone={onDone} />}

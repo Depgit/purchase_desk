@@ -100,12 +100,12 @@ func load(ctx context.Context, q database.Q, invoiceID int64) (*bill, error) {
 		i.file_id, coalesce(i.zoho_bill_id,''), i.zoho_step, i.zoho_voids, i.match_remark,
 		p.id, p.name, p.kind, c.state_code, v.id, v.gst_registered, coalesce(v.gstin,''), v.state_code, coalesce(nullif(d.payment_terms,''), v.payment_terms),
 		d.bill_type_id, coalesce(bt.name, eh.name, ''), coalesce(to_char(d.period_start,'Mon YYYY'), cd.name, ''), coalesce(d.months,0),
-		coalesce(z.property_tag_id,''), coalesce(mp.tag_option_id,''), coalesce(mp.location_id,''), coalesce(o.active AND o.tag_id=z.property_tag_id,false),
+		coalesce(o.tag_id,''), coalesce(mp.tag_option_id,''), coalesce(mp.location_id,''), coalesce(o.active AND zt.active,false),
 		coalesce(mv.contact_id,''), coalesce(zc.active,false), coalesce(ma.account_id,''), coalesce(za.active,false),
 		coalesce(z.connected,false), coalesce(z.bill_key_field,''), coalesce(cd.name,'')
 		FROM invoice i JOIN document d ON d.id=i.document_id JOIN property p ON p.id=i.property_id JOIN cluster k ON k.id=p.cluster_id JOIN city c ON c.id=k.city_id
 		JOIN vendor v ON v.id=i.vendor_id LEFT JOIN goods_receipt g ON g.id=i.goods_receipt_id LEFT JOIN bill_type bt ON bt.id=d.bill_type_id
-		LEFT JOIN zoho_connection z ON z.id=1 LEFT JOIN zoho_map_property mp ON mp.property_id=p.id LEFT JOIN zoho_tag_option o ON o.option_id=mp.tag_option_id
+		LEFT JOIN zoho_connection z ON z.id=1 LEFT JOIN zoho_map_property mp ON mp.property_id=p.id LEFT JOIN zoho_tag_option o ON o.option_id=mp.tag_option_id LEFT JOIN zoho_tag zt ON zt.tag_id=o.tag_id
 		LEFT JOIN zoho_map_vendor mv ON mv.vendor_id=v.id LEFT JOIN zoho_contact zc ON zc.contact_id=mv.contact_id
 		LEFT JOIN expense_head eh ON eh.id=d.expense_head_id LEFT JOIN corp_department cd ON cd.id=d.department_id
 		LEFT JOIN zoho_map_account ma ON (d.kind='bill' AND ma.kind='billtype' AND ma.ref=d.bill_type_id::text) OR (d.kind='corp_bill' AND ma.kind='head' AND ma.ref=d.expense_head_id::text)
@@ -196,11 +196,10 @@ func problems(b *bill, taxes map[float64]string) []string {
 	if !b.Connected {
 		o = append(o, "Zoho Books is not connected")
 	}
-	if b.TagID == "" {
-		o = append(o, "No Zoho reporting tag is chosen for properties (Connection tab)")
-	} else if b.TagOptionID == "" {
+	// The bill carries the tag that the property's option belongs to, so properties may sit under different tags.
+	if b.TagOptionID == "" {
 		o = append(o, b.Property+" has no Zoho reporting tag")
-	} else if !b.TagOK {
+	} else if b.TagID == "" || !b.TagOK {
 		o = append(o, b.Property+"'s reporting tag option is inactive or deleted in Zoho")
 	}
 	if b.ContactID == "" {

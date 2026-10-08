@@ -319,20 +319,66 @@ func (c *Client) Taxes(ctx context.Context) ([]Tax, error) {
 }
 
 type TagOption struct {
-	ID       string `json:"tag_option_id"`
-	Name     string `json:"tag_option_name"`
-	IsActive *bool  `json:"is_active"`
-	Status   string `json:"status"`
+	ID       string      `json:"tag_option_id"`
+	Name     string      `json:"tag_option_name"`
+	IsActive *bool       `json:"is_active"`
+	Status   string      `json:"status"`
+	Children []TagOption `json:"children"`
+}
+
+// UnmarshalJSON accepts both shapes Zoho uses for an option: tag_option_id / tag_option_name (older replies)
+// and option_id / option_name (GET /reportingtags/options).
+func (o *TagOption) UnmarshalJSON(b []byte) error {
+	var x struct {
+		IsActive *bool       `json:"is_active"`
+		Status   string      `json:"status"`
+		Children []TagOption `json:"children"`
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(b, &raw); err != nil {
+		return err
+	}
+	str := func(k string) string {
+		var v string
+		_ = json.Unmarshal(raw[k], &v)
+		return v
+	}
+	_ = json.Unmarshal(b, &x)
+	o.ID = str("tag_option_id")
+	if o.ID == "" {
+		o.ID = str("option_id")
+	}
+	o.Name = str("tag_option_name")
+	if o.Name == "" {
+		o.Name = str("option_name")
+	}
+	o.IsActive, o.Status, o.Children = x.IsActive, x.Status, x.Children
+	return nil
 }
 
 type ReportingTag struct {
-	ID      string      `json:"tag_id"`
-	Name    string      `json:"tag_name"`
-	Status  string      `json:"status"`
-	Options []TagOption `json:"tag_options"`
+	ID       string      `json:"tag_id"`
+	Name     string      `json:"tag_name"`
+	Status   string      `json:"status"`
+	IsActive *bool       `json:"is_active"`
+	Options  []TagOption `json:"tag_options"`
 }
 
-// ReportingTags lists reporting tags. GET /reportingtags returns them under "tags"; each tag's options come from GET /reportingtags/{id}.
+// flatten lists an option and the options nested under it, so a sub-option can be picked too.
+func flatten(opts []TagOption) []TagOption {
+	out := []TagOption{}
+	for _, o := range opts {
+		kids := o.Children
+		o.Children = nil
+		out = append(out, o)
+		out = append(out, flatten(kids)...)
+	}
+	return out
+}
+
+// ReportingTags lists every reporting tag with its options. GET /reportingtags returns the tags under "tags".
+// Each tag's options come from GET /reportingtags/options?tag_id=...: on 8 Oct 2026 GET /reportingtags/{id}
+// returned the tag's settings without options. The older reply shapes are still read as a fallback.
 func (c *Client) ReportingTags(ctx context.Context) ([]ReportingTag, error) {
 	var out struct {
 		Tags          []ReportingTag `json:"tags"`
@@ -344,6 +390,15 @@ func (c *Client) ReportingTags(ctx context.Context) ([]ReportingTag, error) {
 	tags := append(out.Tags, out.ReportingTags...)
 	for i := range tags {
 		if len(tags[i].Options) > 0 {
+			tags[i].Options = flatten(tags[i].Options)
+			continue
+		}
+		var opts struct {
+			Options []TagOption `json:"options"`
+		}
+		err := c.Do(ctx, http.MethodGet, "/reportingtags/options", url.Values{"tag_id": {tags[i].ID}}, nil, nil, &opts)
+		if err == nil && len(opts.Options) > 0 {
+			tags[i].Options = flatten(opts.Options)
 			continue
 		}
 		var one map[string]json.RawMessage
@@ -354,12 +409,14 @@ func (c *Client) ReportingTags(ctx context.Context) ([]ReportingTag, error) {
 			if raw, ok := one[k]; ok {
 				var t ReportingTag
 				if json.Unmarshal(raw, &t) == nil && len(t.Options) > 0 {
-					tags[i].Options = t.Options
+					tags[i].Options = flatten(t.Options)
 				}
 			}
 		}
 		if raw, ok := one["tag_options"]; ok && len(tags[i].Options) == 0 {
-			_ = json.Unmarshal(raw, &tags[i].Options)
+			var o []TagOption
+			_ = json.Unmarshal(raw, &o)
+			tags[i].Options = flatten(o)
 		}
 	}
 	return tags, nil

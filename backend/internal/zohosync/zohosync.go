@@ -169,7 +169,7 @@ func (s *Service) getConnection(w http.ResponseWriter, r *http.Request) error {
 	}
 	var counts struct{ Accounts, Taxes, Options, Locations, Contacts, Bills int }
 	_ = s.DB.QueryRow(r.Context(), `SELECT (SELECT count(*) FROM zoho_account WHERE active), (SELECT count(*) FROM zoho_tax WHERE active),
-		(SELECT count(*) FROM zoho_tag_option o JOIN zoho_connection z ON z.property_tag_id=o.tag_id WHERE o.active),
+		(SELECT count(*) FROM zoho_tag_option o JOIN zoho_tag t ON t.tag_id=o.tag_id WHERE o.active AND t.active),
 		(SELECT count(*) FROM zoho_location WHERE active), (SELECT count(*) FROM zoho_contact WHERE active), (SELECT count(*) FROM invoice WHERE zoho_bill_id IS NOT NULL)`).
 		Scan(&counts.Accounts, &counts.Taxes, &counts.Options, &counts.Locations, &counts.Contacts, &counts.Bills)
 	return httpjson.OK(w, map[string]any{
@@ -413,7 +413,7 @@ func (s *Service) Sync(ctx context.Context) (*SyncResult, error) {
 		res.Taxes = len(taxes)
 		for _, t := range tags {
 			if _, err := tx.Exec(ctx, `INSERT INTO zoho_tag(tag_id,name,active,synced_at) VALUES ($1,$2,$3,$4)
-				ON CONFLICT (tag_id) DO UPDATE SET name=EXCLUDED.name, active=EXCLUDED.active, synced_at=EXCLUDED.synced_at`, t.ID, t.Name, t.Status != "inactive", stamp); err != nil {
+				ON CONFLICT (tag_id) DO UPDATE SET name=EXCLUDED.name, active=EXCLUDED.active, synced_at=EXCLUDED.synced_at`, t.ID, t.Name, t.Status != "inactive" && (t.IsActive == nil || *t.IsActive), stamp); err != nil {
 				return err
 			}
 			for _, o := range t.Options {
@@ -503,12 +503,13 @@ func autoLinkVendors(ctx context.Context, tx pgx.Tx) (int, error) {
 	return n + int(ct.RowsAffected()), nil
 }
 
-// autoLinkProperties links a property to the option of the property reporting tag with exactly the same name.
+// autoLinkProperties links a property to the reporting tag option with exactly the same name, in any tag.
+// Properties may sit under different tags (for example one tag per region); the bill carries the option's own tag.
 func autoLinkProperties(ctx context.Context, q pgx.Tx) (int, error) {
 	ct, err := q.Exec(ctx, `INSERT INTO zoho_map_property(property_id, tag_option_id)
-		SELECT p.id, o.option_id FROM property p JOIN zoho_connection z ON z.id=1
-		JOIN zoho_tag_option o ON o.tag_id=z.property_tag_id AND o.active AND norm_key(o.name)=norm_key(p.name)
-		WHERE p.active ON CONFLICT (property_id) DO UPDATE SET tag_option_id=EXCLUDED.tag_option_id WHERE zoho_map_property.tag_option_id IS NULL`)
+		SELECT DISTINCT ON (p.id) p.id, o.option_id FROM property p
+		JOIN zoho_tag_option o ON o.active AND norm_key(o.name)=norm_key(p.name) JOIN zoho_tag t ON t.tag_id=o.tag_id AND t.active
+		WHERE p.active ORDER BY p.id, o.option_id ON CONFLICT (property_id) DO UPDATE SET tag_option_id=EXCLUDED.tag_option_id WHERE zoho_map_property.tag_option_id IS NULL`)
 	if err != nil {
 		return 0, err
 	}
@@ -811,7 +812,7 @@ func (s *Service) createTagOption(w http.ResponseWriter, r *http.Request) error 
 		return err
 	}
 	if conn.PropertyTagID == "" {
-		return httpjson.Bad("Choose which Zoho reporting tag identifies the property first, on the Connection tab.")
+		return httpjson.Bad("Choose the reporting tag that new options go under first, on the Connection tab.")
 	}
 	var name string
 	if err := s.DB.QueryRow(r.Context(), `SELECT name FROM property WHERE id=$1`, pid).Scan(&name); err != nil {
@@ -838,7 +839,7 @@ func (s *Service) createTagOption(w http.ResponseWriter, r *http.Request) error 
 			return httpjson.OK(w, map[string]string{"message": `"` + name + `" created in Zoho and linked.`})
 		}
 	}
-	return httpjson.Bad("The property reporting tag was not found in Zoho. Sync and check the Connection tab.")
+	return httpjson.Bad("The reporting tag for new options was not found in Zoho. Sync and check the Connection tab.")
 }
 
 func (s *Service) createAccount(w http.ResponseWriter, r *http.Request) error {

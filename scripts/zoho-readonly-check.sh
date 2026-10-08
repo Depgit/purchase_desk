@@ -55,9 +55,9 @@ if [ -n "$FIRST_BILL" ]; then
 fi
 TAG=$(curl -s "$BASE/reportingtags?$ORG" -H "Authorization: Zoho-oauthtoken $AT" | python3 -c 'import sys,json; t=json.load(sys.stdin).get("tags",[]); print(t[0]["tag_id"] if t else "")')
 if [ -n "$TAG" ]; then
-  check "12. Options of the first reporting tag (GET /reportingtags/{id})" "/reportingtags/$TAG?$ORG" reporting_tag
+  check "12. Options of the first reporting tag (GET /reportingtags/options?tag_id=)" "/reportingtags/options?$ORG&tag_id=$TAG" options
 else
-  echo "12. Reporting tag options: skipped, this organisation has no reporting tag yet (create one named Property)"
+  echo "12. Reporting tag options: skipped, this organisation has no reporting tag yet"
 fi
 
 KEY=$(curl -s "$BASE/settings/customfields?$ORG&entity=bill" -H "Authorization: Zoho-oauthtoken $AT" | python3 -c 'import sys,json; f=json.load(sys.stdin).get("customfields",{}).get("bill",[]); print("yes" if any(x.get("api_name")=="cf_purchase_desk_id" for x in f) else "no")')

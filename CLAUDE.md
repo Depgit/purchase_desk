@@ -231,7 +231,8 @@ Routes are in `app/App.tsx`. The left menu, top bar, badges and search are in `l
 - `zohopush.Held` lists the reasons an invoice can't push yet: a missing property tag, account, tax or vendor mapping. The UI shows them.
 - Learned live:
   - `has_more_page` on the chart of accounts is wrong, so the client reads pages until one is empty.
-  - `/settings/tags` is retired; use `/reportingtags` with the key `tags`.
+  - `/settings/tags` is retired; use `/reportingtags` with the key `tags`. Options come from `GET /reportingtags/options?tag_id=` (key `options`, fields `option_id`/`option_name`, nested `children`); `GET /reportingtags/{id}` has no options any more. `TagOption` decodes both field shapes.
+  - Properties are not under one "Property" tag: Saltstayz has one tag per region with hotels as options (43). A property maps to an option of any tag; push and the warehouse journal send that option's own `tag_id`. `zoho_connection.property_tag_id` now only says which tag a new option is created under.
   - Contacts: send `contact_type=vendor` alone. Adding `filter_by=Status.All` makes Zoho return customers too (10,382 contacts instead of 962 vendors). `Vendors()` also skips any non-vendor contact.
   - Taxes come as `tax_group` (intra) and `tax` igst (inter).
 - The test org had no reporting tag at first; on 8 Oct 2026 it showed 6 reporting tags, 6 locations, 575 accounts, 124 taxes and 962 vendors. Check `cf_purchase_desk_id` before switching pushing on.

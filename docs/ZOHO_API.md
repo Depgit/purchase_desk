@@ -42,7 +42,7 @@ H="Authorization: Zoho-oauthtoken $AT"
 | 9 | Bills changed since the last check, for payment read-back | `GET /bills?last_modified_time=2026-10-01T00:00:00+0530` | `ChangedBills` |
 | 10 | One bill: status, balance | `GET /bills/{bill_id}` | `GetBill` |
 | 11 | Payments on a bill: date and reference | `GET /bills/{bill_id}/payments` | `BillPayments` |
-| 12 | Options of a reporting tag | `GET /reportingtags/{tag_id}` | `ReportingTags` |
+| 12 | Options of a reporting tag (one call per tag) | `GET /reportingtags/options?tag_id={tag_id}` (list under key `options`) | `ReportingTags` |
 | 13 | Look for an existing bill before creating one (used when the custom field is missing) | `GET /bills?vendor_id=&bill_number=` | `FindBill` |
 
 ```bash
@@ -56,7 +56,7 @@ curl -s "$B/settings/customfields?$O&entity=bill" -H "$H"
 curl -s -G "$B/bills" --data-urlencode "$O" --data-urlencode "last_modified_time=2026-10-01T00:00:00+0530" -H "$H"
 curl -s "$B/bills/<bill_id>?$O" -H "$H"
 curl -s "$B/bills/<bill_id>/payments?$O" -H "$H"
-curl -s "$B/reportingtags/<tag_id>?$O" -H "$H"
+curl -s "$B/reportingtags/options?$O&tag_id=<tag_id>" -H "$H"
 curl -s -G "$B/bills" --data-urlencode "$O" --data-urlencode "vendor_id=<contact_id>" --data-urlencode "bill_number=SB/4471" -H "$H"
 ```
 
@@ -64,6 +64,8 @@ Things learned while testing:
 - On the chart of accounts, `has_more_page` is not reliable: page 1 said `false`, but pages 2 and 3 had data. The app reads pages until one comes back empty.
 - On contacts, do not add `filter_by=Status.All` to `contact_type=vendor`: Zoho then drops the vendor filter and returns customers too (10,382 contacts instead of 962 vendors on 8 October 2026). `contact_type=vendor` alone already includes inactive vendors.
 - Every list returns at most 200 rows per call. A curl with `page=1` shows only the first 200; the app reads page after page until one comes back empty.
+- Reporting tag options come from `GET /reportingtags/options?tag_id=`, under `options`, with fields `option_id`, `option_name`, `is_active` and nested `children`. `GET /reportingtags/{tag_id}` returns the tag's settings without options (seen 8 October 2026).
+- The Saltstayz organisation has one tag per region (Delhi, Haryana, Noida, Punjab, Uttarakhand, Karnataka) with the hotels as options, 43 in all. A property maps to an option of any tag, and the bill carries that option's own tag.
 - `GET /settings/tags` is retired ("This API is no longer available"). Reporting tags are at `GET /reportingtags`, under the key `tags`.
 - Taxes come back as `tax_group` with `tax_specification: intra` (GST5, GST12, ...) and as `tax` with `tax_specific_type: igst` and `tax_specification: inter` (IGST5, ...). The Taxes tab maps them the same way.
 
@@ -79,7 +81,7 @@ Nothing below runs while `ZOHO_PUSH_ENABLED=false`, including the "Create in Zoh
 | 17 | Mark the bill open (only if Zoho left it as draft) | `POST /bills/{bill_id}/status/open` | `MarkBillOpen` | Not yet |
 | 18 | Create a vendor from verified details | `POST /contacts` | `CreateVendor` | Not yet |
 | 19 | Create an expense account | `POST /chartofaccounts` | `CreateAccount` | Not yet |
-| 20 | Add a property as a reporting tag option | `PUT /reportingtags/{tag_id}/options` | `AddTagOption` | Not yet |
+| 20 | Add a property as a reporting tag option, under the tag chosen on the Connection tab | `PUT /reportingtags/{tag_id}/options` | `AddTagOption` | Not yet; check the body against the current option field names (`option_name`) before use |
 | 21 | Monthly warehouse journal per property | `POST /journals` | `CreateJournal` | Not yet |
 
 Example bill as the app builds it. Open any invoice in Payments and click "Preview what is sent" to see the exact body.

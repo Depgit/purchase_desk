@@ -67,8 +67,8 @@ func build(ctx context.Context, q pgx.Tx, db *pgxpool.Pool, propertyID int64, mo
 	}
 	j := &Journal{PropertyID: propertyID, Month: clock.YMD(month)[:7], Lines: []Line{}, Problems: []string{}}
 	end := month.AddDate(0, 1, 0)
-	if err := qq.QueryRow(ctx, `SELECT p.name, coalesce(z.property_tag_id,''), coalesce(m.tag_option_id,'') FROM property p LEFT JOIN zoho_connection z ON z.id=1
-		LEFT JOIN zoho_map_property m ON m.property_id=p.id WHERE p.id=$1`, propertyID).Scan(&j.Property, &j.tagID, &j.optionID); err != nil {
+	if err := qq.QueryRow(ctx, `SELECT p.name, coalesce(o.tag_id,''), coalesce(m.tag_option_id,'') FROM property p
+		LEFT JOIN zoho_map_property m ON m.property_id=p.id LEFT JOIN zoho_tag_option o ON o.option_id=m.tag_option_id WHERE p.id=$1`, propertyID).Scan(&j.Property, &j.tagID, &j.optionID); err != nil {
 		return nil, err
 	}
 	_ = qq.QueryRow(ctx, `SELECT count(*) FROM document WHERE is_transfer AND status='WH_DONE' AND property_id=$1 AND transfer_received_at >= $2 AND transfer_received_at < $3`, propertyID, month, end).Scan(&j.Transfers)
