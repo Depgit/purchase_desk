@@ -232,8 +232,9 @@ Routes are in `app/App.tsx`. The left menu, top bar, badges and search are in `l
 - Learned live:
   - `has_more_page` on the chart of accounts is wrong, so the client reads pages until one is empty.
   - `/settings/tags` is retired; use `/reportingtags` with the key `tags`.
+  - Contacts: send `contact_type=vendor` alone. Adding `filter_by=Status.All` makes Zoho return customers too (10,382 contacts instead of 962 vendors). `Vendors()` also skips any non-vendor contact.
   - Taxes come as `tax_group` (intra) and `tax` igst (inter).
-- The test org "Suraj Testing" has no reporting tag and no `cf_purchase_desk_id` yet.
+- The test org had no reporting tag at first; on 8 Oct 2026 it showed 6 reporting tags, 6 locations, 575 accounts, 124 taxes and 962 vendors. Check `cf_purchase_desk_id` before switching pushing on.
 - MSG91 WhatsApp template names: `pd_ok`, `pd_mod`, `pd_ret`, `pd_rej`, `pd_dlv`, `pd_vsw`. Parameters follow the placeholder order of the app's message template.
 
 ## Code patterns

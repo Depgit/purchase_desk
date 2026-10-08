@@ -28,6 +28,7 @@ Every folder does one job and its name says which. Backend packages live in `bac
 - **Docs.** `README.md`, `CLAUDE.md`, `docs/ZOHO_API.md`, `scripts/zoho-readonly-check.sh`, `.env.example`.
 
 **Final checks on 2026-10-08:**
+
 - `gofmt` is clean, and `go vet` and `go build` pass. `tsc -b` and `vite build` pass.
 - The API end-to-end flows pass: the purchase cycle, bills, warehouse, corporate, vendor sheets, all 14 reports and the dashboards.
 - A headless Chrome visit to all 33 screens as admin found no errors.

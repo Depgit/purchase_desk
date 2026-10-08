@@ -37,7 +37,7 @@ H="Authorization: Zoho-oauthtoken $AT"
 | 4 | Taxes and tax groups (CGST+SGST groups, IGST) | `GET /settings/taxes` | `Taxes` |
 | 5 | Reporting tags | `GET /reportingtags` (list under key `tags`) | `ReportingTags` |
 | 6 | Locations (optional branches with GSTIN) | `GET /locations` | `Locations` |
-| 7 | Vendor contacts, every page | `GET /contacts?contact_type=vendor&filter_by=Status.All` | `Vendors` |
+| 7 | Vendor contacts, active and inactive, every page | `GET /contacts?contact_type=vendor&page=N&per_page=200` | `Vendors` |
 | 8 | Check the unique bill custom field exists | `GET /settings/customfields?entity=bill` | `BillCustomFields` |
 | 9 | Bills changed since the last check, for payment read-back | `GET /bills?last_modified_time=2026-10-01T00:00:00+0530` | `ChangedBills` |
 | 10 | One bill: status, balance | `GET /bills/{bill_id}` | `GetBill` |
@@ -51,7 +51,7 @@ curl -s "$B/chartofaccounts?$O&filter_by=AccountType.All&per_page=200&page=1" -H
 curl -s "$B/settings/taxes?$O" -H "$H"
 curl -s "$B/reportingtags?$O" -H "$H"
 curl -s "$B/locations?$O" -H "$H"
-curl -s "$B/contacts?$O&contact_type=vendor&filter_by=Status.All&per_page=200&page=1" -H "$H"
+curl -s "$B/contacts?$O&contact_type=vendor&per_page=200&page=1" -H "$H"   # one page of 200; add &page=2, 3 ... for the rest
 curl -s "$B/settings/customfields?$O&entity=bill" -H "$H"
 curl -s -G "$B/bills" --data-urlencode "$O" --data-urlencode "last_modified_time=2026-10-01T00:00:00+0530" -H "$H"
 curl -s "$B/bills/<bill_id>?$O" -H "$H"
@@ -62,6 +62,8 @@ curl -s -G "$B/bills" --data-urlencode "$O" --data-urlencode "vendor_id=<contact
 
 Things learned while testing:
 - On the chart of accounts, `has_more_page` is not reliable: page 1 said `false`, but pages 2 and 3 had data. The app reads pages until one comes back empty.
+- On contacts, do not add `filter_by=Status.All` to `contact_type=vendor`: Zoho then drops the vendor filter and returns customers too (10,382 contacts instead of 962 vendors on 8 October 2026). `contact_type=vendor` alone already includes inactive vendors.
+- Every list returns at most 200 rows per call. A curl with `page=1` shows only the first 200; the app reads page after page until one comes back empty.
 - `GET /settings/tags` is retired ("This API is no longer available"). Reporting tags are at `GET /reportingtags`, under the key `tags`.
 - Taxes come back as `tax_group` with `tax_specification: intra` (GST5, GST12, ...) and as `tax` with `tax_specific_type: igst` and `tax_specification: inter` (IGST5, ...). The Taxes tab maps them the same way.
 

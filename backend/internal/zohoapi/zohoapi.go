@@ -402,14 +402,21 @@ type Contact struct {
 	GSTTreatment string `json:"gst_treatment"`
 	Place        string `json:"place_of_contact"`
 	Status       string `json:"status"`
+	ContactType  string `json:"contact_type"`
 }
 
+// Vendors reads every vendor contact, active and inactive. Only contact_type=vendor is sent: adding
+// filter_by=Status.All makes Zoho drop the vendor filter and return customers too (seen live on 8 Oct 2026:
+// 10,382 contacts instead of 962 vendors). Customers are skipped here as well, in case Zoho sends any.
 func (c *Client) Vendors(ctx context.Context) ([]Contact, error) {
 	out := []Contact{}
-	err := c.ListAll(ctx, "/contacts", "contacts", url.Values{"contact_type": {"vendor"}, "filter_by": {"Status.All"}}, func(raw json.RawMessage) error {
+	err := c.ListAll(ctx, "/contacts", "contacts", url.Values{"contact_type": {"vendor"}}, func(raw json.RawMessage) error {
 		var x Contact
 		if err := json.Unmarshal(raw, &x); err != nil {
 			return err
+		}
+		if x.ContactType != "" && x.ContactType != "vendor" {
+			return nil
 		}
 		out = append(out, x)
 		return nil

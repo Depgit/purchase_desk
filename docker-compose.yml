@@ -7,7 +7,7 @@ services:
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-purchasedesk}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
-      POSTGRES_DB: ${POSTGRES_DB:-purchasedesk}
+      POSTGRES_DB: ${POSTGRES_DB:-purchasedeskProd}
       TZ: Asia/Kolkata
     volumes:
       - pgdata:/var/lib/postgresql/data
@@ -24,7 +24,7 @@ services:
     restart: unless-stopped
     env_file: .env
     environment:
-      DATABASE_URL: postgres://${POSTGRES_USER:-purchasedesk}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-purchasedesk}?sslmode=disable
+      DATABASE_URL: postgres://${POSTGRES_USER:-purchasedesk}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-purchasedeskProd}?sslmode=disable
       STORAGE_LOCAL_DIR: /data/files
     volumes:
       - files:/data/files
