@@ -20,6 +20,7 @@ import (
 	"purchasedesk/internal/auditlog"
 	"purchasedesk/internal/encryption"
 	"purchasedesk/internal/httpjson"
+	"purchasedesk/internal/indiantax"
 	"purchasedesk/internal/money"
 	"purchasedesk/internal/textclean"
 	"purchasedesk/internal/zohoapi"
@@ -581,6 +582,16 @@ func (s *Service) lists(w http.ResponseWriter, r *http.Request) error {
 	cons, err := collect(s.DB.Query(ctx, `SELECT contact_id, name, '', gst_treatment, 0::numeric, state_code, gst_no, active, '' FROM zoho_contact ORDER BY name`))
 	if err != nil {
 		return err
+	}
+	// Each location carries the reporting tag of its region: the tag with the location's name ("Delhi") or its
+	// state's name ("Bangalore" is in KA, so "Karnataka"). The Properties tab then offers only that tag's options.
+	for i := range locs {
+		for _, t := range tags {
+			if t.Active && (textclean.Key(t.Name) == textclean.Key(locs[i].Name) || textclean.Key(t.Name) == textclean.Key(indiantax.StateName(locs[i].Spec))) {
+				locs[i].TagID = t.ID
+				break
+			}
+		}
 	}
 	return httpjson.OK(w, map[string]any{"accounts": acc, "taxes": tax, "tags": tags, "tag_options": opts, "locations": locs, "contacts": cons})
 }

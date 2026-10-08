@@ -35,6 +35,18 @@ var stateByGSTCode = map[string]string{
 	"30": "GA", "31": "LD", "32": "KL", "33": "TN", "34": "PY", "35": "AN", "36": "TS", "37": "AP", "38": "LA",
 }
 
+var stateNames = map[string]string{
+	"JK": "Jammu and Kashmir", "HP": "Himachal Pradesh", "PB": "Punjab", "CH": "Chandigarh", "UK": "Uttarakhand", "HR": "Haryana",
+	"DL": "Delhi", "RJ": "Rajasthan", "UP": "Uttar Pradesh", "BR": "Bihar", "SK": "Sikkim", "AR": "Arunachal Pradesh",
+	"NL": "Nagaland", "MN": "Manipur", "MZ": "Mizoram", "TR": "Tripura", "ML": "Meghalaya", "AS": "Assam", "WB": "West Bengal",
+	"JH": "Jharkhand", "OD": "Odisha", "CG": "Chhattisgarh", "MP": "Madhya Pradesh", "GJ": "Gujarat", "DN": "Dadra and Nagar Haveli and Daman and Diu",
+	"MH": "Maharashtra", "KA": "Karnataka", "GA": "Goa", "LD": "Lakshadweep", "KL": "Kerala", "TN": "Tamil Nadu", "PY": "Puducherry",
+	"AN": "Andaman and Nicobar Islands", "TS": "Telangana", "AP": "Andhra Pradesh", "LA": "Ladakh",
+}
+
+// StateName returns the state's name for a two-letter state code, for example "KA" gives "Karnataka".
+func StateName(code string) string { return stateNames[code] }
+
 // StateFromGSTIN returns the two-letter state code from the first two digits of a GSTIN.
 func StateFromGSTIN(g string) string {
 	if len(g) < 2 {

@@ -146,6 +146,14 @@ function Properties({ m, lists, onDone }: { m: Maps; lists: Lists; onDone: () =>
   // A property may map to an option of any reporting tag, for example one tag per region; the bill carries that option's tag.
   const tags = lists.tags.filter((t) => t.active && lists.tag_options.some((o) => o.tag_id === t.id && o.active))
   const canCreate = !!conn.data?.property_tag_id && !!conn.data?.push_enabled
+  // With a Zoho location chosen, only the reporting tag of that location's region is offered (Delhi location: Delhi options).
+  // Without a location, or when no tag matches the location, every tag is offered. The current option always stays visible.
+  const regionTag = (p: { location_id: string }) => lists.locations.find((l) => l.id === p.location_id)?.tag_id || ''
+  const tagsFor = (p: { location_id: string; tag_option_id: string }) => {
+    const only = regionTag(p)
+    const cur = lists.tag_options.find((o) => o.id === p.tag_option_id)?.tag_id
+    return only ? tags.filter((t) => t.id === only || t.id === cur) : tags
+  }
   const rows = m.properties.filter((p) => !gap || !p.tag_option_id)
   return (
     <>
@@ -156,7 +164,7 @@ function Properties({ m, lists, onDone }: { m: Maps; lists: Lists; onDone: () =>
       <Errors list={a.errors} />
       <section className="card flush"><div className="scroll"><table><thead><tr><th>Property</th><th>Cluster</th><th>State</th><th>Reporting tag option</th><th>Zoho location (optional)</th></tr></thead>
         <tbody>{rows.map((p) => <tr key={p.property_id}><td className="id">{p.name}<br /><span className="hint">{p.code}</span></td><td>{p.cluster}</td><td>{p.state_code}</td>
-          <td><select disabled={!m.can_edit} value={p.tag_option_id} onChange={(e) => save('property_tag', String(p.property_id), e.target.value)}><option value="">Not mapped</option>{tags.map((t) => <optgroup key={t.id} label={t.name}>{lists.tag_options.filter((o) => o.tag_id === t.id && (o.active || o.id === p.tag_option_id)).map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}</optgroup>)}</select>
+          <td><select disabled={!m.can_edit} value={p.tag_option_id} onChange={(e) => save('property_tag', String(p.property_id), e.target.value)}><option value="">Not mapped</option>{tagsFor(p).map((t) => <optgroup key={t.id} label={t.name}>{lists.tag_options.filter((o) => o.tag_id === t.id && (o.active || o.id === p.tag_option_id)).map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}</optgroup>)}</select>
             {!p.tag_option_id && <> <Pill tone="bad">Bills held</Pill>{m.can_edit && canCreate && <> <button className="link" onClick={() => a.run(() => post(`/zoho/properties/${p.property_id}/create-option`), (r: any) => { onDone(); return r.message })}>Create in Zoho</button></>}</>}
             {p.shared_with > 0 && <> <Pill tone="warn">Shared with {p.shared_with} other</Pill></>}</td>
           <td><select disabled={!m.can_edit} value={p.location_id} onChange={(e) => save('property_location', String(p.property_id), e.target.value)}><option value="">None</option>{lists.locations.filter((l) => l.active).map((l) => <option key={l.id} value={l.id}>{l.name}{l.extra ? ` (${l.extra})` : ''}</option>)}</select></td></tr>)}</tbody></table></div></section>
