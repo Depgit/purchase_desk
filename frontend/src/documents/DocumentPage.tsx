@@ -1,0 +1,250 @@
+// One purchase request or bill: where it stands, what was asked and changed, and the next action for the signed-in user.
+import { useState } from 'react'
+import { Link, useNavigate, useParams } from 'react-router-dom'
+import { fileUrl, post } from '../api/client'
+import { useApi } from '../api/useApi'
+import type { Doc, Invoice } from '../api/types'
+import { ReasonModal, type ReasonKind } from '../approvals/ReasonModal'
+import { useSession } from '../auth/session'
+import { dateTime, day, inr, month, qty } from '../format/format'
+import { ReceivePanel } from '../goodsreceipts/ReceivePanel'
+import { IssuePOPanel } from '../purchaseorders/IssuePOPanel'
+import { Errors } from '../ui/Errors'
+import { Modal } from '../ui/Modal'
+import { Pill, statusTone } from '../ui/Pill'
+import { useAction } from '../ui/useAction'
+import { BudgetBox } from './BudgetBox'
+import { DispatchPanel } from '../warehouse/DispatchPanel'
+import { PHASE, usePhase } from '../releasephase/phase'
+import { ReceiveTransferPanel } from '../warehouse/ReceiveTransferPanel'
+
+interface Detail {
+  document: Doc
+  log: { at: string; user: string; role: string; action: string; note: string }[]
+  receipts: { id: number; number: string; delivery_no: number; received_by: string; received_at: string; photo_file_ids: number[]; voided: boolean; void_reason: string; invoice_id: number | null; lines: { line_id: number; qty: number }[] }[]
+  actions: string[]
+}
+
+function stepper(d: Doc, invoices: Invoice[]) {
+  const names = d.kind === 'bill' ? ['Bill', 'Approval', 'Payment', 'Paid'] : d.is_transfer ? ['Request', 'Approval', 'Transfer order', 'Dispatch', 'Receipt'] : ['Request', 'Approval', 'PO', 'Receipt', 'Match', 'Payment']
+  let st = 1
+  const stop = ['REJECTED', 'CANCELLED', 'WH_BACK'].includes(d.status)
+  if (d.kind === 'bill') st = d.status === 'CLOSED' ? 4 : d.status === 'APPROVED' ? 2 : 1
+  else if (d.is_transfer) st = { PO_ISSUED: 3, WH_SENT: 4, WH_DONE: 5 }[d.status] ?? 1
+  else {
+    if (d.status === 'APPROVED') st = 2
+    if (d.status === 'PO_ISSUED') st = invoices.length ? 4 : 3
+    if (d.status === 'RECEIVED') st = invoices.every((i) => !['RECEIVED'].includes(i.status)) ? 5 : 4
+    if (d.status === 'CLOSED') st = 6
+  }
+  return <div className="steps">{names.map((n, i) => <div key={n} className={i < st ? 'done' : i === st ? (stop ? 'stop' : 'now') : ''}>{n}</div>)}</div>
+}
+
+export function DocumentPage() {
+  const { id } = useParams()
+  const phase = usePhase()
+  const zoho = phase.on(PHASE.zoho)
+  const nav = useNavigate()
+  const { data, reload, error } = useApi<Detail>(`/documents/${id}`)
+  const inv = useApi<Invoice[]>(`/invoices?document_id=${id}`)
+  const refresh = () => { reload(); inv.reload() }
+  if (error) return <p className="note bad">{error.message}</p>
+  if (!data) return <p className="sub">Loading…</p>
+  const d = data.document
+  const bill = d.kind === 'bill' || d.kind === 'corp_bill'
+  const corp = d.kind === 'corp_purchase' || d.kind === 'corp_bill'
+  const live = d.lines.filter((l) => l.qty > 0 || l.original_qty)
+  const hasRcv = d.lines.some((l) => l.received_qty > 0)
+  return (
+    <>
+      <div className="head">
+        <div><button className="link" onClick={() => nav(-1)}>‹ Back</button>
+          <h1>{d.po_number || d.number}</h1>
+          <p className="sub">{d.po_number ? d.number + ' · ' : ''}raised {day(d.created_at)} by {d.requester}</p></div>
+        <Pill tone={statusTone(d.status)}>{d.status_label}</Pill>
+      </div>
+      {stepper(d, inv.data || [])}
+      {d.modified_note && <p className="note warn"><b>Quantity changed by {d.modified_by}{d.modified_at ? ' on ' + day(d.modified_at) : ''}.</b> {d.modified_note}</p>}
+      {d.event_reason && <p className="note"><b>Extra quantity for an event:</b> {d.event_reason} · {d.event_note}{d.cm_approved_at ? ' · approved by the Cluster Manager on ' + day(d.cm_approved_at) : ''}</p>}
+      {d.routed_reason && <p className="note"><b>Sent to the Cluster Manager by the Cost Controller:</b> {d.routed_reason}{d.routed_note ? ' · ' + d.routed_note : ''}</p>}
+      {d.property_kind !== 'live' && d.status === 'PENDING' && <p className="note"><b>{d.property_kind === 'preopening' ? 'Pre-opening property order' : 'Warehouse stock order'}.</b> Waiting for {d.preop_user || 'the Pre-opening Team'}.</p>}
+      {d.status === 'RETURNED' && <p className="note warn"><b>Returned:</b> {d.return_reason}{d.return_note ? ' · ' + d.return_note : ''}</p>}
+      {d.status === 'REJECTED' && <p className="note bad"><b>Rejected:</b> {d.return_reason}{d.return_note ? ' · ' + d.return_note : ''}</p>}
+      {d.bill_flags?.map((f) => <p key={f} className="note warn">{f}</p>)}
+      {d.is_transfer && ['PO_ISSUED', 'WH_SENT'].includes(d.status) && (d.delivery
+        ? <p className={'note ' + (d.status === 'WH_SENT' ? 'ok' : '')}><b>{d.status === 'WH_SENT' ? 'On the way' : 'Delivery scheduled'}{d.delivery.version > 1 ? ' (rescheduled)' : ''}:</b> {day(d.delivery.date)}, {d.delivery.slot} · {d.delivery.partner}{d.delivery.vehicle ? ' · vehicle ' + d.delivery.vehicle : ''} · {d.delivery.driver}, {d.delivery.phone}{d.delivery.note ? ' · ' + d.delivery.note : ''}</p>
+        : d.wait_until ? <p className="note warn"><b>The warehouse is waiting for stock.</b> Expected by {day(d.wait_until)}{d.wait_note ? ' · ' + d.wait_note : ''}.</p>
+        : <p className="note">The warehouse has this order and has not scheduled the delivery yet.</p>)}
+      {d.status === 'WH_BACK' && <p className="note bad"><b>The warehouse could not supply this order:</b> {d.return_reason}{d.return_note ? ' · ' + d.return_note : ''}. The budget is released. Raise it again when stock is back, or ask Purchase to change the mapping.</p>}
+      <div className="cols">
+        <div className="stack">
+          <ActionPanel detail={data} onDone={refresh} />
+          {d.kind === 'corp_bill' ? (
+            <section className="card"><h2>Corporate bill</h2>
+              <dl className="kv"><dt>Department</dt><dd>{d.department}</dd><dt>Expense head</dt><dd>{d.expense_head}</dd><dt>Amount incl. GST</dt><dd>{inr(d.total)}</dd>{d.remark && <><dt>Why</dt><dd>{d.remark}</dd></>}</dl>
+            </section>
+          ) : bill ? (
+            <section className="card"><h2>Bill details</h2>
+              <dl className="kv">
+                <dt>Type</dt><dd>{d.bill_section === 'amc' ? 'Maintenance AMC' : 'Utility bill'} · {d.bill_type}</dd>
+                <dt>Period</dt><dd>{month(d.period_start)}{d.months > 1 ? ` for ${d.months} months` : ''}</dd>
+                <dt>Amount incl. GST</dt><dd className="num">{inr(d.total)}</dd>
+                {d.previous_bill != null && <><dt>Previous bill</dt><dd>{inr(d.previous_bill)}</dd></>}
+                {d.remark && <><dt>Remark</dt><dd>{d.remark}</dd></>}
+              </dl>
+            </section>
+          ) : (
+            <section className="card flush"><h2>Items</h2>
+              <div className="scroll"><table>
+                <thead><tr><th>Item</th><th>Sub-category</th><th className="r">Qty</th>{hasRcv && <th className="r">Received</th>}<th className="r">Rate</th><th className="r">GST</th><th className="r">Amount</th></tr></thead>
+                <tbody>{live.map((l) => (
+                  <tr key={l.id} className={l.qty === 0 ? 'dim' : ''}>
+                    <td>{l.brand} {l.item_name}<br /><span className="hint">{l.sku_code ? l.sku_code + ' · ' : ''}{l.pack_size}</span></td><td>{l.sub_category}</td>
+                    <td className="r">{qty(l.qty)}{l.original_qty != null && l.original_qty !== l.qty && <> <s className="sub">{qty(l.original_qty)}</s></>}</td>
+                    {hasRcv && <td className="r">{qty(l.received_qty)}</td>}
+                    <td className="r">{inr(l.rate)}{l.estimated && !d.po_number ? <> <Pill tone="warn">est.</Pill></> : null}</td><td className="r">{l.gst_pct}%</td><td className="r">{inr(l.value)}</td></tr>))}
+                  <tr className="sum"><td colSpan={hasRcv ? 6 : 5}>Total incl. GST</td><td className="r">{inr(d.total)}</td></tr>
+                </tbody>
+              </table></div>
+            </section>
+          )}
+          {(inv.data || []).length > 0 && (
+            <section className="card flush"><h2>Invoices</h2>
+              <div className="scroll"><table>
+                <thead><tr><th>Invoice</th><th>Delivery</th><th className="r">Amount</th><th>Status</th>{zoho && <th>Zoho</th>}<th></th></tr></thead>
+                <tbody>{inv.data!.map((i) => (
+                  <tr key={i.id}><td className="id">{i.invoice_number}</td><td>{i.grn_number ? `${i.grn_number} · delivery ${i.delivery_no}` : '—'}</td>
+                    <td className="r">{inr(i.amount)}</td><td><Pill tone={statusTone(i.status)}>{i.status.replace('_', ' ').toLowerCase()}</Pill></td>
+                    {zoho && <td>{i.zoho_bill_id || '—'}</td>}
+                    <td className="r">{i.file_id && <a className="link" href={fileUrl(i.file_id)} target="_blank" rel="noreferrer">File</a>} <Link className="link" to={'/invoices/' + i.id}>Open ›</Link></td></tr>))}
+                </tbody>
+              </table></div>
+            </section>
+          )}
+          {data.receipts.length > 0 && (
+            <section className="card flush"><h2>Goods receipts</h2>
+              <div className="scroll"><table>
+                <thead><tr><th>Receipt</th><th>Received</th><th>By</th><th>Photos</th></tr></thead>
+                <tbody>{data.receipts.map((g) => (
+                  <tr key={g.id} className={g.voided ? 'dim' : ''}><td className="id">{g.number} · delivery {g.delivery_no}{g.voided && <><br /><Pill tone="bad">Sent back: {g.void_reason}</Pill></>}</td>
+                    <td>{dateTime(g.received_at)}</td><td>{g.received_by}</td>
+                    <td>{g.photo_file_ids.map((f, i) => <a key={f} className="link" href={fileUrl(f)} target="_blank" rel="noreferrer">Photo {i + 1} </a>)}</td></tr>))}
+                </tbody>
+              </table></div>
+            </section>
+          )}
+        </div>
+        <div className="stack">
+          {d.status === 'PENDING' && !bill && phase.on(PHASE.budgets) && <BudgetBox doc={d} />}
+          <section className="card"><h2>Details</h2>
+            <dl className="kv">
+              <dt>Property</dt><dd>{d.property}</dd><dt>Cluster</dt><dd>{d.cluster} · {d.city}</dd>
+              <dt>Vendor</dt><dd>{d.vendor}{d.vendor_msme && <> <Pill tone="warn">MSME</Pill></>}</dd>
+              <dt>GST</dt><dd>{d.vendor_gst_registered ? 'Registered' : 'Unregistered'}</dd>
+              {d.deliver_by && <><dt>Deliver by</dt><dd>{day(d.deliver_by)}</dd></>}
+              {d.payment_terms && <><dt>Terms</dt><dd>{d.payment_terms}</dd></>}
+              {d.route_steps.length > 0 && <><dt>Approval route</dt><dd>{d.route_steps.map((s) => ({ l2: 'Cluster Manager', cc: 'Cost Controller', preop: 'Pre-opening Team', cl1: 'L1 ' + d.corp_l1, cl2: 'L2 ' + d.corp_l2 } as Record<string, string>)[s] || s).join(' → ')}</dd></>}
+              {corp && <><dt>Department</dt><dd>{d.department}</dd>{d.corp_backup && <><dt>Backup approver</dt><dd>{d.corp_backup}</dd></>}{d.kind === 'corp_purchase' && d.remark && <><dt>Why</dt><dd>{d.remark}</dd></>}
+                {d.quote_file_id && <><dt>Quotation</dt><dd><a className="link" href={fileUrl(d.quote_file_id)} target="_blank" rel="noreferrer">Open</a></dd></>}</>}
+            </dl>
+          </section>
+          <section className="card"><h2>History</h2>
+            <ul className="log">{data.log.map((l, i) => <li key={i}><b>{l.action}</b><span>{l.user} ({l.role}) · {dateTime(l.at)}</span>{l.note && <><br />“{l.note}”</>}</li>)}</ul>
+          </section>
+        </div>
+      </div>
+    </>
+  )
+}
+
+function ActionPanel({ detail, onDone }: { detail: Detail; onDone: () => void }) {
+  const d = detail.document
+  const acts = detail.actions
+  if (acts.includes('approve')) return <ApprovePanel doc={d} canRoute={acts.includes('route')} canPreop={acts.includes('preop_approver')} onDone={onDone} />
+  if (acts.includes('resubmit')) return <ResubmitPanel doc={d} onDone={onDone} />
+  if (acts.includes('issue_po')) return <IssuePOPanel doc={d} onDone={onDone} />
+  if (acts.includes('receive')) return <ReceivePanel doc={d} onDone={onDone} />
+  if (acts.includes('dispatch')) return <DispatchPanel doc={d} onDone={onDone} />
+  if (acts.includes('receive_transfer')) return <ReceiveTransferPanel doc={d} onDone={onDone} />
+  const owner = d.owner_name
+  if (!owner) return null
+  return <p className="note">Next step is with the <b>{owner}</b>.</p>
+}
+
+function ApprovePanel({ doc, canRoute, canPreop, onDone }: { doc: Doc; canRoute: boolean; canPreop: boolean; onDone: () => void }) {
+  const { me } = useSession()
+  const [q, setQ] = useState<Record<number, string>>(Object.fromEntries(doc.lines.map((l) => [l.id, String(l.qty)])))
+  const [note, setNote] = useState('')
+  const [reason, setReason] = useState<ReasonKind | null>(null)
+  const [preop, setPreop] = useState(false)
+  const a = useAction()
+  const changed = Object.fromEntries(doc.lines.filter((l) => +q[l.id] !== l.qty).map((l) => [l.id, +q[l.id] || 0]))
+  return (
+    <section className="card act">
+      <h2>{me?.is_admin ? `Decision (acting for the ${doc.owner_name})` : 'Your decision'}</h2>
+      {doc.kind === 'purchase' && <>
+        <div className="grid2">{doc.lines.map((l) => (
+          <label className="field" key={l.id}><span>{l.item_name} ({l.pack_size})</span>
+            <input type="number" min="0" inputMode="decimal" value={q[l.id]} onChange={(e) => setQ({ ...q, [l.id]: e.target.value })} /></label>))}
+        </div>
+        <p className="hint">Change a quantity before approving, or set it to 0 to drop that item. The requester sees what changed and by whom.</p>
+      </>}
+      <label className="field"><span>Remark (optional)</span><textarea value={note} onChange={(e) => setNote(e.target.value)} /></label>
+      <Errors list={a.errors} />
+      <div className="btns">
+        {canPreop && <button className="btn ghost" onClick={() => setPreop(true)}>Change approver</button>}
+        <button className="btn no" onClick={() => setReason('reject')}>Reject</button>
+        <button className="btn amber" onClick={() => setReason('return')}>Return for changes</button>
+        {canRoute && <button className="btn ghost" onClick={() => setReason('route')}>Send to Cluster Manager</button>}
+        <button className="btn" disabled={a.busy} onClick={() => a.run(() => post(`/documents/${doc.id}/approve`, { quantities: changed, note }), (r: any) => { onDone(); return r.message })}>Approve</button>
+      </div>
+      {reason && <ReasonModal kind={reason} count={1} busy={a.busy} errors={a.errors} onClose={() => setReason(null)}
+        onConfirm={(r, n) => a.run(() => post(`/documents/${doc.id}/${reason}`, { reason: r, note: n, quantities: reason === 'route' ? changed : undefined }), (x: any) => { setReason(null); onDone(); return x.message })} />}
+      {preop && <PreopModal doc={doc} onClose={() => setPreop(false)} onDone={() => { setPreop(false); onDone() }} />}
+    </section>
+  )
+}
+
+function PreopModal({ doc, onClose, onDone }: { doc: Doc; onClose: () => void; onDone: () => void }) {
+  const { data } = useApi<{ preop_members: { id: number; name: string }[] }>(`/requests/form?property_id=${doc.property_id}`)
+  const [uid, setUid] = useState<number>(doc.preop_user_id || 0)
+  const a = useAction()
+  return (
+    <Modal title={`Pre-opening approver for ${doc.number}`} onClose={onClose}>
+      <label className="field"><span>Pre-opening team member</span>
+        <select value={uid} onChange={(e) => setUid(+e.target.value)}><option value={0}>Choose</option>{data?.preop_members.map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}</select></label>
+      <Errors list={a.errors} />
+      <div className="btns"><button className="btn ghost" onClick={onClose}>Cancel</button>
+        <button className="btn" disabled={!uid || a.busy} onClick={() => a.run(() => post(`/documents/${doc.id}/preop-approver`, { user_id: uid }), (r: any) => { onDone(); return r.message })}>Save</button></div>
+    </Modal>
+  )
+}
+
+function ResubmitPanel({ doc, onDone }: { doc: Doc; onDone: () => void }) {
+  const [q, setQ] = useState<Record<number, string>>(Object.fromEntries(doc.lines.map((l) => [l.id, String(l.qty)])))
+  const [invNo, setInvNo] = useState('')
+  const [amt, setAmt] = useState(String(doc.total || ''))
+  const a = useAction()
+  return (
+    <section className="card act">
+      <h2>Change and resubmit</h2>
+      {doc.kind === 'bill' ? (
+        <div className="grid2">
+          <label className="field"><span>Invoice number</span><input value={invNo} onChange={(e) => setInvNo(e.target.value)} placeholder="Enter again, corrected if needed" /></label>
+          <label className="field"><span>Invoice amount incl. GST (₹)</span><input type="number" value={amt} onChange={(e) => setAmt(e.target.value)} /></label>
+        </div>
+      ) : (
+        <div className="grid2">{doc.lines.map((l) => (
+          <label className="field" key={l.id}><span>Quantity of {l.item_name}</span>
+            <input type="number" min="0" value={q[l.id]} onChange={(e) => setQ({ ...q, [l.id]: e.target.value })} /></label>))}</div>
+      )}
+      <Errors list={a.errors} />
+      <div className="btns">
+        <button className="btn no" disabled={a.busy} onClick={() => a.run(() => post(`/documents/${doc.id}/cancel`), (r: any) => { onDone(); return r.message })}>Cancel request</button>
+        <button className="btn" disabled={a.busy} onClick={() => a.run(() => post(`/documents/${doc.id}/resubmit`, {
+          quantities: Object.fromEntries(Object.entries(q).map(([k, v]) => [k, +v || 0])), invoice_number: invNo, invoice_amount: +amt,
+        }), (r: any) => { onDone(); return r.message })}>Resubmit</button>
+      </div>
+    </section>
+  )
+}
