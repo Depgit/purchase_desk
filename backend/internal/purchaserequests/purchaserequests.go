@@ -55,8 +55,18 @@ func raiseGrant(u *access.User, propKind string, propID, clusterID int64, cats [
 		if g == nil {
 			continue
 		}
-		if (propKind == "warehouse" || propKind == "preopening") != (step == "wh") {
-			continue // the Warehouse Manager raises for the warehouse and pre-opening properties; others for live properties
+		// The warehouse is the Warehouse Manager's alone. A pre-opening property is open to the Warehouse Manager and to
+		// anyone whose role is assigned to it. Live properties are raised for by property staff, managers and Purchase.
+		switch propKind {
+		case "warehouse":
+			if step != "wh" {
+				continue
+			}
+		case "preopening":
+		default:
+			if step == "wh" {
+				continue
+			}
 		}
 		return g
 	}

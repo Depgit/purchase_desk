@@ -44,6 +44,8 @@ func (s *Service) Routes(r chi.Router) {
 	r.Post("/zoho/sync", httpjson.Wrap(s.syncNow))
 	r.Get("/zoho/lists", httpjson.Wrap(s.lists))
 	r.Get("/zoho/items", httpjson.Wrap(s.items))
+	r.Post("/zoho/accounts/match", httpjson.Wrap(s.matchByName("accounts")))
+	r.Post("/zoho/items/match", httpjson.Wrap(s.matchByName("items")))
 	r.Get("/zoho/mappings", httpjson.Wrap(s.mappings))
 	r.Put("/zoho/mappings", httpjson.Wrap(s.setMapping))
 	r.Post("/zoho/properties/match", httpjson.Wrap(s.matchProperties))
@@ -355,6 +357,7 @@ type SyncResult struct {
 	New                                              []string
 	VendorsLinked, PropertiesLinked                  int
 	Items                                            int
+	AccountsLinked, ItemsLinked                      int
 	ItemsError                                       string // set when Zoho refused the item list; the rest of the sync still ran
 }
 
@@ -493,6 +496,12 @@ func (s *Service) Sync(ctx context.Context) (*SyncResult, error) {
 		if res.VendorsLinked, err = autoLinkVendors(ctx, tx); err != nil {
 			return err
 		}
+		if res.AccountsLinked, err = autoLinkAccounts(ctx, tx); err != nil {
+			return err
+		}
+		if res.ItemsLinked, err = autoLinkItems(ctx, tx); err != nil {
+			return err
+		}
 		if res.PropertiesLinked, err = autoLinkProperties(ctx, tx); err != nil {
 			return err
 		}
@@ -550,8 +559,8 @@ func (s *Service) syncNow(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return httpjson.Bad("Sync failed: %v", err)
 	}
-	msg := fmt.Sprintf("Synced: %d accounts, %d taxes, %d tag options, %d locations, %d vendor contacts, %d items. Linked automatically: %d vendors, %d properties.",
-		res.Accounts, res.Taxes, res.TagOptions, res.Locations, res.Contacts, res.Items, res.VendorsLinked, res.PropertiesLinked)
+	msg := fmt.Sprintf("Synced: %d accounts, %d taxes, %d tag options, %d locations, %d vendor contacts, %d items. Linked automatically: %d vendors, %d properties, %d accounts, %d items.",
+		res.Accounts, res.Taxes, res.TagOptions, res.Locations, res.Contacts, res.Items, res.VendorsLinked, res.PropertiesLinked, res.AccountsLinked, res.ItemsLinked)
 	if res.ItemsError != "" {
 		msg += " Items were not read: " + res.ItemsError + "."
 	}
@@ -740,11 +749,25 @@ func (s *Service) mappings(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
-	return httpjson.OK(w, map[string]any{"properties": props, "sub_categories": subs, "bill_types": bts, "expense_heads": heads, "special": spec, "taxes": taxes, "vendors": vendors, "can_edit": canMap(access.From(r))})
+	irows, err := s.DB.Query(ctx, `SELECT k.id, k.code, concat_ws(' ', b.name, k.item_name)||' · '||ps.name, sc.name, k.hsn,
+		coalesce(m.item_id,''), coalesce(zi.name,''), coalesce(zi.active,false), coalesce(m.how,'')
+		FROM sku k LEFT JOIN brand b ON b.id=k.brand_id JOIN pack_size ps ON ps.id=k.pack_size_id JOIN sub_category sc ON sc.id=k.sub_category_id
+		LEFT JOIN zoho_map_item m ON m.sku_id=k.id LEFT JOIN zoho_item zi ON zi.item_id=m.item_id WHERE k.active ORDER BY k.code`)
+	if err != nil {
+		return err
+	}
+	itemMaps, err := pgx.CollectRows(irows, func(row pgx.CollectableRow) (itemMap, error) {
+		var x itemMap
+		return x, row.Scan(&x.SKUID, &x.Code, &x.Name, &x.SubCategory, &x.HSN, &x.ItemID, &x.ItemName, &x.ItemOK, &x.How)
+	})
+	if err != nil {
+		return err
+	}
+	return httpjson.OK(w, map[string]any{"properties": props, "sub_categories": subs, "bill_types": bts, "expense_heads": heads, "special": spec, "taxes": taxes, "vendors": vendors, "items": itemMaps, "can_edit": canMap(access.From(r))})
 }
 
 type mapIn struct {
-	Kind  string `json:"kind"` // property_tag, property_location, subcat, billtype, special, head, tax
+	Kind  string `json:"kind"` // property_tag, property_location, subcat, billtype, special, head, tax, item
 	Key   string `json:"key"`
 	Value string `json:"value"` // empty clears
 }
@@ -793,6 +816,18 @@ func (s *Service) setMapping(w http.ResponseWriter, r *http.Request) error {
 			}
 			_, err = s.DB.Exec(ctx, `INSERT INTO zoho_map_account(kind,ref,account_id,updated_by) VALUES ($1,$2,$3,$4)
 				ON CONFLICT (kind,ref) DO UPDATE SET account_id=EXCLUDED.account_id, updated_by=EXCLUDED.updated_by, updated_at=now()`, in.Kind, in.Key, in.Value, u.ID)
+		}
+	case "item":
+		if in.Value == "" {
+			_, err = s.DB.Exec(ctx, `DELETE FROM zoho_map_item WHERE sku_id=$1::bigint`, in.Key)
+		} else {
+			var ok bool
+			_ = s.DB.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM zoho_item WHERE item_id=$1 AND active)`, in.Value).Scan(&ok)
+			if !ok {
+				return httpjson.Bad("This item is not active in Zoho. Sync first.")
+			}
+			_, err = s.DB.Exec(ctx, `INSERT INTO zoho_map_item(sku_id,item_id,how,updated_by) VALUES ($1::bigint,$2,'manual',$3)
+				ON CONFLICT (sku_id) DO UPDATE SET item_id=EXCLUDED.item_id, how='manual', updated_by=EXCLUDED.updated_by, updated_at=now()`, in.Key, in.Value, u.ID)
 		}
 	case "tax":
 		parts := strings.Split(in.Key, "|")
@@ -881,14 +916,11 @@ func (s *Service) createTagOption(w http.ResponseWriter, r *http.Request) error 
 }
 
 func (s *Service) createAccount(w http.ResponseWriter, r *http.Request) error {
-	if !s.PushEnabled { // ZOHO_PUSH_ENABLED=false keeps Purchase Desk read-only towards Zoho
-		return httpjson.Bad("Writing to Zoho is switched off on this server (ZOHO_PUSH_ENABLED=false). Create it in Zoho, then click Sync now.")
-	}
 	u := access.From(r)
 	if err := needMap(u); err != nil {
 		return err
 	}
-	var in struct{ Name, Code, Type string }
+	var in struct{ Name, Code, Type, Kind, Ref string } // kind and ref: the mapping row the new account is for
 	if err := httpjson.Decode(r, &in); err != nil {
 		return err
 	}
@@ -896,13 +928,29 @@ func (s *Service) createAccount(w http.ResponseWriter, r *http.Request) error {
 	if len(in.Name) < 3 {
 		return httpjson.Bad("Enter the account name.")
 	}
+	// An account with this name already in Zoho is selected for the row instead of creating a second one.
+	var existing, existingName string
+	_ = s.DB.QueryRow(r.Context(), `SELECT account_id, name FROM zoho_account WHERE active AND norm_key(name)=norm_key($1) LIMIT 1`, in.Name).Scan(&existing, &existingName)
+	if existing != "" {
+		if textclean.Contains([]string{"subcat", "billtype", "special", "head"}, in.Kind) && in.Ref != "" {
+			if _, err := s.DB.Exec(r.Context(), `INSERT INTO zoho_map_account(kind,ref,account_id,updated_by) VALUES ($1,$2,$3,$4)
+				ON CONFLICT (kind,ref) DO UPDATE SET account_id=EXCLUDED.account_id, updated_by=EXCLUDED.updated_by, updated_at=now()`, in.Kind, in.Ref, existing, u.ID); err != nil {
+				return err
+			}
+			_ = auditlog.Write(r.Context(), s.DB, u, "Zoho", "Mapping changed", in.Kind+" "+in.Ref, existingName+" (already in Zoho)")
+		}
+		return httpjson.OK(w, map[string]string{"message": existingName + " already exists in Zoho, so it is selected.", "account_id": existing})
+	}
+	if !s.PushEnabled { // ZOHO_PUSH_ENABLED=false keeps Purchase Desk read-only towards Zoho
+		return httpjson.Bad("Writing to Zoho is switched off on this server (ZOHO_PUSH_ENABLED=false). Create it in Zoho, then click Sync now.")
+	}
 	if !textclean.Contains([]string{"expense", "cost_of_goods_sold", "other_expense", "other_current_asset", "other_asset", "stock"}, in.Type) {
 		return httpjson.Bad("Choose the account type.")
 	}
 	var dup bool
-	_ = s.DB.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM zoho_account WHERE norm_key(name)=norm_key($1) OR ($2<>'' AND code=$2))`, in.Name, in.Code).Scan(&dup)
+	_ = s.DB.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM zoho_account WHERE $1<>'' AND code=$1)`, in.Code).Scan(&dup)
 	if dup {
-		return httpjson.Bad("An account with this name or code already exists in Zoho.")
+		return httpjson.Bad("An account with this code already exists in Zoho.")
 	}
 	c, _, err := s.Client(r.Context())
 	if err != nil {
@@ -914,6 +962,10 @@ func (s *Service) createAccount(w http.ResponseWriter, r *http.Request) error {
 	}
 	if _, err := s.DB.Exec(r.Context(), `INSERT INTO zoho_account(account_id,name,code,account_type,active) VALUES ($1,$2,$3,$4,TRUE) ON CONFLICT DO NOTHING`, a.ID, in.Name, in.Code, in.Type); err != nil {
 		return err
+	}
+	if textclean.Contains([]string{"subcat", "billtype", "special", "head"}, in.Kind) && in.Ref != "" {
+		_, _ = s.DB.Exec(r.Context(), `INSERT INTO zoho_map_account(kind,ref,account_id,updated_by) VALUES ($1,$2,$3,$4)
+			ON CONFLICT (kind,ref) DO UPDATE SET account_id=EXCLUDED.account_id, updated_by=EXCLUDED.updated_by, updated_at=now()`, in.Kind, in.Ref, a.ID, u.ID)
 	}
 	_ = auditlog.Write(r.Context(), s.DB, u, "Zoho", "Account created in Zoho", in.Name, in.Type)
 	return httpjson.OK(w, map[string]string{"message": in.Name + " created in Zoho.", "account_id": a.ID})
@@ -1071,4 +1123,75 @@ func (s *Service) items(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 	return httpjson.OK(w, out)
+}
+
+// autoLinkAccounts fills unmapped sub-categories, bill types and expense heads with the active expense account
+// of exactly the same name (ignoring case, spaces and punctuation). A name used by two accounts is left for Finance.
+func autoLinkAccounts(ctx context.Context, tx pgx.Tx) (int, error) {
+	ct, err := tx.Exec(ctx, `WITH refs AS (
+			SELECT 'subcat' AS kind, sc.id::text AS ref, sc.name FROM sub_category sc WHERE sc.active
+			UNION ALL SELECT 'billtype', b.id::text, b.name FROM bill_type b WHERE b.active
+			UNION ALL SELECT 'head', h.id::text, h.name FROM expense_head h WHERE h.active),
+		one AS (SELECT norm_key(name) AS k, min(account_id) AS account_id FROM zoho_account
+			WHERE active AND account_type IN ('expense','cost_of_goods_sold','other_expense') GROUP BY norm_key(name) HAVING count(*)=1)
+		INSERT INTO zoho_map_account(kind,ref,account_id)
+		SELECT r.kind, r.ref, one.account_id FROM refs r JOIN one ON one.k=norm_key(r.name)
+		WHERE NOT EXISTS (SELECT 1 FROM zoho_map_account m WHERE m.kind=r.kind AND m.ref=r.ref)`)
+	if err != nil {
+		return 0, err
+	}
+	return int(ct.RowsAffected()), nil
+}
+
+// autoLinkItems links each unmapped active SKU to the active Zoho item of exactly the same name, either the item name
+// alone or brand and item name together. A name used by two Zoho items is left for Finance to pick.
+func autoLinkItems(ctx context.Context, tx pgx.Tx) (int, error) {
+	ct, err := tx.Exec(ctx, `WITH one AS (SELECT norm_key(name) AS k, min(item_id) AS item_id FROM zoho_item WHERE active GROUP BY norm_key(name) HAVING count(*)=1)
+		INSERT INTO zoho_map_item(sku_id,item_id,how)
+		SELECT DISTINCT ON (k.id) k.id, one.item_id, 'name' FROM sku k LEFT JOIN brand b ON b.id=k.brand_id
+		JOIN one ON one.k IN (norm_key(k.item_name), norm_key(coalesce(b.name,'')||k.item_name))
+		WHERE k.active AND NOT EXISTS (SELECT 1 FROM zoho_map_item m WHERE m.sku_id=k.id)
+		ORDER BY k.id, one.item_id`)
+	if err != nil {
+		return 0, err
+	}
+	return int(ct.RowsAffected()), nil
+}
+
+// matchByName runs the name matching for accounts or items on demand ("Match by name" on the tab).
+func (s *Service) matchByName(what string) httpjson.Handler {
+	return func(w http.ResponseWriter, r *http.Request) error {
+		u := access.From(r)
+		if err := needMap(u); err != nil {
+			return err
+		}
+		var n int
+		err := pgx.BeginFunc(r.Context(), s.DB, func(tx pgx.Tx) error {
+			var err error
+			if what == "items" {
+				n, err = autoLinkItems(r.Context(), tx)
+			} else {
+				n, err = autoLinkAccounts(r.Context(), tx)
+			}
+			return err
+		})
+		if err != nil {
+			return err
+		}
+		_ = auditlog.Write(r.Context(), s.DB, u, "Zoho", "Matched by name", what, fmt.Sprintf("%d linked", n))
+		return httpjson.OK(w, map[string]string{"message": fmt.Sprintf("%d %s matched by name. The rest need a choice.", n, what)})
+	}
+}
+
+// itemMap is one Purchase Desk item and the Zoho item it is linked to, for the Items tab.
+type itemMap struct {
+	SKUID       int64  `json:"sku_id"`
+	Code        string `json:"code"`
+	Name        string `json:"name"`
+	SubCategory string `json:"sub_category"`
+	HSN         string `json:"hsn"`
+	ItemID      string `json:"item_id"`
+	ItemName    string `json:"item_name"`
+	ItemOK      bool   `json:"item_active"`
+	How         string `json:"how"`
 }

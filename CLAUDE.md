@@ -242,6 +242,7 @@ Routes are in `app/App.tsx`. The left menu, top bar, badges and search are in `l
   - `/zoho/lists` gives each location the `tag_id` of its region: the tag with the location's name, or its state's name (`indiantax.StateName`; Bangalore KA gives Karnataka, Head Office HR gives Haryana). On the Properties tab a chosen location narrows the option list to that tag; with no location, or no matching tag, every tag is offered.
   - Contacts: send `contact_type=vendor` alone. Adding `filter_by=Status.All` makes Zoho return customers too (10,382 contacts instead of 962 vendors). `Vendors()` also skips any non-vendor contact.
   - Taxes come as `tax_group` (intra) and `tax` igst (inter).
+  - Name matching, on every sync and from "Match by name": `autoLinkAccounts` fills unmapped sub-categories, bill types and expense heads with the one active expense account of the same name; `autoLinkItems` links unmapped SKUs to the one active Zoho item named like the item (or brand + item) via `zoho_map_item`. A name shared by two Zoho records is never guessed. Bill lines send `item_id` for a linked active item. "Create in Zoho" for an account selects an existing account of that name instead of creating it.
 - The test org had no reporting tag at first; on 8 Oct 2026 it showed 6 reporting tags, 6 locations, 575 accounts, 124 taxes and 962 vendors. Check `cf_purchase_desk_id` before switching pushing on.
 - MSG91 WhatsApp template names: `pd_ok`, `pd_mod`, `pd_ret`, `pd_rej`, `pd_dlv`, `pd_vsw`. Parameters follow the placeholder order of the app's message template.
 
@@ -289,7 +290,8 @@ func (s *Service) thing(w http.ResponseWriter, r *http.Request) error {
 - Migrations run once each, recorded in `schema_migrations`. Add `004_*.sql` for schema changes; never edit 001 to 003 once deployed. Demo data changes go in `demodata.go` and need a DB reset.
 - A property's role scope matters. A user can only act on properties inside their grant, so demo scopes were widened where flows cross properties (vikas is `all`).
 - A phase 1 screen must never call a later-phase endpoint: the 404 shows as an error. The shared lookups once did this with `/bill-types`. Check with the headless sweep in phase 1.
-- The `NewRequestPage` property list follows the user's roles. Staff, l1 and purchase see live properties. wh sees warehouse and pre-opening. Corporate is never listed. All of it is limited to the raise scope.
+- The `NewRequestPage` property list follows the user's roles (server: `purchaserequests.raiseGrant`). Live: staff, l1 and purchase. Pre-opening: wh, or staff, l1 and purchase assigned to it. Warehouse: wh only. Corporate is never listed. All of it is limited to the raise scope.
+- The session re-reads `/me` and the shared lookups when the window regains focus (at most every 30 s) and on every sign-in, so role and master changes show without a reload.
 
 ## Open items (waiting on Saltstayz)
 

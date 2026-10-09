@@ -32,11 +32,12 @@ export function NewRequestPage() {
   const nav = useNavigate()
   const l = useLookups()
   const { me, hasStep } = useSession()
-  // The Warehouse Manager raises for the warehouse and pre-opening properties; property staff for live properties in their scope.
+  // Live properties: property staff, managers and Purchase. Pre-opening: the Warehouse Manager or anyone assigned to it.
+  // The warehouse: the Warehouse Manager only. Always limited to the user's raise scope; the server checks the same.
   const props = useMemo(() => (l?.properties || []).filter((p) => {
     if (!p.active || p.kind === 'corporate') return false
     if (me?.is_admin) return true
-    const kindOK = (p.kind === 'live' && hasStep('staff', 'l1', 'purchase')) || ((p.kind === 'warehouse' || p.kind === 'preopening') && hasStep('wh'))
+    const kindOK = p.kind === 'warehouse' ? hasStep('wh') : p.kind === 'preopening' ? hasStep('wh', 'staff', 'l1', 'purchase') : hasStep('staff', 'l1', 'purchase')
     const inScope = me?.roles.some((g) => g.rights.includes('raise') && (g.scope === 'all' || (g.scope === 'clusters' && g.cluster_ids.includes(p.cluster_id)) || (g.scope === 'properties' && g.property_ids.includes(p.id))))
     return kindOK && inScope
   }), [l, me, hasStep])

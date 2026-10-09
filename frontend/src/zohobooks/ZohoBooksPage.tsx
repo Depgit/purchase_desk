@@ -13,7 +13,6 @@ import { Modal } from '../ui/Modal'
 import { Pill } from '../ui/Pill'
 import { Tabs } from '../ui/Tabs'
 import { useAction } from '../ui/useAction'
-import { DataTable } from '../ui/DataTable'
 import { SearchSelect } from '../ui/SearchSelect'
 import { useToast } from '../ui/Toast'
 
@@ -25,6 +24,7 @@ interface Maps {
   bill_types: { ref: string; name: string; group: string; account_id: string; account_active: boolean }[]
   special: { ref: string; name: string; account_id: string; account_active: boolean }[]
   taxes: Record<string, string>
+  items: { sku_id: number; code: string; name: string; sub_category: string; hsn: string; item_id: string; item_name: string; item_active: boolean; how: string }[]
   vendors: { vendor_id: number; code: string; name: string; vendor_type: string; gstin: string; state_code: string; bank_verified: boolean; contact_id: string; contact_name: string; contact_gst: string; contact_active: boolean; how: string; suggest_id: string; suggest_name: string }[]
   can_edit: boolean
 }
@@ -61,7 +61,7 @@ export function ZohoBooksPage() {
       {tab === 'acc' && m && lists.data && <Accounts m={m} lists={lists.data} onDone={reloadAll} />}
       {tab === 'tax' && m && lists.data && <Taxes m={m} lists={lists.data} onDone={reloadAll} />}
       {tab === 'ven' && m && lists.data && <Vendors m={m} lists={lists.data} onDone={reloadAll} />}
-      {tab === 'items' && <ZohoItems />}
+      {tab === 'items' && m && <ZohoItems m={m} onDone={reloadAll} />}
       {tab === 'queue' && <Queue />}
       {tab === 'journal' && <Journals />}
       {tab === 'map' && <FieldMap />}
@@ -161,7 +161,7 @@ function Properties({ m, lists, onDone }: { m: Maps; lists: Lists; onDone: () =>
   return (
     <>
       <p className="note">Each property is identified by a reporting tag option, from any tag. The option and its tag are sent on the bill and on every line, so expenses report hotel by hotel in Zoho. A property without an option cannot have its bills pushed.</p>
-      <div className="tools"><label className="ck"><input type="checkbox" checked={gap} onChange={(e) => setGap(e.target.checked)} />Only properties without a tag</label>
+      <div className="tools"><label className="ck"><input type="checkbox" checked={gap} onChange={(e) => setGap(e.target.checked)} />Only not mapped</label>
         {m.can_edit && <><button className="btn ghost" onClick={() => a.run(() => post('/zoho/properties/match'), (r: any) => { onDone(); return r.message })}>Match by name</button>
           <button className="btn ghost" onClick={() => setUpload(true)}>Upload mapping</button></>}</div>
       <Errors list={a.errors} />
@@ -186,34 +186,42 @@ function AccountSelect({ value, accounts, types, disabled, onChange }: { value: 
 
 function Accounts({ m, lists, onDone }: { m: Maps; lists: Lists; onDone: () => void }) {
   const save = useMap(onDone)
-  const [create, setCreate] = useState(false)
+  const a = useAction()
+  const [create, setCreate] = useState<{ name: string; kind: string; ref: string } | null>(null)
+  const [gap, setGap] = useState(false)
+  const show = <T extends { account_id: string }>(rows: T[]) => rows.filter((x) => !gap || !x.account_id)
+  // An unmapped row offers to create its account in Zoho; an account of that name already there is simply selected.
+  const createLink = (name: string, kind: string, ref: string, mapped: string) => m.can_edit && !mapped && <> <button className="link" onClick={() => setCreate({ name, kind, ref })}>Create in Zoho</button></>
   return (
     <>
       <p className="note">Each bill line posts to one Zoho account. Goods use the account of the item's sub-category; utility and AMC bills use the bill type's account. Nothing posts to a guessed account: an unmapped one holds the bill.</p>
-      {m.can_edit && <div className="tools"><button className="btn ghost" onClick={() => setCreate(true)}>+ Create account in Zoho</button></div>}
+      <div className="tools"><label className="ck"><input type="checkbox" checked={gap} onChange={(e) => setGap(e.target.checked)} />Only not mapped</label>
+        {m.can_edit && <><button className="btn ghost" onClick={() => a.run(() => post('/zoho/accounts/match'), (r: any) => { onDone(); return r.message })}>Match by name</button>
+          <button className="btn ghost" onClick={() => setCreate({ name: '', kind: '', ref: '' })}>+ Create account in Zoho</button></>}</div>
+      <Errors list={a.errors} />
       <div className="cols">
         <section className="card flush"><h2>Sub-categories</h2><div className="scroll"><table><thead><tr><th>Sub-category</th><th>Category</th><th>Zoho account</th></tr></thead>
-          <tbody>{m.sub_categories.map((s) => <tr key={s.ref}><td className="id">{s.name}</td><td>{s.group}</td><td><AccountSelect value={s.account_id} accounts={lists.accounts} types={EXP} disabled={!m.can_edit} onChange={(v) => save('subcat', s.ref, v)} />
-            {s.account_id && !s.account_active && <Pill tone="bad">Inactive in Zoho</Pill>}</td></tr>)}</tbody></table></div></section>
+          <tbody>{show(m.sub_categories).map((s) => <tr key={s.ref}><td className="id">{s.name}</td><td>{s.group}</td><td><AccountSelect value={s.account_id} accounts={lists.accounts} types={EXP} disabled={!m.can_edit} onChange={(v) => save('subcat', s.ref, v)} />
+            {s.account_id && !s.account_active && <Pill tone="bad">Inactive in Zoho</Pill>}{createLink(s.name, 'subcat', s.ref, s.account_id)}</td></tr>)}</tbody></table></div></section>
         <div className="stack">
           <section className="card flush"><h2>Utility and AMC bill types</h2><div className="scroll"><table><thead><tr><th>Bill type</th><th>Zoho account</th></tr></thead>
-            <tbody>{m.bill_types.map((s) => <tr key={s.ref}><td className="id">{s.name}</td><td><AccountSelect value={s.account_id} accounts={lists.accounts} types={EXP} disabled={!m.can_edit} onChange={(v) => save('billtype', s.ref, v)} /></td></tr>)}</tbody></table></div></section>
-          <section className="card"><h2>Special cases</h2>{m.special.map((s) => <label key={s.ref} className="field"><span>{s.name}</span>
+            <tbody>{show(m.bill_types).map((s) => <tr key={s.ref}><td className="id">{s.name}</td><td><AccountSelect value={s.account_id} accounts={lists.accounts} types={EXP} disabled={!m.can_edit} onChange={(v) => save('billtype', s.ref, v)} />{createLink(s.name, 'billtype', s.ref, s.account_id)}</td></tr>)}</tbody></table></div></section>
+          <section className="card"><h2>Special cases</h2>{show(m.special).map((s) => <label key={s.ref} className="field"><span>{s.name}</span>
             <AccountSelect value={s.account_id} accounts={lists.accounts} types={s.ref === 'loss' ? EXP : undefined} disabled={!m.can_edit} onChange={(v) => save('special', s.ref, v)} />
             {s.ref === 'warehouse' && <span className="hint">Stock is an asset until issued, so warehouse purchases post to a stock account.</span>}</label>)}</section>
         </div>
       </div>
-      {create && <CreateAccount onClose={() => setCreate(false)} onDone={() => { setCreate(false); onDone() }} />}
+      {create && <CreateAccount start={create} onClose={() => setCreate(null)} onDone={() => { setCreate(null); onDone() }} />}
     </>
   )
 }
 
-function CreateAccount({ onClose, onDone }: { onClose: () => void; onDone: () => void }) {
-  const [f, setF] = useState({ Name: '', Code: '', Type: 'expense' })
+function CreateAccount({ start, onClose, onDone }: { start: { name: string; kind: string; ref: string }; onClose: () => void; onDone: () => void }) {
+  const [f, setF] = useState({ Name: start.name, Code: '', Type: 'expense', Kind: start.kind, Ref: start.ref })
   const a = useAction()
   return (
     <Modal title="Create account in Zoho" onClose={onClose}>
-      <p className="sub">The account is created in the Zoho chart of accounts and then appears here to be mapped. Use this only when no suitable account exists.</p>
+      <p className="sub">{start.ref ? <>For <b>{start.name}</b>: if Zoho already has an account of this name it is selected; otherwise the account is created in Zoho and selected.</> : 'The account is created in the Zoho chart of accounts and then appears here to be mapped. If one of this name exists, nothing is created.'}</p>
       <div className="grid3">
         <Field label="Account name"><input value={f.Name} onChange={(e) => setF({ ...f, Name: e.target.value })} /></Field>
         <Field label="Account code (optional)"><input value={f.Code} onChange={(e) => setF({ ...f, Code: e.target.value })} /></Field>
@@ -228,12 +236,16 @@ function CreateAccount({ onClose, onDone }: { onClose: () => void; onDone: () =>
 
 function Taxes({ m, lists, onDone }: { m: Maps; lists: Lists; onDone: () => void }) {
   const save = useMap(onDone)
+  const [gap, setGap] = useState(false)
+  const tax = (r: number, k: string) => m.taxes[`${r}.00|${k}`] || m.taxes[`${r}|${k}`] || ''
+  const rates = [5, 12, 18, 28].filter((r) => !gap || !tax(r, 'intra') || !tax(r, 'inter'))
   return (
     <>
+      <div className="tools"><label className="ck"><input type="checkbox" checked={gap} onChange={(e) => setGap(e.target.checked)} />Only not mapped</label></div>
       <p className="note">Zoho needs a tax code on every taxable line. <b>Within the state</b> (vendor and property in the same state) uses a CGST + SGST group. <b>From another state</b> uses IGST. An unregistered vendor and a 0% item are sent with no tax.</p>
       <section className="card flush"><div className="scroll"><table><thead><tr><th>GST rate</th><th>Vendor within the state</th><th>Vendor from another state</th></tr></thead>
-        <tbody>{[5, 12, 18, 28].map((r) => <tr key={r}><td className="id">{r}%</td>{(['intra', 'inter'] as const).map((k) => <td key={k}>
-          <select disabled={!m.can_edit} value={m.taxes[`${r}.00|${k}`] || m.taxes[`${r}|${k}`] || ''} onChange={(e) => save('tax', `${r}|${k}`, e.target.value)}><option value="">Not mapped</option>
+        <tbody>{rates.map((r) => <tr key={r}><td className="id">{r}%</td>{(['intra', 'inter'] as const).map((k) => <td key={k}>
+          <select disabled={!m.can_edit} value={tax(r, k)} onChange={(e) => save('tax', `${r}|${k}`, e.target.value)}><option value="">Not mapped</option>
             {lists.taxes.filter((t) => t.active && t.pct === r && t.specification === k).map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}</select></td>)}</tr>)}</tbody></table></div></section>
     </>
   )
@@ -243,15 +255,16 @@ function Vendors({ m, lists, onDone }: { m: Maps; lists: Lists; onDone: () => vo
   const a = useAction()
   const [pick, setPick] = useState<Record<number, string>>({})
   const [q, setQ] = useState('')
+  const [gap, setGap] = useState(false)
   const taken = new Set(m.vendors.map((v) => v.contact_id).filter(Boolean))
   const free = lists.contacts.filter((c) => c.active && !taken.has(c.id))
-  const rows = m.vendors.filter((v) => !q || (v.name + v.gstin + v.code).toLowerCase().includes(q.toLowerCase()))
+  const rows = m.vendors.filter((v) => (!gap || !v.contact_id) && (!q || (v.name + v.gstin + v.code).toLowerCase().includes(q.toLowerCase())))
   const status = (v: Maps['vendors'][number]) => v.contact_id ? <Pill tone={v.contact_active ? 'ok' : 'bad'}>{({ gstin: 'Linked by GSTIN', name: 'Linked by name', manual: 'Linked by Finance', created: 'Created in Zoho' } as Record<string, string>)[v.how]}{v.contact_active ? '' : ', inactive in Zoho'}</Pill>
     : v.suggest_id ? <Pill tone="warn">Possible match, confirm</Pill> : <Pill tone="bad">Not in Zoho</Pill>
   return (
     <>
       <p className="note">A vendor is linked automatically when its GSTIN is the same in Zoho. A name that only looks similar is never linked by itself: Finance confirms it, because paying the wrong party is the costliest error here.</p>
-      <div className="tools"><input type="search" placeholder="Search vendor" value={q} onChange={(e) => setQ(e.target.value)} /></div>
+      <div className="tools"><input type="search" placeholder="Search vendor" value={q} onChange={(e) => setQ(e.target.value)} /><label className="ck"><input type="checkbox" checked={gap} onChange={(e) => setGap(e.target.checked)} />Only not linked</label></div>
       <Errors list={a.errors} />
       <section className="card flush"><div className="scroll"><table><thead><tr><th>Vendor</th><th>GSTIN</th><th>State</th><th>Zoho vendor</th><th>Status</th><th></th></tr></thead>
         <tbody>{rows.map((v) => <tr key={v.vendor_id}><td className="id">{v.name}<br /><span className="hint">{v.code} · {v.vendor_type}</span></td><td>{v.gstin || 'Unregistered'}</td><td>{v.state_code || <Pill tone="bad">Missing</Pill>}</td>
@@ -334,33 +347,31 @@ function FieldMap() {
 }
 
 interface ZItem { id: string; name: string; sku: string; hsn_or_sac: string; unit: string; product_type: string; item_type: string; brand: string; purchase_rate: number; tax_pct: number; purchase_account: string; active: boolean }
-const ITEM_TYPE: Record<string, string> = { purchases: 'Purchases', sales: 'Sales', sales_and_purchases: 'Sales and purchases', inventory: 'Inventory' }
 
-/** The items read from Zoho Books on the last sync. Read only: Purchase Desk's own SKUs stay the item master. */
-function ZohoItems() {
+/** Links each Purchase Desk item to a Zoho item, like accounts on the Accounts tab. The bill line then carries that item. */
+function ZohoItems({ m, onDone }: { m: Maps; onDone: () => void }) {
+  const save = useMap(onDone)
+  const a = useAction()
   const { data } = useApi<ZItem[]>('/zoho/items')
-  const rows = data || []
+  const [gap, setGap] = useState(false)
+  const [q, setQ] = useState('')
+  const options = (data || []).filter((z) => z.active).map((z) => ({ value: z.id, label: z.name, group: z.product_type === 'service' ? 'Services' : 'Goods',
+    hint: [z.hsn_or_sac && 'HSN ' + z.hsn_or_sac, z.purchase_account].filter(Boolean).join(' · ') }))
+  const rows = m.items.filter((x) => (!gap || !x.item_id) && (!q || (x.code + ' ' + x.name + ' ' + x.sub_category).toLowerCase().includes(q.toLowerCase())))
+  const linked = m.items.filter((x) => x.item_id).length
   return (
     <>
-      <p className="note">Items in Zoho Books, read on every Sync now. They are for reference next to Purchase Desk's own items (SKUs); nothing here is sent back to Zoho.</p>
-      <DataTable screen="zoho-items" rows={rows} rowKey={(r) => r.id} dim={(r) => !r.active}
-        search={(r) => [r.name, r.sku, r.hsn_or_sac, r.brand, r.purchase_account].join(' ')}
-        filters={[
-          { id: 'st', label: 'Status', options: [['', 'Active and inactive'], ['a', 'Active'], ['i', 'Inactive']], test: (r, v) => v === 'a' ? r.active : !r.active },
-          { id: 'pt', label: 'Goods or service', options: [['', 'Goods and services'], ['goods', 'Goods'], ['service', 'Services']], test: (r, v) => r.product_type === v },
-          { id: 'it', label: 'Used for', options: [['', 'Any use'], ...Object.entries(ITEM_TYPE)], test: (r, v) => r.item_type === v },
-        ]}
-        columns={[
-          { key: 'name', label: 'Item', render: (r) => <>{r.name}{r.sku && <><br /><span className="hint">{r.sku}</span></>}</>, sort: (r) => r.name, csv: (r) => r.name },
-          { key: 'type', label: 'Type', render: (r) => r.product_type === 'service' ? 'Service' : 'Goods', csv: (r) => r.product_type },
-          { key: 'use', label: 'Used for', render: (r) => ITEM_TYPE[r.item_type] || r.item_type, csv: (r) => r.item_type },
-          { key: 'hsn', label: 'HSN / SAC', render: (r) => r.hsn_or_sac || '—', csv: (r) => r.hsn_or_sac },
-          { key: 'unit', label: 'Unit', render: (r) => r.unit || '—', csv: (r) => r.unit },
-          { key: 'rate', label: 'Purchase rate', right: true, render: (r) => r.purchase_rate ? inr(r.purchase_rate) : '—', sort: (r) => r.purchase_rate, csv: (r) => r.purchase_rate },
-          { key: 'tax', label: 'GST', right: true, render: (r) => r.tax_pct + '%', sort: (r) => r.tax_pct, csv: (r) => r.tax_pct },
-          { key: 'acc', label: 'Purchase account', render: (r) => r.purchase_account || '—', csv: (r) => r.purchase_account },
-          { key: 'status', label: 'Status', render: (r) => <Pill tone={r.active ? 'ok' : 'off'}>{r.active ? 'Active' : 'Inactive'}</Pill>, csv: (r) => r.active ? 'Active' : 'Inactive' },
-        ]} csvName="zoho-items" />
+      <p className="note">Link each Purchase Desk item to its item in Zoho Books. Names that match exactly are linked on every sync and by Match by name; pick the rest. {linked} of {m.items.length} linked.</p>
+      <div className="tools"><input type="search" placeholder="Search item, code or sub-category" value={q} onChange={(e) => setQ(e.target.value)} />
+        <label className="ck"><input type="checkbox" checked={gap} onChange={(e) => setGap(e.target.checked)} />Only not mapped</label>
+        {m.can_edit && <button className="btn ghost" onClick={() => a.run(() => post('/zoho/items/match'), (r: any) => { onDone(); return r.message })}>Match by name</button>}</div>
+      <Errors list={a.errors} />
+      <section className="card flush"><div className="scroll"><table><thead><tr><th>Purchase Desk item</th><th>Sub-category</th><th>HSN / SAC</th><th>Zoho item</th></tr></thead>
+        <tbody>{rows.map((x) => <tr key={x.sku_id}><td className="id">{x.name}<br /><span className="hint">{x.code}</span></td><td>{x.sub_category}</td><td>{x.hsn || '—'}</td>
+          <td><SearchSelect value={x.item_id} disabled={!m.can_edit} emptyLabel="Not mapped" placeholder="Search Zoho item" ariaLabel={'Zoho item for ' + x.name}
+            items={x.item_id && !options.some((o) => o.value === x.item_id) ? [{ value: x.item_id, label: x.item_name || x.item_id, hint: 'Inactive in Zoho' }, ...options] : options}
+            onChange={(v) => save('item', String(x.sku_id), v)} />
+            {x.how === 'name' && <Pill tone="ok">Matched by name</Pill>}{x.item_id && !x.item_active && <Pill tone="bad">Inactive in Zoho</Pill>}</td></tr>)}</tbody></table></div></section>
     </>
   )
 }

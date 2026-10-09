@@ -3,7 +3,7 @@
 import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from 'react'
 import { get, getToken, post, setToken } from '../api/client'
 import type { Me } from '../api/types'
-import { setBillsOpen } from '../api/lookups'
+import { refreshLookups, setBillsOpen } from '../api/lookups'
 
 interface Session {
   me: Me | null
@@ -27,9 +27,20 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     window.addEventListener('pd-signed-out', out)
     if (getToken()) get<Me>('/me').then(setMe).catch(() => setMe(null)).finally(() => setReady(true))
     else setReady(true)
-    return () => window.removeEventListener('pd-signed-out', out)
+    // Roles, property scope and master lists change while people stay signed in. Read them again when the window
+    // comes back into focus (at most once every 30 seconds), so a change made by the Admin shows without a reload.
+    let last = Date.now()
+    const fresh = () => {
+      if (!getToken() || document.visibilityState === 'hidden' || Date.now() - last < 30000) return
+      last = Date.now()
+      get<Me>('/me').then(setMe).catch(() => {})
+      refreshLookups()
+    }
+    window.addEventListener('focus', fresh)
+    document.addEventListener('visibilitychange', fresh)
+    return () => { window.removeEventListener('pd-signed-out', out); window.removeEventListener('focus', fresh); document.removeEventListener('visibilitychange', fresh) }
   }, [])
-  const finish = (r: { token: string; user: Me }) => { setToken(r.token); setMe(r.user) }
+  const finish = (r: { token: string; user: Me }) => { setToken(r.token); setMe(r.user); refreshLookups() } // a new sign-in never sees the last user's lists
   const signIn = useCallback(async (login: string, password: string) => finish(await post('/auth/login', { login, password })), [])
   const signInWithCode = useCallback(async (login: string, code: string) => finish(await post('/auth/otp/verify', { login, code })), [])
   const signOut = useCallback(() => { setToken(''); setMe(null) }, [])

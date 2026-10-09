@@ -94,6 +94,7 @@ type line struct {
 	Qty, Rate, GST                   float64
 	Account                          string
 	AccountOK                        bool
+	ItemID                           string // the linked Zoho item, if any and active
 }
 
 func load(ctx context.Context, q database.Q, invoiceID int64) (*bill, error) {
@@ -129,20 +130,22 @@ func load(ctx context.Context, q database.Q, invoiceID int64) (*bill, error) {
 		// Corporate lines have no SKU and post to the account of their expense head.
 		rows, err := q.Query(ctx, `SELECT coalesce(k.code,''), coalesce(concat_ws(' ', b.name, k.item_name), l.description), coalesce(ps.name, l.unit), coalesce(k.hsn,''), coalesce(sc.name, eh.name, ''), coalesce(sc.id,0), gl.qty, l.rate, l.gst_pct,
 			coalesce(CASE WHEN l.sku_id IS NULL THEN mh.account_id WHEN $2<>'' THEN ms.account_id ELSE ma.account_id END,''),
-			coalesce(CASE WHEN l.sku_id IS NULL THEN zh.active WHEN $2<>'' THEN zs.active ELSE za.active END,false)
+			coalesce(CASE WHEN l.sku_id IS NULL THEN zh.active WHEN $2<>'' THEN zs.active ELSE za.active END,false),
+			coalesce(zi.item_id,'')
 			FROM invoice i JOIN goods_receipt_line gl ON gl.goods_receipt_id=i.goods_receipt_id JOIN document_line l ON l.id=gl.line_id
 			LEFT JOIN sku k ON k.id=l.sku_id LEFT JOIN brand b ON b.id=k.brand_id LEFT JOIN pack_size ps ON ps.id=k.pack_size_id LEFT JOIN sub_category sc ON sc.id=k.sub_category_id
 			LEFT JOIN expense_head eh ON eh.id=l.expense_head_id
 			LEFT JOIN zoho_map_account mh ON mh.kind='head' AND mh.ref=l.expense_head_id::text LEFT JOIN zoho_account zh ON zh.account_id=mh.account_id
 			LEFT JOIN zoho_map_account ma ON ma.kind='subcat' AND ma.ref=sc.id::text LEFT JOIN zoho_account za ON za.account_id=ma.account_id
 			LEFT JOIN zoho_map_account ms ON ms.kind='special' AND ms.ref=$2 LEFT JOIN zoho_account zs ON zs.account_id=ms.account_id
+			LEFT JOIN zoho_map_item mi ON mi.sku_id=l.sku_id LEFT JOIN zoho_item zi ON zi.item_id=mi.item_id AND zi.active
 			WHERE i.id=$1 AND gl.qty > 0 ORDER BY l.id`, invoiceID, special)
 		if err != nil {
 			return nil, err
 		}
 		b.Lines, err = pgx.CollectRows(rows, func(row pgx.CollectableRow) (line, error) {
 			var l line
-			return l, row.Scan(&l.SKUCode, &l.Item, &l.Pack, &l.HSN, &l.SubCat, &l.SubCatID, &l.Qty, &l.Rate, &l.GST, &l.Account, &l.AccountOK)
+			return l, row.Scan(&l.SKUCode, &l.Item, &l.Pack, &l.HSN, &l.SubCat, &l.SubCatID, &l.Qty, &l.Rate, &l.GST, &l.Account, &l.AccountOK, &l.ItemID)
 		})
 		if err != nil {
 			return nil, err
@@ -322,6 +325,9 @@ func payload(b *bill, taxes map[float64]string) (map[string]any, []string) {
 			}
 			it := map[string]any{"account_id": l.Account, "name": l.Item, "description": desc,
 				"quantity": l.Qty, "rate": l.Rate, "tags": tags}
+			if l.ItemID != "" {
+				it["item_id"] = l.ItemID // the linked Zoho item; name, rate and account above are still sent explicitly
+			}
 			if l.HSN != "" {
 				it["hsn_or_sac"] = l.HSN
 			} else {
