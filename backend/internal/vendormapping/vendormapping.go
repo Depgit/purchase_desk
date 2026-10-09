@@ -66,12 +66,12 @@ type Source struct {
 	Problem     string   `json:"problem"`
 }
 
-const resolveSQL = `SELECT k.id, k.code, k.item_name, b.name, ps.name, sc.id, sc.name, c.id, c.name, k.gst_pct,
+const resolveSQL = `SELECT k.id, k.code, k.item_name, coalesce(b.name,''), ps.name, sc.id, sc.name, c.id, c.name, k.gst_pct,
 	m.id, coalesce(m.level,''), m.vendor_id, coalesce(v.legal_name,''), coalesce(v.vendor_type='warehouse',false),
 	coalesce(v.active,false), coalesce(v.bank_verified,false), coalesce(v.vendor_type,''), coalesce(m.estimate_allowed,false), rc.rate, rc.gst_pct
 	FROM sku k
 	JOIN sub_category sc ON sc.id=k.sub_category_id JOIN category c ON c.id=sc.category_id
-	JOIN brand b ON b.id=k.brand_id JOIN pack_size ps ON ps.id=k.pack_size_id
+	LEFT JOIN brand b ON b.id=k.brand_id JOIN pack_size ps ON ps.id=k.pack_size_id
 	JOIN property p ON p.id=$1
 	LEFT JOIN LATERAL (
 		SELECT m.* FROM vendor_mapping m
@@ -231,9 +231,9 @@ const rateStatusSQL = `CASE
 
 func (s *Service) listRates(w http.ResponseWriter, r *http.Request) error {
 	vid := int64(httpjson.QInt(r, "vendor_id", 0))
-	rows, err := s.DB.Query(r.Context(), `SELECT r.id, r.vendor_id, v.legal_name, r.sku_id, k.code, b.name||' '||k.item_name, ps.name, sc.name, c.name, r.rate, r.gst_pct,
+	rows, err := s.DB.Query(r.Context(), `SELECT r.id, r.vendor_id, v.legal_name, r.sku_id, k.code, concat_ws(' ', b.name, k.item_name), ps.name, sc.name, c.name, r.rate, r.gst_pct,
 		r.valid_from::text, r.valid_to::text, `+rateStatusSQL+`, (r.valid_to - current_date), r.created_at
-		FROM rate_card r JOIN vendor v ON v.id=r.vendor_id JOIN sku k ON k.id=r.sku_id JOIN brand b ON b.id=k.brand_id JOIN pack_size ps ON ps.id=k.pack_size_id
+		FROM rate_card r JOIN vendor v ON v.id=r.vendor_id JOIN sku k ON k.id=r.sku_id LEFT JOIN brand b ON b.id=k.brand_id JOIN pack_size ps ON ps.id=k.pack_size_id
 		JOIN sub_category sc ON sc.id=k.sub_category_id JOIN category c ON c.id=sc.category_id
 		WHERE ($1=0 OR r.vendor_id=$1) ORDER BY v.legal_name, k.code, r.valid_from DESC, r.id DESC`, vid)
 	if err != nil {
@@ -345,9 +345,9 @@ func (s *Service) rateFormat(w http.ResponseWriter, r *http.Request) error {
 	if err := s.DB.QueryRow(r.Context(), `SELECT code, legal_name FROM vendor WHERE id=$1`, vid).Scan(&vcode, &vname); err != nil {
 		return httpjson.Bad("Choose a vendor.")
 	}
-	rows, err := s.DB.Query(r.Context(), `SELECT k.code, b.name, k.item_name, ps.name, k.gst_pct,
+	rows, err := s.DB.Query(r.Context(), `SELECT k.code, coalesce(b.name,''), k.item_name, ps.name, k.gst_pct,
 		(SELECT r.rate::text FROM rate_card r WHERE r.vendor_id=$1 AND r.sku_id=k.id AND NOT r.superseded AND current_date BETWEEN r.valid_from AND r.valid_to ORDER BY r.valid_from DESC LIMIT 1)
-		FROM sku k JOIN brand b ON b.id=k.brand_id JOIN pack_size ps ON ps.id=k.pack_size_id JOIN sub_category sc ON sc.id=k.sub_category_id
+		FROM sku k LEFT JOIN brand b ON b.id=k.brand_id JOIN pack_size ps ON ps.id=k.pack_size_id JOIN sub_category sc ON sc.id=k.sub_category_id
 		WHERE k.active AND ($2=0 OR sc.category_id=$2) AND EXISTS (SELECT 1 FROM vendor_sub_category x WHERE x.vendor_id=$1 AND x.sub_category_id=k.sub_category_id)
 		ORDER BY k.code`, vid, cid)
 	if err != nil {
@@ -415,7 +415,7 @@ type Mapping struct {
 
 func (s *Service) listMappings(w http.ResponseWriter, r *http.Request) error {
 	level := r.URL.Query().Get("level")
-	rows, err := s.DB.Query(r.Context(), `SELECT m.id, m.vendor_id, v.legal_name, v.active AND v.bank_verified, m.level, m.sku_id, coalesce(k.code,''), coalesce(b.name||' '||k.item_name||' · '||ps.name,''),
+	rows, err := s.DB.Query(r.Context(), `SELECT m.id, m.vendor_id, v.legal_name, v.active AND v.bank_verified, m.level, m.sku_id, coalesce(k.code,''), coalesce(concat_ws(' ', b.name, k.item_name)||' · '||ps.name,''),
 		sc.id, sc.name, c.name, m.all_properties, coalesce((SELECT array_agg(property_id ORDER BY property_id) FROM vendor_mapping_property WHERE mapping_id=m.id),'{}'),
 		m.estimate_allowed, m.active,
 		CASE WHEN m.level='sc' THEN (SELECT count(*) FROM sku x WHERE x.sub_category_id=sc.id AND x.active AND EXISTS (SELECT 1 FROM rate_card rc WHERE rc.vendor_id=m.vendor_id AND rc.sku_id=x.id AND NOT rc.superseded AND current_date BETWEEN rc.valid_from AND rc.valid_to)) ELSE 0 END,

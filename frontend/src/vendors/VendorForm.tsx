@@ -2,7 +2,7 @@
 // A change to the bank account, GST details or PAN sends the vendor back to Finance for verification.
 import { useEffect, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
-import { get, upload } from '../api/client'
+import { fileUrl, get, upload } from '../api/client'
 import { useLookups } from '../api/lookups'
 import { Checks, Field } from '../ui/Field'
 import { Errors } from '../ui/Errors'
@@ -12,7 +12,7 @@ import { useAction } from '../ui/useAction'
 export interface Vendor {
   id: number; code: string; vendor_type: string; legal_name: string; address: string; city: string; pin: string; contact_person: string; mobile: string; email: string
   gst_registered: boolean; gstin: string; pan: string; state_code: string; msme: boolean; udyam: string; bank_holder: string; bank_account_masked: string; ifsc: string
-  bank_proof_file_id: number | null; bank_verified: boolean; bank_verified_by: string; payment_terms: string; sheet_mode: string; sheet_time: string; sheet_channel: string
+  bank_proof_file_id: number | null; msme_file_id: number | null; bank_verified: boolean; bank_verified_by: string; payment_terms: string; sheet_mode: string; sheet_time: string; sheet_channel: string
   active: boolean; inactive_reason: string; sub_category_ids: number[]; bill_type_ids: number[]; supplies: string[]
 }
 
@@ -26,6 +26,7 @@ export function VendorForm() {
   const l = useLookups()
   const [f, setF] = useState(blank)
   const [proof, setProof] = useState<File | null>(null)
+  const [msmeCert, setMsmeCert] = useState<File | null>(null)
   const [orig, setOrig] = useState<Vendor | null>(null)
   const a = useAction()
   useEffect(() => {
@@ -38,6 +39,8 @@ export function VendorForm() {
   const set = <K extends keyof typeof f>(k: K, v: (typeof f)[K]) => setF({ ...f, [k]: v })
   const inp = (k: keyof typeof f, extra: Record<string, unknown> = {}) => <input value={String(f[k] ?? '')} onChange={(e) => set(k, e.target.value as never)} {...extra} />
   const goods = f.vendor_type === 'goods'
+  // Characters 3 to 12 of a GSTIN are the PAN, so a GST-registered vendor's PAN is filled from it.
+  const setGSTIN = (v: string) => { const g = v.toUpperCase().replace(/\s/g, ''); setF({ ...f, gstin: g, pan: g.length >= 12 ? g.slice(2, 12) : f.pan }) }
   const bt = (l?.billTypes || []).filter((b) => b.active && (f.vendor_type === 'utility' ? b.section === 'utility' : f.vendor_type === 'amc' ? b.section === 'amc' : true))
   return (
     <>
@@ -57,12 +60,17 @@ export function VendorForm() {
           </div></section>
           <section className="card"><h2>Tax and MSME</h2><div className="grid2">
             <Field label="GST status"><select value={f.gst_registered ? 'y' : 'n'} onChange={(e) => set('gst_registered', e.target.value === 'y')}><option value="y">GST registered</option><option value="n">Not registered</option></select></Field>
-            {f.gst_registered ? <Field label="GSTIN">{inp('gstin', { maxLength: 15, placeholder: '15 characters' })}</Field>
+            {f.gst_registered ? <Field label="GSTIN"><input value={f.gstin} maxLength={15} placeholder="15 characters" onChange={(e) => setGSTIN(e.target.value)} /></Field>
               : <p className="note warn" style={{ alignSelf: 'end' }}>Unregistered vendor: no GST is charged. Finance sees this flag on every invoice.</p>}
-            <Field label="PAN" hint={f.gst_registered ? 'Must match the PAN inside the GSTIN.' : ''}>{inp('pan', { maxLength: 10 })}</Field>
+            <Field label="PAN" hint={f.gst_registered ? 'Filled from the GSTIN (characters 3 to 12).' : 'Required. 10 characters, for example ABCDE1234F.'}>{f.gst_registered
+              ? <input value={f.pan} readOnly placeholder="Enter the GSTIN first" />
+              : <input value={f.pan} maxLength={10} onChange={(e) => set('pan', e.target.value.toUpperCase())} />}</Field>
             {!f.gst_registered && <Field label="State code" hint="Two letters, for example HR. Used for GST on bills.">{inp('state_code', { maxLength: 2 })}</Field>}
             <Field label="MSME registered"><select value={f.msme ? 'y' : 'n'} onChange={(e) => set('msme', e.target.value === 'y')}><option value="n">No</option><option value="y">Yes</option></select></Field>
             {f.msme && <Field label="Udyam number">{inp('udyam', { placeholder: 'UDYAM-XX-00-0000000' })}</Field>}
+            {f.msme && <Field label="MSME (Udyam) certificate" hint={orig?.msme_file_id ? 'A certificate is on file. Attach a new one only to replace it.' : 'Required for an MSME vendor: the 45-day payment rule depends on it.'}>
+              <input type="file" accept="image/*,application/pdf" onChange={(e) => setMsmeCert(e.target.files?.[0] || null)} />
+              {orig?.msme_file_id && <a className="link" href={fileUrl(orig.msme_file_id)} target="_blank" rel="noreferrer">View certificate on file</a>}</Field>}
           </div></section>
           <section className="card"><h2>Bank details</h2>
             {id && <p className="hint">Current account {orig?.bank_account_masked || 'none'} · IFSC {orig?.ifsc || '—'}. Leave blank to keep it.</p>}
@@ -86,7 +94,7 @@ export function VendorForm() {
           <p>2. Finance checks the cancelled cheque against the account details and verifies.</p>
           <p>3. Purchase maps the vendor to items and properties under Vendor Mapping and adds SKU rates.</p>
           <Errors list={a.errors} />
-          <button className="btn" disabled={a.busy} onClick={() => a.run(() => upload(id ? '/vendors/' + id : '/vendors', f, { bank_proof: proof }, id ? 'PUT' : 'POST'),
+          <button className="btn" disabled={a.busy} onClick={() => a.run(() => upload(id ? '/vendors/' + id : '/vendors', f, { bank_proof: proof, msme_certificate: f.msme ? msmeCert : null }, id ? 'PUT' : 'POST'),
             (r: any) => { nav('/vendors'); return r.sent_for_verification ? 'Saved. Waiting for Finance to verify again.' : id ? 'Vendor saved' : `${r.code} saved. Waiting for Finance to verify bank details.` })}>Save vendor</button>
         </section></div>
       </div>

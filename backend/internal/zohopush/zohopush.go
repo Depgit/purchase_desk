@@ -125,7 +125,7 @@ func load(ctx context.Context, q database.Q, invoiceID int64) (*bill, error) {
 		// Purchases for warehouse stock post to the stock account, and for pre-opening properties to the pre-opening account.
 		special := map[string]string{"warehouse": "warehouse", "preopening": "preopening"}[b.PropertyKind]
 		// Corporate lines have no SKU and post to the account of their expense head.
-		rows, err := q.Query(ctx, `SELECT coalesce(k.code,''), coalesce(b.name||' '||k.item_name, l.description), coalesce(ps.name, l.unit), coalesce(k.hsn,''), coalesce(sc.name, eh.name, ''), coalesce(sc.id,0), gl.qty, l.rate, l.gst_pct,
+		rows, err := q.Query(ctx, `SELECT coalesce(k.code,''), coalesce(concat_ws(' ', b.name, k.item_name), l.description), coalesce(ps.name, l.unit), coalesce(k.hsn,''), coalesce(sc.name, eh.name, ''), coalesce(sc.id,0), gl.qty, l.rate, l.gst_pct,
 			coalesce(CASE WHEN l.sku_id IS NULL THEN mh.account_id WHEN $2<>'' THEN ms.account_id ELSE ma.account_id END,''),
 			coalesce(CASE WHEN l.sku_id IS NULL THEN zh.active WHEN $2<>'' THEN zs.active ELSE za.active END,false)
 			FROM invoice i JOIN goods_receipt_line gl ON gl.goods_receipt_id=i.goods_receipt_id JOIN document_line l ON l.id=gl.line_id

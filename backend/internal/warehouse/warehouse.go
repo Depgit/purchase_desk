@@ -85,10 +85,10 @@ const stockSQL = `WITH pur AS (
 	iss AS (SELECT l.sku_id, sum(l.received_qty) q, sum(coalesce(l.dispatched_qty,0)-l.received_qty) pil FROM document_line l JOIN document d ON d.id=l.document_id
 		WHERE d.is_transfer AND d.status='WH_DONE' GROUP BY 1),
 	tr AS (SELECT l.sku_id, sum(coalesce(l.dispatched_qty,0)) q FROM document_line l JOIN document d ON d.id=l.document_id WHERE d.is_transfer AND d.status='WH_SENT' GROUP BY 1)
-	SELECT k.id, k.code, k.item_name, b.name, ps.name, sc.name, coalesce(ws.opening_qty,0), coalesce(pur.q,0), coalesce(iss.q,0), coalesce(iss.pil,0), coalesce(tr.q,0), coalesce(ws.min_level,0),
+	SELECT k.id, k.code, k.item_name, coalesce(b.name,''), ps.name, sc.name, coalesce(ws.opening_qty,0), coalesce(pur.q,0), coalesce(iss.q,0), coalesce(iss.pil,0), coalesce(tr.q,0), coalesce(ws.min_level,0),
 	coalesce((SELECT r.rate FROM rate_card r JOIN vendor v ON v.id=r.vendor_id AND v.vendor_type='warehouse' WHERE r.sku_id=k.id AND NOT r.superseded ORDER BY r.valid_from DESC LIMIT 1),
 	         (SELECT l.rate FROM goods_receipt_line gl JOIN document_line l ON l.id=gl.line_id JOIN document d ON d.id=l.document_id JOIN property p ON p.id=d.property_id AND p.kind='warehouse' WHERE l.sku_id=k.id ORDER BY gl.goods_receipt_id DESC LIMIT 1), 0)
-	FROM sku k JOIN brand b ON b.id=k.brand_id JOIN pack_size ps ON ps.id=k.pack_size_id JOIN sub_category sc ON sc.id=k.sub_category_id
+	FROM sku k LEFT JOIN brand b ON b.id=k.brand_id JOIN pack_size ps ON ps.id=k.pack_size_id JOIN sub_category sc ON sc.id=k.sub_category_id
 	LEFT JOIN warehouse_stock ws ON ws.sku_id=k.id LEFT JOIN pur ON pur.sku_id=k.id LEFT JOIN iss ON iss.sku_id=k.id LEFT JOIN tr ON tr.sku_id=k.id
 	WHERE ws.sku_id IS NOT NULL OR pur.sku_id IS NOT NULL OR iss.sku_id IS NOT NULL OR tr.sku_id IS NOT NULL`
 

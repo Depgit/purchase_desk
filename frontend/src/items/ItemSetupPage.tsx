@@ -1,6 +1,6 @@
 // The lists used when a SKU is added: categories, sub-categories (with their 2-letter code), pack sizes and brands.
 import { useState } from 'react'
-import { post } from '../api/client'
+import { post, put } from '../api/client'
 import { refreshLookups, useLookups } from '../api/lookups'
 import { useApi } from '../api/useApi'
 import { useSession } from '../auth/session'
@@ -13,23 +13,28 @@ import { PHASE, usePhase } from '../releasephase/phase'
 import { useAction } from '../ui/useAction'
 
 type Tab = 'cat' | 'pack' | 'brand'
+type Kind = 'category' | 'sub' | 'pack' | 'brand'
+/** The row being edited; absent when adding. */
+interface Row { id: number; name: string; category_id?: number; code?: string; is_fb?: boolean }
 
 export function ItemSetupPage() {
   const { hasRight } = useSession()
   const bud = usePhase().on(PHASE.budgets)
   const l = useLookups()
   const [tab, setTab] = useState<Tab>('cat')
-  const [add, setAdd] = useState<'category' | 'sub' | 'pack' | 'brand' | null>(null)
-  const subs = useApi<{ id: number; name: string; code: string; category: string; skus: number; vendors: number; active: boolean }[]>('/sub-categories')
+  const [add, setAdd] = useState<Kind | null>(null)
+  const [edit, setEdit] = useState<{ kind: Kind; row: Row } | null>(null)
+  const subs = useApi<{ id: number; name: string; code: string; category_id: number; category: string; skus: number; vendors: number; active: boolean }[]>('/sub-categories')
   const cats = useApi<{ id: number; name: string; is_fb: boolean; sub_categories: number; skus: number }[]>('/categories')
   const packs = useApi<{ id: number; name: string; active: boolean; skus: number }[]>('/pack-sizes')
   const brands = useApi<{ id: number; name: string; active: boolean; skus: number }[]>('/brands')
   const ed = hasRight('masters')
   const reloadAll = () => { subs.reload(); cats.reload(); packs.reload(); brands.reload(); refreshLookups() }
+  const editLink = (kind: Kind, row: Row) => ed && <button className="link" onClick={() => setEdit({ kind, row })}>Edit</button>
   const named = (rows: { id: number; name: string; active: boolean; skus: number }[] | null, kind: string) => (
-    <section className="card flush"><div className="scroll"><table><thead><tr><th>Name</th><th className="r">SKUs</th><th>Status</th></tr></thead>
+    <section className="card flush"><div className="scroll"><table><thead><tr><th>Name</th><th className="r">SKUs</th><th>Status</th><th></th></tr></thead>
       <tbody>{(rows || []).map((x) => <tr key={x.id} className={x.active ? '' : 'dim'}><td className="id">{x.name}</td><td className="r">{x.skus}</td>
-        <td><ActiveToggle kind={kind} id={x.id} name={x.name} active={x.active} onDone={reloadAll} /></td></tr>)}</tbody></table></div></section>
+        <td><ActiveToggle kind={kind} id={x.id} name={x.name} active={x.active} onDone={reloadAll} /></td><td className="r">{editLink(kind === 'pack_size' ? 'pack' : 'brand', x)}</td></tr>)}</tbody></table></div></section>
   )
   return (
     <>
@@ -39,28 +44,31 @@ export function ItemSetupPage() {
       <Tabs value={tab} onChange={setTab} items={[['cat', 'Categories & sub-categories'], ['pack', 'Pack sizes'], ['brand', 'Brands']]} />
       {tab === 'cat' && <div className="cols">
         <section className="card flush"><h2>Sub-categories</h2><div className="scroll"><table>
-          <thead><tr><th>Sub-category</th><th>Category</th><th>SKU code</th><th className="r">SKUs</th><th className="r">Vendors</th><th>Status</th></tr></thead>
+          <thead><tr><th>Sub-category</th><th>Category</th><th>SKU code</th><th className="r">SKUs</th><th className="r">Vendors</th><th>Status</th><th></th></tr></thead>
           <tbody>{(subs.data || []).map((s) => <tr key={s.id} className={s.active ? '' : 'dim'}><td className="id">{s.name}</td><td>{s.category}</td><td>{s.code}-0000</td><td className="r">{s.skus}</td><td className="r">{s.vendors}</td>
-            <td><ActiveToggle kind="sub_category" id={s.id} name={s.name} active={s.active} onDone={reloadAll} /></td></tr>)}</tbody></table></div></section>
+            <td><ActiveToggle kind="sub_category" id={s.id} name={s.name} active={s.active} onDone={reloadAll} /></td><td className="r">{editLink('sub', s)}</td></tr>)}</tbody></table></div></section>
         <section className="card flush"><h2>Categories</h2><div className="scroll"><table>
-          <thead><tr><th>Category</th><th className="r">Sub-categories</th><th className="r">SKUs</th></tr></thead>
-          <tbody>{(cats.data || []).map((c) => <tr key={c.id}><td className="id">{c.name}{c.is_fb ? ' (F&B)' : ''}</td><td className="r">{c.sub_categories}</td><td className="r">{c.skus}</td></tr>)}</tbody></table></div>
+          <thead><tr><th>Category</th><th className="r">Sub-categories</th><th className="r">SKUs</th><th></th></tr></thead>
+          <tbody>{(cats.data || []).map((c) => <tr key={c.id}><td className="id">{c.name}{c.is_fb ? ' (F&B)' : ''}</td><td className="r">{c.sub_categories}</td><td className="r">{c.skus}</td><td className="r">{editLink('category', c)}</td></tr>)}</tbody></table></div>
           {bud && <p className="hint" style={{ padding: '10px 14px' }}>A new sub-category starts with a budget of zero for every property, so requests against it are flagged until a budget is set. F&amp;B categories get sales-driven day budgets.</p>}</section>
       </div>}
       {tab === 'pack' && named(packs.data, 'pack_size')}
       {tab === 'brand' && named(brands.data, 'brand')}
       {add && <AddModal kind={add} cats={l?.categories || []} onClose={() => setAdd(null)} onDone={() => { setAdd(null); reloadAll() }} />}
+      {edit && <AddModal kind={edit.kind} row={edit.row} cats={l?.categories || []} onClose={() => setEdit(null)} onDone={() => { setEdit(null); reloadAll() }} />}
     </>
   )
 }
 
-function AddModal({ kind, cats, onClose, onDone }: { kind: 'category' | 'sub' | 'pack' | 'brand'; cats: { id: number; name: string }[]; onClose: () => void; onDone: () => void }) {
-  const [name, setName] = useState('')
-  const [cat, setCat] = useState(cats[0]?.id || 0)
-  const [code, setCode] = useState('')
-  const [fb, setFb] = useState(false)
+/** Adds a category, sub-category, pack size or brand, or edits one when row is given. */
+function AddModal({ kind, row, cats, onClose, onDone }: { kind: Kind; row?: Row; cats: { id: number; name: string }[]; onClose: () => void; onDone: () => void }) {
+  const [name, setName] = useState(row?.name || '')
+  const [cat, setCat] = useState(row?.category_id || cats[0]?.id || 0)
+  const [code, setCode] = useState(row?.code || '')
+  const [fb, setFb] = useState(!!row?.is_fb)
   const a = useAction()
-  const title = { category: 'Add category', sub: 'Add sub-category', pack: 'Add pack size', brand: 'Add brand' }[kind]
+  const noun = { category: 'category', sub: 'sub-category', pack: 'pack size', brand: 'brand' }[kind]
+  const title = row ? 'Edit ' + noun : 'Add ' + noun
   const path = { category: '/categories', sub: '/sub-categories', pack: '/pack-sizes', brand: '/brands' }[kind]
   return (
     <Modal title={title} onClose={onClose}>
@@ -68,10 +76,12 @@ function AddModal({ kind, cats, onClose, onDone }: { kind: 'category' | 'sub' | 
       {kind === 'category' && <label className="ck"><input type="checkbox" checked={fb} onChange={(e) => setFb(e.target.checked)} />Food &amp; Beverage (day budgets follow sales)</label>}
       {kind === 'sub' && <div className="grid2">
         <Field label="Category"><select value={cat} onChange={(e) => setCat(+e.target.value)}>{cats.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}</select></Field>
-        <Field label="SKU code letters" hint="2 letters, used in SKU codes such as SP-0001."><input value={code} maxLength={2} onChange={(e) => setCode(e.target.value.toUpperCase())} /></Field></div>}
+        <Field label="SKU code letters" hint={row ? 'Fixed: existing SKU codes carry these letters.' : '2 letters, used in SKU codes such as SP-0001.'}><input value={code} maxLength={2} disabled={!!row} onChange={(e) => setCode(e.target.value.toUpperCase())} /></Field></div>}
+      {row && kind === 'pack' && <p className="hint">Renaming changes it on every SKU that uses this pack size.</p>}
+      {row && kind === 'brand' && <p className="hint">Renaming changes it on every SKU of this brand.</p>}
       <Errors list={a.errors} />
       <div className="btns"><button className="btn ghost" onClick={onClose}>Cancel</button>
-        <button className="btn" disabled={a.busy} onClick={() => a.run(() => post(path, { name, category_id: cat, code, is_fb: fb }), () => { onDone(); return name + ' added' })}>Save</button></div>
+        <button className="btn" disabled={a.busy} onClick={() => a.run(() => row ? put(`${path}/${row.id}`, { name, category_id: cat, code, is_fb: fb }) : post(path, { name, category_id: cat, code, is_fb: fb }), () => { onDone(); return name + (row ? ' saved' : ' added') })}>Save</button></div>
     </Modal>
   )
 }

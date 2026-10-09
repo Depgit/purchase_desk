@@ -238,7 +238,7 @@ func Load(ctx context.Context, q database.Q, id int64) (*Invoice, error) {
 	if err != nil {
 		return nil, err
 	}
-	lr, err := q.Query(ctx, `SELECT l.id, coalesce(k.code,''), coalesce(b.name||' '||k.item_name, l.description), coalesce(ps.name, l.unit), coalesce(k.hsn,''), l.qty, gl.qty, l.rate, l.gst_pct
+	lr, err := q.Query(ctx, `SELECT l.id, coalesce(k.code,''), coalesce(concat_ws(' ', b.name, k.item_name), l.description), coalesce(ps.name, l.unit), coalesce(k.hsn,''), l.qty, gl.qty, l.rate, l.gst_pct
 		FROM invoice i JOIN goods_receipt_line gl ON gl.goods_receipt_id=i.goods_receipt_id JOIN document_line l ON l.id=gl.line_id
 		LEFT JOIN sku k ON k.id=l.sku_id LEFT JOIN brand b ON b.id=k.brand_id LEFT JOIN pack_size ps ON ps.id=k.pack_size_id WHERE i.id=$1 ORDER BY l.id`, id)
 	if err != nil {

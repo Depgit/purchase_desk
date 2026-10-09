@@ -99,7 +99,7 @@ func (s *Service) define() map[string]*kind {
 	return map[string]*kind{
 		"items": {
 			title: "Items", module: "Items", allowed: masters,
-			required: []string{"category", "sub_category", "brand", "item_name", "unit", "gst_percent"},
+			required: []string{"category", "sub_category", "item_name", "unit", "gst_percent"}, // brand may be blank for services
 			sample:   "category,sub_category,brand,item_name,unit,gst_percent,hsn,properties\nHousekeeping,Guest Amenities,Aroma Leaf,Body lotion 30 ml,box of 250,18,33049910,ALL\nEngineering,Electrical,BrightVolt,Pool pump capacitor,piece,18,,P01;P23\n",
 			check: func(ctx context.Context, x *run, row csvfile.Row) result {
 				var scID, catID int64

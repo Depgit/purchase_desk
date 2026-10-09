@@ -34,19 +34,19 @@ export function ItemsPage() {
         filters={[
           { id: 'cat', label: 'Category', options: [['', 'All categories'], ...(l?.categories || []).map((c) => [String(c.id), c.name] as [string, string])], test: (s, v) => String(s.category_id) === v },
           { id: 'sc', label: 'Sub-category', options: [['', 'All sub-categories'], ...(l?.subCategories || []).map((c) => [String(c.id), c.name] as [string, string])], test: (s, v) => String(s.sub_category_id) === v },
-          { id: 'hsn', label: 'HSN', options: [['', 'Any HSN'], ['0', 'HSN missing']], test: (s) => !s.hsn },
+          { id: 'hsn', label: 'HSN / SAC', options: [['', 'Any HSN / SAC'], ['0', 'HSN / SAC missing']], test: (s) => !s.hsn },
           { id: 'act', label: 'Active', options: [['', 'Active and inactive'], ['1', 'Active only'], ['0', 'Inactive only']], test: (s, v) => s.active === (v === '1') },
         ]}
         columns={[
           { key: 'code', label: 'SKU', render: (s) => s.code, csv: (s) => s.code },
-          { key: 'brand', label: 'Brand', render: (s) => s.brand, csv: (s) => s.brand },
+          { key: 'brand', label: 'Brand', render: (s) => s.brand || '—', csv: (s) => s.brand },
           { key: 'item', label: 'Item', render: (s) => s.item_name, csv: (s) => s.item_name },
           { key: 'pack', label: 'Pack size', render: (s) => s.pack_size, csv: (s) => s.pack_size },
           { key: 'sub', label: 'Sub-category', render: (s) => s.sub_category, csv: (s) => s.sub_category },
           { key: 'cat', label: 'Category', render: (s) => s.category, csv: (s) => s.category },
           { key: 'scope', label: 'Available at', render: scope, csv: scope },
           { key: 'gst', label: 'GST', right: true, render: (s) => s.gst_pct + '%', sort: (s) => s.gst_pct, csv: (s) => s.gst_pct },
-          { key: 'hsn', label: 'HSN', render: (s) => s.hsn || '—', csv: (s) => s.hsn },
+          { key: 'hsn', label: 'HSN / SAC', render: (s) => s.hsn || '—', csv: (s) => s.hsn },
           { key: 'rated', label: 'Vendors with valid rate', right: true, render: (s) => s.rated_vendors, sort: (s) => s.rated_vendors, csv: (s) => s.rated_vendors },
           { key: 'status', label: 'Status', render: (s) => <ActiveToggle kind="sku" id={s.id} name={s.code} active={s.active} onDone={reload} />, csv: (s) => s.active ? 'Active' : 'Inactive' },
           { key: 'edit', label: '', render: (s) => ed ? <button className="link" onClick={() => setEdit(s)}>Edit</button> : null },
@@ -70,13 +70,13 @@ function SKUModal({ sku, onClose, onDone }: { sku: SKU | null; onClose: () => vo
       <div className="grid2">
         <Field label="Sub-category" hint={sku ? 'Fixed: it sets the SKU code.' : 'The SKU code is generated from its 2 letters.'}>
           <select disabled={!!sku} value={f.sub_category_id} onChange={(e) => set('sub_category_id', +e.target.value)}>{subs.map((s) => <option key={s.id} value={s.id}>{s.category} › {s.name}</option>)}</select></Field>
-        <Field label="Brand" hint="Pick from the list, or type a new brand and it is added with the SKU. Use Generic if unbranded.">
+        <Field label="Brand (optional)" hint="Pick from the list, or type a new brand and it is added with the SKU. Leave empty for a service or an unbranded item.">
           <input list="brands" value={f.brand} onChange={(e) => set('brand', e.target.value)} autoComplete="off" />
           <datalist id="brands">{l?.brands.filter((b) => b.active).map((b) => <option key={b.id} value={b.name} />)}</datalist></Field>
         <Field label="Item name" hint="Without the brand name."><input value={f.item_name} onChange={(e) => set('item_name', e.target.value)} /></Field>
         <Field label="Pack size"><select value={f.pack_size_id} onChange={(e) => set('pack_size_id', +e.target.value)}>{l?.packSizes.filter((p) => p.active || p.id === sku?.pack_size_id).map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}</select></Field>
         <Field label="GST %"><select value={f.gst_pct} onChange={(e) => set('gst_pct', +e.target.value)}>{[0, 5, 12, 18, 28, 40].map((g) => <option key={g} value={g}>{g}%</option>)}</select></Field>
-        <Field label="HSN code" hint="Sent to Zoho on every bill line."><input value={f.hsn} inputMode="numeric" maxLength={8} onChange={(e) => set('hsn', e.target.value)} /></Field>
+        <Field label="HSN or SAC code" hint="HSN for goods (4 to 8 digits), SAC for services (6 digits starting with 99). Sent to Zoho on every bill line."><input value={f.hsn} inputMode="numeric" maxLength={8} placeholder="e.g. 34011190 or 998533" onChange={(e) => set('hsn', e.target.value.replace(/\D/g, ''))} /></Field>
         <Field label="Available at"><select value={f.scope} onChange={(e) => set('scope', e.target.value)}><option value="all">All properties (master item)</option><option value="selected">Selected properties only</option></select></Field>
       </div>
       {f.scope === 'selected' && <>

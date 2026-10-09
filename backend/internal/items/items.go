@@ -1,5 +1,6 @@
 // Package items manages the item hierarchy: category, sub-category, SKU, plus brands and pack sizes.
 // One SKU = sub-category + brand + item name + pack size, and the same combination cannot exist twice.
+// Brand is optional (services have none). The code field hsn holds an HSN code for goods or a SAC code for services.
 package items
 
 import (
@@ -24,14 +25,17 @@ type Service struct{ DB *pgxpool.Pool }
 
 func (s *Service) Routes(r chi.Router) {
 	r.Get("/categories", httpjson.Wrap(s.listCategories))
-	r.Post("/categories", httpjson.Wrap(s.createCategory))
+	r.Post("/categories", httpjson.Wrap(s.saveCategory))
+	r.Put("/categories/{id}", httpjson.Wrap(s.saveCategory))
 	r.Get("/sub-categories", httpjson.Wrap(s.listSubCategories))
 	r.Post("/sub-categories", httpjson.Wrap(s.saveSubCategory))
 	r.Put("/sub-categories/{id}", httpjson.Wrap(s.saveSubCategory))
 	r.Get("/brands", httpjson.Wrap(s.listBrands))
 	r.Post("/brands", httpjson.Wrap(s.createBrand))
+	r.Put("/brands/{id}", httpjson.Wrap(s.createBrand))
 	r.Get("/pack-sizes", httpjson.Wrap(s.listPackSizes))
 	r.Post("/pack-sizes", httpjson.Wrap(s.createPackSize))
+	r.Put("/pack-sizes/{id}", httpjson.Wrap(s.createPackSize))
 	r.Get("/skus", httpjson.Wrap(s.listSKUs))
 	r.Post("/skus", httpjson.Wrap(s.saveSKU))
 	r.Put("/skus/{id}", httpjson.Wrap(s.saveSKU))
@@ -63,7 +67,8 @@ func (s *Service) listCategories(w http.ResponseWriter, r *http.Request) error {
 	return httpjson.OK(w, out)
 }
 
-func (s *Service) createCategory(w http.ResponseWriter, r *http.Request) error {
+// saveCategory adds a category, or edits its name and F&B flag (PUT /categories/{id}).
+func (s *Service) saveCategory(w http.ResponseWriter, r *http.Request) error {
 	u := access.From(r)
 	if err := access.NeedRight(u, access.Masters, "edit masters"); err != nil {
 		return err
@@ -79,12 +84,30 @@ func (s *Service) createCategory(w http.ResponseWriter, r *http.Request) error {
 	if len(in.Name) < 3 || strings.ContainsAny(in.Name, `<>",`) {
 		return httpjson.Bad("Enter the category name, without commas.")
 	}
+	id := int64(0)
+	if chi.URLParam(r, "id") != "" {
+		var err error
+		if id, err = httpjson.ID(r, "id"); err != nil {
+			return err
+		}
+	}
 	var dup bool
-	_ = s.DB.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM category WHERE norm_key(name)=norm_key($1))`, in.Name).Scan(&dup)
+	_ = s.DB.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM category WHERE norm_key(name)=norm_key($1) AND id<>$2)`, in.Name, id).Scan(&dup)
 	if dup {
 		return httpjson.Bad("This category already exists.")
 	}
-	var id int64
+	if id != 0 {
+		var old string
+		var oldFB bool
+		if err := s.DB.QueryRow(r.Context(), `SELECT name, is_fb FROM category WHERE id=$1`, id).Scan(&old, &oldFB); err != nil {
+			return httpjson.NotFound("Category")
+		}
+		if _, err := s.DB.Exec(r.Context(), `UPDATE category SET name=$2, is_fb=$3 WHERE id=$1`, id, in.Name, in.IsFB); err != nil {
+			return err
+		}
+		_ = auditlog.Write(r.Context(), s.DB, u, "Items", "Category edited", in.Name, fmt.Sprintf("%s, F&B %v → %s, F&B %v", old, oldFB, in.Name, in.IsFB))
+		return httpjson.OK(w, map[string]int64{"id": id})
+	}
 	if err := s.DB.QueryRow(r.Context(), `INSERT INTO category(name,is_fb,created_by) VALUES ($1,$2,$3) RETURNING id`, in.Name, in.IsFB, u.ID).Scan(&id); err != nil {
 		return err
 	}
@@ -153,11 +176,26 @@ func (s *Service) saveSubCategory(w http.ResponseWriter, r *http.Request) error 
 		return httpjson.Bad("A sub-category with this name already exists.")
 	}
 	if id != 0 {
-		// The 2-letter code is fixed once SKUs carry it.
-		if _, err := s.DB.Exec(r.Context(), `UPDATE sub_category SET name=$2 WHERE id=$1`, id, in.Name); err != nil {
+		// The 2-letter code is fixed once SKUs carry it; the name and the category can change.
+		var old, oldCat string
+		var catID int64
+		if err := s.DB.QueryRow(r.Context(), `SELECT s.name, s.category_id, c.name FROM sub_category s JOIN category c ON c.id=s.category_id WHERE s.id=$1`, id).Scan(&old, &catID, &oldCat); err != nil {
+			return httpjson.NotFound("Sub-category")
+		}
+		if in.CategoryID != 0 && in.CategoryID != catID {
+			var ok bool
+			_ = s.DB.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM category WHERE id=$1 AND active)`, in.CategoryID).Scan(&ok)
+			if !ok {
+				return httpjson.Bad("Choose an active category.")
+			}
+			catID = in.CategoryID
+		}
+		if _, err := s.DB.Exec(r.Context(), `UPDATE sub_category SET name=$2, category_id=$3 WHERE id=$1`, id, in.Name, catID); err != nil {
 			return err
 		}
-		_ = auditlog.Write(r.Context(), s.DB, u, "Items", "Sub-category renamed", in.Name, "")
+		var newCat string
+		_ = s.DB.QueryRow(r.Context(), `SELECT name FROM category WHERE id=$1`, catID).Scan(&newCat)
+		_ = auditlog.Write(r.Context(), s.DB, u, "Items", "Sub-category edited", in.Name, old+" ("+oldCat+") → "+in.Name+" ("+newCat+")")
 		return httpjson.OK(w, map[string]int64{"id": id})
 	}
 	if len(in.Code) != 2 || strings.Trim(in.Code, "ABCDEFGHIJKLMNOPQRSTUVWXYZ") != "" {
@@ -222,16 +260,33 @@ func (s *Service) createNamed(w http.ResponseWriter, r *http.Request, table, lab
 	if len(in.Name) < 2 || strings.ContainsAny(in.Name, `<>",`) {
 		return httpjson.Bad("Enter the %s, without commas.", strings.ToLower(label))
 	}
+	id := int64(0)
+	if chi.URLParam(r, "id") != "" {
+		var err error
+		if id, err = httpjson.ID(r, "id"); err != nil {
+			return err
+		}
+	}
 	var existing string
 	var active bool
-	_ = s.DB.QueryRow(r.Context(), fmt.Sprintf(`SELECT name, active FROM %s WHERE norm_key(name)=norm_key($1)`, table), in.Name).Scan(&existing, &active)
+	_ = s.DB.QueryRow(r.Context(), fmt.Sprintf(`SELECT name, active FROM %s WHERE norm_key(name)=norm_key($1) AND id<>$2`, table), in.Name, id).Scan(&existing, &active)
 	if existing != "" {
 		if !active {
 			existing += " (inactive)"
 		}
 		return httpjson.Bad("This %s already exists as %s.", strings.ToLower(label), existing)
 	}
-	var id int64
+	if id != 0 {
+		var old string
+		if err := s.DB.QueryRow(r.Context(), fmt.Sprintf(`SELECT name FROM %s WHERE id=$1`, table), id).Scan(&old); err != nil {
+			return httpjson.NotFound(label)
+		}
+		if _, err := s.DB.Exec(r.Context(), fmt.Sprintf(`UPDATE %s SET name=$2 WHERE id=$1`, table), id, in.Name); err != nil {
+			return err
+		}
+		_ = auditlog.Write(r.Context(), s.DB, u, "Items", label+" renamed", in.Name, old+" → "+in.Name)
+		return httpjson.OK(w, map[string]int64{"id": id})
+	}
 	if err := s.DB.QueryRow(r.Context(), fmt.Sprintf(`INSERT INTO %s(name,created_by) VALUES ($1,$2) RETURNING id`, table), in.Name, u.ID).Scan(&id); err != nil {
 		return err
 	}
@@ -270,11 +325,11 @@ type SKU struct {
 }
 
 func (s *Service) listSKUs(w http.ResponseWriter, r *http.Request) error {
-	rows, err := s.DB.Query(r.Context(), `SELECT k.id, k.code, k.sub_category_id, sc.name, c.id, c.name, k.brand_id, b.name, k.item_name, k.pack_size_id, ps.name,
+	rows, err := s.DB.Query(r.Context(), `SELECT k.id, k.code, k.sub_category_id, sc.name, c.id, c.name, coalesce(k.brand_id,0), coalesce(b.name,''), k.item_name, k.pack_size_id, ps.name,
 		k.gst_pct, k.hsn, k.scope, k.cluster_ids, k.property_ids, k.active,
 		(SELECT count(DISTINCT rc.vendor_id) FROM rate_card rc WHERE rc.sku_id=k.id AND NOT rc.superseded AND current_date BETWEEN rc.valid_from AND rc.valid_to)
 		FROM sku k JOIN sub_category sc ON sc.id=k.sub_category_id JOIN category c ON c.id=sc.category_id
-		JOIN brand b ON b.id=k.brand_id JOIN pack_size ps ON ps.id=k.pack_size_id ORDER BY k.code`)
+		LEFT JOIN brand b ON b.id=k.brand_id JOIN pack_size ps ON ps.id=k.pack_size_id ORDER BY k.code`)
 	if err != nil {
 		return err
 	}
@@ -305,7 +360,15 @@ type SKUInput struct {
 }
 
 // NewBrand reports whether saving will create a new brand.
-func (in *SKUInput) NewBrand() bool { return in.brandID == 0 }
+func (in *SKUInput) NewBrand() bool { return in.brandID == 0 && in.BrandName != "" }
+
+// brandRef is the value stored in sku.brand_id: the brand's id, or NULL for an item without a brand.
+func (in *SKUInput) brandRef() any {
+	if in.brandID == 0 {
+		return nil
+	}
+	return in.brandID
+}
 
 // Validate tidies the input and returns every problem found. selfID is the SKU being edited, or 0.
 func Validate(ctx context.Context, q database.Q, in *SKUInput, selfID int64) []string {
@@ -337,10 +400,11 @@ func Validate(ctx context.Context, q database.Q, in *SKUInput, selfID int64) []s
 		errs = append(errs, "GST % must be 0, 5, 12, 18, 28 or 40.")
 	}
 	if in.HSN != "" && !indiantax.HSN.MatchString(in.HSN) {
-		errs = append(errs, "HSN code must be 4 to 8 digits.")
+		errs = append(errs, "HSN or SAC code must be 4 to 8 digits. Goods use HSN; services use a 6-digit SAC starting with 99.")
 	}
+	in.brandID = 0
 	if textclean.Key(in.BrandName) == "" {
-		errs = append(errs, "Brand is missing (use Generic if unbranded).")
+		in.BrandName = "" // no brand, for example a service
 	} else {
 		var bActive bool
 		var bName string
@@ -369,9 +433,9 @@ func Validate(ctx context.Context, q database.Q, in *SKUInput, selfID int64) []s
 	if in.PropertyIDs == nil {
 		in.PropertyIDs = []int64{}
 	}
-	if len(errs) == 0 && in.brandID != 0 {
+	if len(errs) == 0 && (in.brandID != 0 || in.BrandName == "") {
 		var dup string
-		_ = q.QueryRow(ctx, `SELECT code || CASE WHEN active THEN '' ELSE ' (inactive)' END FROM sku WHERE sub_category_id=$1 AND brand_id=$2 AND norm_key(item_name)=norm_key($3) AND pack_size_id=$4 AND id<>$5`,
+		_ = q.QueryRow(ctx, `SELECT code || CASE WHEN active THEN '' ELSE ' (inactive)' END FROM sku WHERE sub_category_id=$1 AND coalesce(brand_id,0)=$2 AND norm_key(item_name)=norm_key($3) AND pack_size_id=$4 AND id<>$5`,
 			in.SubCategoryID, in.brandID, in.ItemName, in.PackSizeID, selfID).Scan(&dup)
 		if dup != "" {
 			errs = append(errs, "Already exists as "+dup+".")
@@ -381,7 +445,7 @@ func Validate(ctx context.Context, q database.Q, in *SKUInput, selfID int64) []s
 }
 
 func ensureBrand(ctx context.Context, tx pgx.Tx, u *access.User, in *SKUInput) error {
-	if in.brandID != 0 {
+	if in.brandID != 0 || in.BrandName == "" {
 		return nil
 	}
 	err := tx.QueryRow(ctx, `INSERT INTO brand(name,created_by) VALUES ($1,$2) ON CONFLICT ((norm_key(name))) DO UPDATE SET name=brand.name RETURNING id`, in.BrandName, u.ID).Scan(&in.brandID)
@@ -406,11 +470,11 @@ func Create(ctx context.Context, tx pgx.Tx, u *access.User, in *SKUInput) (strin
 	}
 	code := fmt.Sprintf("%s-%04d", prefix, n)
 	_, err := tx.Exec(ctx, `INSERT INTO sku(code,sub_category_id,brand_id,item_name,pack_size_id,gst_pct,hsn,scope,cluster_ids,property_ids,created_by)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`, code, in.SubCategoryID, in.brandID, in.ItemName, in.PackSizeID, in.GST, in.HSN, in.Scope, in.ClusterIDs, in.PropertyIDs, u.ID)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`, code, in.SubCategoryID, in.brandRef(), in.ItemName, in.PackSizeID, in.GST, in.HSN, in.Scope, in.ClusterIDs, in.PropertyIDs, u.ID)
 	if err != nil {
 		return "", err
 	}
-	return code, auditlog.Write(ctx, tx, u, "Items", "SKU added", code, in.BrandName+" "+in.ItemName)
+	return code, auditlog.Write(ctx, tx, u, "Items", "SKU added", code, strings.TrimSpace(in.BrandName+" "+in.ItemName))
 }
 
 func (s *Service) saveSKU(w http.ResponseWriter, r *http.Request) error {
@@ -447,14 +511,14 @@ func (s *Service) saveSKU(w http.ResponseWriter, r *http.Request) error {
 			return err
 		}
 		var old string
-		if err := tx.QueryRow(r.Context(), `SELECT k.code||' · '||b.name||' '||k.item_name||' · '||k.gst_pct||'%' FROM sku k JOIN brand b ON b.id=k.brand_id WHERE k.id=$1`, id).Scan(&old); err != nil {
+		if err := tx.QueryRow(r.Context(), `SELECT k.code||' · '||concat_ws(' ', b.name, k.item_name)||' · '||k.gst_pct||'%' FROM sku k LEFT JOIN brand b ON b.id=k.brand_id WHERE k.id=$1`, id).Scan(&old); err != nil {
 			return err
 		}
 		if err := tx.QueryRow(r.Context(), `UPDATE sku SET brand_id=$2, item_name=$3, pack_size_id=$4, gst_pct=$5, hsn=$6, scope=$7, cluster_ids=$8, property_ids=$9 WHERE id=$1 RETURNING code`,
-			id, in.brandID, in.ItemName, in.PackSizeID, in.GST, in.HSN, in.Scope, in.ClusterIDs, in.PropertyIDs).Scan(&code); err != nil {
+			id, in.brandRef(), in.ItemName, in.PackSizeID, in.GST, in.HSN, in.Scope, in.ClusterIDs, in.PropertyIDs).Scan(&code); err != nil {
 			return err
 		}
-		return auditlog.Write(r.Context(), tx, u, "Items", "SKU edited", code, fmt.Sprintf("%s → %s %s · %v%%", old, in.BrandName, in.ItemName, in.GST))
+		return auditlog.Write(r.Context(), tx, u, "Items", "SKU edited", code, fmt.Sprintf("%s → %s · %v%%", old, strings.TrimSpace(in.BrandName+" "+in.ItemName), in.GST))
 	})
 	if err != nil {
 		return err

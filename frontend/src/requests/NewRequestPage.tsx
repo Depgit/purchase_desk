@@ -115,7 +115,7 @@ export function NewRequestPage() {
             <div className="head"><h2>Add items</h2><div className="acts"><button className="btn ghost" onClick={() => setUpload(true)}>Upload item list</button></div></div>
               <label className="field"><span>Item</span>
                 <SearchSelect value={sku ? String(sku) : ''} onChange={(v) => { setSku(+v); setEst('') }} emptyLabel="Choose item" placeholder="Search item, brand, SKU code or sub-category" ariaLabel="Item"
-                  items={cats.flatMap((c) => items.filter((i) => i.category === c).map((i) => ({ value: String(i.sku_id), label: `${i.item_name} (${i.pack_size}) · ${i.brand}`, group: c,
+                  items={cats.flatMap((c) => items.filter((i) => i.category === c).map((i) => ({ value: String(i.sku_id), label: `${i.item_name} (${i.pack_size})${i.brand ? ' · ' + i.brand : ''}`, group: c,
                     hint: [i.sku_code, i.sub_category, i.orderable ? '' : i.problem].filter(Boolean).join(' · '), disabled: !i.orderable })))} /></label>
             <div className="addrow">
               <label className="field"><span>Vendor (from mapping)</span><input disabled value={cur ? (cur.orderable ? `${cur.vendor_name} · ${cur.rate != null ? inr(cur.rate) : 'rate to confirm'}` : cur.problem) : 'Choose item first'} /></label>

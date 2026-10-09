@@ -231,18 +231,18 @@ func threeWay(ctx context.Context, s *Service, f Filter) ([][]any, []int64, erro
 
 func poGRN(ctx context.Context, s *Service, f Filter) ([][]any, []int64, error) {
 	w, a := place(f, 3)
-	rows, err := s.DB.Query(ctx, `SELECT d.po_number, p.name, v.legal_name, k2.code, b.name||' '||k2.item_name, l.qty, l.received_qty, l.qty-l.received_qty, l.rate,
+	rows, err := s.DB.Query(ctx, `SELECT d.po_number, p.name, v.legal_name, k2.code, concat_ws(' ', b.name, k2.item_name), l.qty, l.received_qty, l.qty-l.received_qty, l.rate,
 		`+lineValue+`, l.received_qty*l.rate*(1+l.gst_pct/100), CASE WHEN d.po_closed_short THEN 'Yes' ELSE '' END, d.id
-		FROM document_line l JOIN document d ON d.id=l.document_id JOIN sku k2 ON k2.id=l.sku_id JOIN brand b ON b.id=k2.brand_id JOIN vendor v ON v.id=d.vendor_id`+placeJoin+`
+		FROM document_line l JOIN document d ON d.id=l.document_id JOIN sku k2 ON k2.id=l.sku_id LEFT JOIN brand b ON b.id=k2.brand_id JOIN vendor v ON v.id=d.vendor_id`+placeJoin+`
 		WHERE d.po_number IS NOT NULL AND d.kind='purchase' AND NOT d.is_transfer AND `+dateCol(f)+` >= $1 AND `+dateCol(f)+` < $2::date + 1`+w+` ORDER BY d.po_date DESC, l.id`, append([]any{f.From, f.To}, a...)...)
 	return collect(rows, err, 12)
 }
 
 func register(ctx context.Context, s *Service, f Filter) ([][]any, []int64, error) {
 	w, a := place(f, 3)
-	rows, err := s.DB.Query(ctx, `SELECT d.number, coalesce(d.po_number,''), d.created_at, p.name, k.name, cat.name, sc.name, k2.code, b.name||' '||k2.item_name, ps.name,
+	rows, err := s.DB.Query(ctx, `SELECT d.number, coalesce(d.po_number,''), d.created_at, p.name, k.name, cat.name, sc.name, k2.code, concat_ws(' ', b.name, k2.item_name), ps.name,
 		l.qty, l.original_qty, l.rate, l.gst_pct, `+lineValue+`, v.legal_name, u.name, `+stageSQL+`, d.id
-		FROM document_line l JOIN document d ON d.id=l.document_id JOIN sku k2 ON k2.id=l.sku_id JOIN brand b ON b.id=k2.brand_id JOIN pack_size ps ON ps.id=k2.pack_size_id
+		FROM document_line l JOIN document d ON d.id=l.document_id JOIN sku k2 ON k2.id=l.sku_id LEFT JOIN brand b ON b.id=k2.brand_id JOIN pack_size ps ON ps.id=k2.pack_size_id
 		JOIN sub_category sc ON sc.id=k2.sub_category_id JOIN category cat ON cat.id=sc.category_id JOIN vendor v ON v.id=d.vendor_id JOIN app_user u ON u.id=d.requester_id`+placeJoin+`
 		WHERE d.kind='purchase' AND `+dateCol(f)+` >= $1 AND `+dateCol(f)+` < $2::date + 1`+w+` ORDER BY d.created_at DESC, l.id`, append([]any{f.From, f.To}, a...)...)
 	return collect(rows, err, 18)
@@ -456,8 +456,8 @@ func vendorSpend(ctx context.Context, s *Service, f Filter) ([][]any, []int64, e
 
 func skuSpend(ctx context.Context, s *Service, f Filter) ([][]any, []int64, error) {
 	w, a := place(f, 3)
-	rows, err := s.DB.Query(ctx, `SELECT k2.code, b.name||' '||k2.item_name||' · '||ps.name, sc.name, count(DISTINCT d.id), sum(l.qty), sum(`+lineValue+`), sum(l.qty*l.rate)/nullif(sum(l.qty),0)
-		FROM document_line l JOIN document d ON d.id=l.document_id JOIN sku k2 ON k2.id=l.sku_id JOIN brand b ON b.id=k2.brand_id JOIN pack_size ps ON ps.id=k2.pack_size_id
+	rows, err := s.DB.Query(ctx, `SELECT k2.code, concat_ws(' ', b.name, k2.item_name)||' · '||ps.name, sc.name, count(DISTINCT d.id), sum(l.qty), sum(`+lineValue+`), sum(l.qty*l.rate)/nullif(sum(l.qty),0)
+		FROM document_line l JOIN document d ON d.id=l.document_id JOIN sku k2 ON k2.id=l.sku_id LEFT JOIN brand b ON b.id=k2.brand_id JOIN pack_size ps ON ps.id=k2.pack_size_id
 		JOIN sub_category sc ON sc.id=k2.sub_category_id`+placeJoin+`
 		WHERE d.kind='purchase' AND d.status NOT IN ('PENDING','RETURNED','REJECTED','CANCELLED','WH_BACK') AND d.approved_at >= $1 AND d.approved_at < $2::date + 1`+w+`
 		GROUP BY k2.code, b.name, k2.item_name, ps.name, sc.name ORDER BY sum(`+lineValue+`) DESC`, append([]any{f.From, f.To}, a...)...)
@@ -551,10 +551,10 @@ func payables(ctx context.Context, s *Service, f Filter) ([][]any, []int64, erro
 }
 
 func rates(ctx context.Context, s *Service, _ Filter) ([][]any, []int64, error) {
-	rows, err := s.DB.Query(ctx, `SELECT v.legal_name, k.code, b.name||' '||k.item_name, r.rate, r.gst_pct, r.valid_from, r.valid_to, r.valid_to - current_date,
+	rows, err := s.DB.Query(ctx, `SELECT v.legal_name, k.code, concat_ws(' ', b.name, k.item_name), r.rate, r.gst_pct, r.valid_from, r.valid_to, r.valid_to - current_date,
 		CASE WHEN r.valid_to < current_date THEN 'Expired' WHEN r.valid_from > current_date THEN 'Starts later' WHEN r.valid_to - current_date < 30 THEN 'Expiring soon' ELSE 'Active' END,
 		CASE WHEN EXISTS (SELECT 1 FROM vendor_mapping m WHERE m.active AND m.vendor_id=r.vendor_id AND ((m.level='sku' AND m.sku_id=r.sku_id) OR (m.level='sc' AND m.sub_category_id=k.sub_category_id))) THEN 'Yes' ELSE 'No' END
-		FROM rate_card r JOIN vendor v ON v.id=r.vendor_id JOIN sku k ON k.id=r.sku_id JOIN brand b ON b.id=k.brand_id
+		FROM rate_card r JOIN vendor v ON v.id=r.vendor_id JOIN sku k ON k.id=r.sku_id LEFT JOIN brand b ON b.id=k.brand_id
 		WHERE NOT r.superseded ORDER BY r.valid_to, v.legal_name`)
 	return collect(rows, err, 10)
 }

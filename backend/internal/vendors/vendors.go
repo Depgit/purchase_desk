@@ -63,6 +63,7 @@ type Vendor struct {
 	BankMasked     string   `json:"bank_account_masked"`
 	IFSC           string   `json:"ifsc"`
 	BankProofID    *int64   `json:"bank_proof_file_id"`
+	MSMEFileID     *int64   `json:"msme_file_id"`
 	BankVerified   bool     `json:"bank_verified"`
 	BankVerifiedBy string   `json:"bank_verified_by"`
 	Terms          string   `json:"payment_terms"`
@@ -78,7 +79,7 @@ type Vendor struct {
 
 const selectVendor = `SELECT v.id, v.code, v.vendor_type, v.legal_name, v.address, v.city, v.pin, v.contact_person, v.mobile, v.email,
 	v.gst_registered, coalesce(v.gstin,''), coalesce(v.pan,''), v.state_code, v.msme, v.udyam, v.bank_holder, v.bank_account_last4, v.ifsc,
-	v.bank_proof_file_id, v.bank_verified, coalesce(bu.name,''), v.payment_terms, v.sheet_mode, v.sheet_time, v.sheet_channel, v.active, coalesce(v.inactive_reason,''),
+	v.bank_proof_file_id, v.msme_file_id, v.bank_verified, coalesce(bu.name,''), v.payment_terms, v.sheet_mode, v.sheet_time, v.sheet_channel, v.active, coalesce(v.inactive_reason,''),
 	coalesce((SELECT array_agg(sub_category_id ORDER BY sub_category_id) FROM vendor_sub_category WHERE vendor_id=v.id),'{}'),
 	coalesce((SELECT array_agg(bill_type_id ORDER BY bill_type_id) FROM vendor_bill_type WHERE vendor_id=v.id),'{}'),
 	coalesce((SELECT array_agg(sc.name ORDER BY sc.name) FROM vendor_sub_category x JOIN sub_category sc ON sc.id=x.sub_category_id WHERE x.vendor_id=v.id),'{}') ||
@@ -90,7 +91,7 @@ func scan(row pgx.CollectableRow) (Vendor, error) {
 	var last4 string
 	err := row.Scan(&v.ID, &v.Code, &v.Type, &v.Name, &v.Address, &v.City, &v.PIN, &v.Contact, &v.Mobile, &v.Email,
 		&v.GSTRegistered, &v.GSTIN, &v.PAN, &v.StateCode, &v.MSME, &v.Udyam, &v.BankHolder, &last4, &v.IFSC,
-		&v.BankProofID, &v.BankVerified, &v.BankVerifiedBy, &v.Terms, &v.SheetMode, &v.SheetTime, &v.SheetChannel, &v.Active, &v.InactiveReason,
+		&v.BankProofID, &v.MSMEFileID, &v.BankVerified, &v.BankVerifiedBy, &v.Terms, &v.SheetMode, &v.SheetTime, &v.SheetChannel, &v.Active, &v.InactiveReason,
 		&v.SubCategoryIDs, &v.BillTypeIDs, &v.Supplies)
 	if last4 != "" {
 		v.BankMasked = "••••••" + last4
@@ -155,9 +156,12 @@ type Input struct {
 	Terms          string  `json:"payment_terms"`
 	SubCategoryIDs []int64 `json:"sub_category_ids"`
 	BillTypeIDs    []int64 `json:"bill_type_ids"`
+
+	msmeFile   *uploadedfiles.File // MSME (Udyam) certificate attached to this save, if any
+	msmeFileID *int64              // set once the certificate is saved
 }
 
-// readInput accepts JSON, or a multipart form with a "data" JSON field and an optional "bank_proof" file.
+// readInput accepts JSON, or a multipart form with a "data" JSON field and optional "bank_proof" and "msme_certificate" files.
 func readInput(r *http.Request) (Input, *uploadedfiles.File, error) {
 	var in Input
 	if strings.HasPrefix(r.Header.Get("Content-Type"), "multipart/") {
@@ -170,6 +174,11 @@ func readInput(r *http.Request) (Input, *uploadedfiles.File, error) {
 		var f *uploadedfiles.File
 		if _, fh, err := r.FormFile("bank_proof"); err == nil {
 			if f, err = uploadedfiles.Read(fh); err != nil {
+				return in, nil, err
+			}
+		}
+		if _, fh, err := r.FormFile("msme_certificate"); err == nil {
+			if in.msmeFile, err = uploadedfiles.Read(fh); err != nil {
 				return in, nil, err
 			}
 		}
@@ -223,17 +232,31 @@ func (s *Service) Validate(ctx context.Context, in *Input, id int64, proof *uplo
 	if in.GSTRegistered {
 		if !indiantax.GSTIN.MatchString(in.GSTIN) {
 			errs = append(errs, "GSTIN format is not valid.")
-		} else if in.PAN != "" && in.GSTIN[2:12] != in.PAN {
+		} else if in.PAN == "" {
+			in.PAN = in.GSTIN[2:12] // characters 3 to 12 of a GSTIN are the PAN
+		} else if in.GSTIN[2:12] != in.PAN {
 			errs = append(errs, "PAN does not match the PAN inside the GSTIN.")
 		}
 	} else {
 		in.GSTIN = ""
 	}
-	if !indiantax.PAN.MatchString(in.PAN) {
+	if in.PAN == "" {
+		errs = append(errs, "Enter the PAN.")
+	} else if !indiantax.PAN.MatchString(in.PAN) {
 		errs = append(errs, "PAN format is not valid.")
 	}
 	if in.MSME && !indiantax.Udyam.MatchString(in.Udyam) {
 		errs = append(errs, "Udyam number format is UDYAM-XX-00-0000000.")
+	}
+	// An MSME vendor needs its Udyam certificate on file, as proof for the 45-day payment rule.
+	if in.MSME && needProof && in.msmeFile == nil {
+		var onFile bool
+		if id != 0 {
+			_ = s.DB.QueryRow(ctx, `SELECT msme_file_id IS NOT NULL FROM vendor WHERE id=$1`, id).Scan(&onFile)
+		}
+		if !onFile {
+			errs = append(errs, "Attach the MSME (Udyam) certificate.")
+		}
 	}
 	if !in.MSME {
 		in.Udyam = ""
@@ -312,6 +335,13 @@ func (s *Service) save(w http.ResponseWriter, r *http.Request) error {
 			}
 			proofID = &fid
 		}
+		if in.msmeFile != nil {
+			fid, err := s.Files.Save(r.Context(), tx, u, in.msmeFile, "msme-certificates", false)
+			if err != nil {
+				return err
+			}
+			in.msmeFileID = &fid
+		}
 		acctEnc, last4 := "", ""
 		if in.BankAccount != "" {
 			var err error
@@ -337,10 +367,10 @@ func (s *Service) save(w http.ResponseWriter, r *http.Request) error {
 				contact_person=coalesce(nullif($7,''),contact_person), mobile=$8, email=$9, gst_registered=$10, gstin=$11, pan=$12, state_code=$13, msme=$14, udyam=$15,
 				bank_holder=coalesce(nullif($16,''),bank_holder), payment_terms=$17,
 				bank_account_enc=CASE WHEN $18<>'' THEN $18 ELSE bank_account_enc END, bank_account_last4=CASE WHEN $19<>'' THEN $19 ELSE bank_account_last4 END,
-				ifsc=CASE WHEN $20<>'' THEN $20 ELSE ifsc END, bank_proof_file_id=coalesce($21,bank_proof_file_id),
+				ifsc=CASE WHEN $20<>'' THEN $20 ELSE ifsc END, bank_proof_file_id=coalesce($21,bank_proof_file_id), msme_file_id=coalesce($23,msme_file_id),
 				bank_verified=CASE WHEN $22 THEN FALSE ELSE bank_verified END WHERE id=$1`,
 				id, in.Type, in.Name, in.Address, in.City, in.PIN, in.Contact, in.Mobile, in.Email, in.GSTRegistered, nullIfEmpty(in.GSTIN), nullIfEmpty(in.PAN), in.StateCode, in.MSME, in.Udyam,
-				in.BankHolder, in.Terms, acctEnc, last4, in.IFSC, proofID, resent); err != nil {
+				in.BankHolder, in.Terms, acctEnc, last4, in.IFSC, proofID, resent, in.msmeFileID); err != nil {
 				return err
 			}
 			act := "Vendor edited"
@@ -449,10 +479,10 @@ func (s *Service) Insert(ctx context.Context, tx pgx.Tx, u *access.User, in *Inp
 	code := fmt.Sprintf("V%03d", n)
 	var id int64
 	if err := tx.QueryRow(ctx, `INSERT INTO vendor(code,vendor_type,legal_name,address,city,pin,contact_person,mobile,email,gst_registered,gstin,pan,state_code,msme,udyam,
-		bank_holder,bank_account_enc,bank_account_last4,ifsc,bank_proof_file_id,payment_terms,created_by)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22) RETURNING id`,
+		bank_holder,bank_account_enc,bank_account_last4,ifsc,bank_proof_file_id,payment_terms,created_by,msme_file_id)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23) RETURNING id`,
 		code, in.Type, in.Name, in.Address, in.City, in.PIN, in.Contact, in.Mobile, in.Email, in.GSTRegistered, nullIfEmpty(in.GSTIN), nullIfEmpty(in.PAN), in.StateCode,
-		in.MSME, in.Udyam, in.BankHolder, acctEnc, last4, in.IFSC, proofID, in.Terms, u.ID).Scan(&id); err != nil {
+		in.MSME, in.Udyam, in.BankHolder, acctEnc, last4, in.IFSC, proofID, in.Terms, u.ID, in.msmeFileID).Scan(&id); err != nil {
 		return 0, "", err
 	}
 	if in.Type == "goods" {
