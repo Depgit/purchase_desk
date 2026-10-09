@@ -10,6 +10,7 @@ import { UploadModal } from '../bulkupload/UploadModal'
 import { inr, lineValue } from '../format/format'
 import { Errors } from '../ui/Errors'
 import { Pill } from '../ui/Pill'
+import { SearchSelect } from '../ui/SearchSelect'
 import { useAction } from '../ui/useAction'
 
 interface Item {
@@ -24,6 +25,8 @@ interface Form {
   settings: { evt_l2: boolean; l2_above: number; cc_all: boolean; wh_approval: boolean }
 }
 interface Draft { sku_id: number; qty: number; est_rate: number }
+
+const KIND: Record<string, string> = { warehouse: 'Warehouse', preopening: 'Pre-opening', corporate: 'Corporate office' }
 
 export function NewRequestPage() {
   const nav = useNavigate()
@@ -101,7 +104,8 @@ export function NewRequestPage() {
         <div className="stack">
           <section className="card"><div className="grid2">
             <label className="field"><span>Property</span>
-              <select value={pid} onChange={(e) => setPid(+e.target.value)}>{props.map((p) => <option key={p.id} value={p.id}>{p.name}{p.kind !== 'live' ? ` (${p.kind})` : ''}</option>)}</select></label>
+              <SearchSelect value={String(pid)} onChange={(v) => setPid(+v)} placeholder="Search property or code" ariaLabel="Property"
+                items={props.map((p) => ({ value: String(p.id), label: p.name, hint: [p.code, KIND[p.kind]].filter(Boolean).join(' · ') }))} /></label>
             {kindProp && <label className="field"><span>Pre-opening approver</span>
               <select value={preop} onChange={(e) => setPreop(+e.target.value)}>{form!.preop_members.map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}</select>
               <span className="hint">The request goes to this member of the Pre-opening Team.</span></label>}
@@ -110,11 +114,9 @@ export function NewRequestPage() {
           <section className="card">
             <div className="head"><h2>Add items</h2><div className="acts"><button className="btn ghost" onClick={() => setUpload(true)}>Upload item list</button></div></div>
               <label className="field"><span>Item</span>
-                <select value={sku} onChange={(e) => { setSku(+e.target.value); setEst('') }}>
-                  <option value={0}>Choose item</option>
-                  {cats.map((c) => <optgroup key={c} label={c}>{items.filter((i) => i.category === c).map((i) =>
-                    <option key={i.sku_id} value={i.sku_id} disabled={!i.orderable}>{i.item_name} ({i.pack_size}) · {i.brand}{i.orderable ? '' : ' · ' + i.problem}</option>)}</optgroup>)}
-                </select></label>
+                <SearchSelect value={sku ? String(sku) : ''} onChange={(v) => { setSku(+v); setEst('') }} emptyLabel="Choose item" placeholder="Search item, brand, SKU code or sub-category" ariaLabel="Item"
+                  items={cats.flatMap((c) => items.filter((i) => i.category === c).map((i) => ({ value: String(i.sku_id), label: `${i.item_name} (${i.pack_size}) · ${i.brand}`, group: c,
+                    hint: [i.sku_code, i.sub_category, i.orderable ? '' : i.problem].filter(Boolean).join(' · '), disabled: !i.orderable })))} /></label>
             <div className="addrow">
               <label className="field"><span>Vendor (from mapping)</span><input disabled value={cur ? (cur.orderable ? `${cur.vendor_name} · ${cur.rate != null ? inr(cur.rate) : 'rate to confirm'}` : cur.problem) : 'Choose item first'} /></label>
               <label className="field"><span>Quantity</span><input type="number" min="1" inputMode="decimal" value={q} onChange={(e) => setQ(e.target.value)} /></label>

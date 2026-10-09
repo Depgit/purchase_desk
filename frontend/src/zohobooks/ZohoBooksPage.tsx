@@ -13,6 +13,7 @@ import { Modal } from '../ui/Modal'
 import { Pill } from '../ui/Pill'
 import { Tabs } from '../ui/Tabs'
 import { useAction } from '../ui/useAction'
+import { SearchSelect } from '../ui/SearchSelect'
 import { useToast } from '../ui/Toast'
 
 interface Opt { id: string; name: string; code: string; type: string; pct: number; specification: string; extra: string; active: boolean; tag_id: string }
@@ -164,7 +165,9 @@ function Properties({ m, lists, onDone }: { m: Maps; lists: Lists; onDone: () =>
       <Errors list={a.errors} />
       <section className="card flush"><div className="scroll"><table><thead><tr><th>Property</th><th>Cluster</th><th>State</th><th>Reporting tag option</th><th>Zoho location (optional)</th></tr></thead>
         <tbody>{rows.map((p) => <tr key={p.property_id}><td className="id">{p.name}<br /><span className="hint">{p.code}</span></td><td>{p.cluster}</td><td>{p.state_code}</td>
-          <td><select disabled={!m.can_edit} value={p.tag_option_id} onChange={(e) => save('property_tag', String(p.property_id), e.target.value)}><option value="">Not mapped</option>{tagsFor(p).map((t) => <optgroup key={t.id} label={t.name}>{lists.tag_options.filter((o) => o.tag_id === t.id && (o.active || o.id === p.tag_option_id)).map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}</optgroup>)}</select>
+          <td><SearchSelect disabled={!m.can_edit} value={p.tag_option_id} emptyLabel="Not mapped" placeholder="Search hotel or region" ariaLabel={'Reporting tag option for ' + p.name}
+            items={tagsFor(p).flatMap((t) => lists.tag_options.filter((o) => o.tag_id === t.id && (o.active || o.id === p.tag_option_id)).map((o) => ({ value: o.id, label: o.name, group: t.name })))}
+            onChange={(v) => save('property_tag', String(p.property_id), v)} />
             {!p.tag_option_id && <> <Pill tone="bad">Bills held</Pill>{m.can_edit && canCreate && <> <button className="link" onClick={() => a.run(() => post(`/zoho/properties/${p.property_id}/create-option`), (r: any) => { onDone(); return r.message })}>Create in Zoho</button></>}</>}
             {p.shared_with > 0 && <> <Pill tone="warn">Shared with {p.shared_with} other</Pill></>}</td>
           <td><select disabled={!m.can_edit} value={p.location_id} onChange={(e) => save('property_location', String(p.property_id), e.target.value)}><option value="">None</option>{lists.locations.filter((l) => l.active).map((l) => <option key={l.id} value={l.id}>{l.name}{l.extra ? ` (${l.extra})` : ''}</option>)}</select></td></tr>)}</tbody></table></div></section>
@@ -175,7 +178,8 @@ function Properties({ m, lists, onDone }: { m: Maps; lists: Lists; onDone: () =>
 
 function AccountSelect({ value, accounts, types, disabled, onChange }: { value: string; accounts: Opt[]; types?: string[]; disabled: boolean; onChange: (v: string) => void }) {
   const list = accounts.filter((x) => x.active && (!types || types.includes(x.type)))
-  return <select value={value} disabled={disabled} onChange={(e) => onChange(e.target.value)}><option value="">Not mapped</option>{list.map((x) => <option key={x.id} value={x.id}>{x.code ? x.code + ' · ' : ''}{x.name}</option>)}</select>
+  return <SearchSelect value={value} disabled={disabled} onChange={onChange} emptyLabel="Not mapped" placeholder="Search account name or code"
+    items={list.map((x) => ({ value: x.id, label: (x.code ? x.code + ' · ' : '') + x.name, hint: x.type.replace(/_/g, ' ') }))} />
 }
 
 function Accounts({ m, lists, onDone }: { m: Maps; lists: Lists; onDone: () => void }) {
@@ -251,7 +255,8 @@ function Vendors({ m, lists, onDone }: { m: Maps; lists: Lists; onDone: () => vo
         <tbody>{rows.map((v) => <tr key={v.vendor_id}><td className="id">{v.name}<br /><span className="hint">{v.code} · {v.vendor_type}</span></td><td>{v.gstin || 'Unregistered'}</td><td>{v.state_code || <Pill tone="bad">Missing</Pill>}</td>
           <td>{v.contact_id ? <>{v.contact_name}<br /><span className="hint">{v.contact_id}{v.contact_gst ? ' · ' + v.contact_gst : ''}</span></>
             : v.suggest_id ? v.suggest_name
-            : m.can_edit ? <select value={pick[v.vendor_id] || ''} onChange={(e) => setPick({ ...pick, [v.vendor_id]: e.target.value })}><option value="">Pick an existing Zoho vendor…</option>{free.slice(0, 2000).map((c) => <option key={c.id} value={c.id}>{c.name}{c.extra ? ' · ' + c.extra : ''}</option>)}</select> : '—'}</td>
+            : m.can_edit ? <SearchSelect value={pick[v.vendor_id] || ''} onChange={(val) => setPick({ ...pick, [v.vendor_id]: val })} emptyLabel="Pick an existing Zoho vendor…" placeholder="Search name or GSTIN" ariaLabel={'Zoho vendor for ' + v.name}
+              items={free.map((c) => ({ value: c.id, label: c.name, hint: [c.extra, c.specification].filter(Boolean).join(' · ') }))} /> : '—'}</td>
           <td>{status(v)}</td>
           <td className="r">{m.can_edit && <span className="tools" style={{ flexWrap: 'nowrap', justifyContent: 'flex-end' }}>
             {v.contact_id ? <button className="link" onClick={() => a.run(() => post(`/zoho/vendors/${v.vendor_id}/unlink`), (r: any) => { onDone(); return r.message })}>Unlink</button> : <>
