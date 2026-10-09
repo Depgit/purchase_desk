@@ -6,6 +6,7 @@ import (
 	"math"
 	"strconv"
 	"strings"
+	"time"
 )
 
 func Round2(v float64) float64 { return math.Round(v*100) / 100 }
@@ -44,4 +45,17 @@ func TermsDays(t string) int {
 	return 0
 }
 
-var PaymentTerms = []string{"Net 15", "Net 30", "Net 45", "Advance"}
+// Next15th is a payment term: due on the 15th of the month after the invoice date, so anything dated in
+// October (1st to 31st) is due on 15 November.
+const Next15th = "15th of next month"
+
+var PaymentTerms = []string{"Net 15", "Net 30", "Net 45", Next15th, "Advance"}
+
+// DueDate is when an invoice dated on day falls due under the payment terms. "Net N" adds N days,
+// "15th of next month" gives the 15th of the following month, and "Advance" or anything else is the invoice date.
+func DueDate(day time.Time, terms string) time.Time {
+	if terms == Next15th {
+		return time.Date(day.Year(), day.Month()+1, 15, 0, 0, 0, 0, day.Location())
+	}
+	return day.AddDate(0, 0, TermsDays(terms))
+}

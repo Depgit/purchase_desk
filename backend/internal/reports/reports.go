@@ -541,7 +541,8 @@ func bills(ctx context.Context, s *Service, f Filter) ([][]any, []int64, error) 
 func payables(ctx context.Context, s *Service, f Filter) ([][]any, []int64, error) {
 	w, a := place(f, 1)
 	rows, err := s.DB.Query(ctx, `SELECT i.invoice_number, coalesce(d.po_number, d.number), v.legal_name, CASE WHEN v.msme THEN 'MSME' ELSE 'No' END, p.name, i.amount, i.invoice_date,
-		coalesce(i.due_date, i.invoice_date + (CASE WHEN coalesce(nullif(d.payment_terms,''),v.payment_terms) ~ '^Net [0-9]+$' THEN substring(coalesce(nullif(d.payment_terms,''),v.payment_terms) from 5)::int ELSE 0 END)),
+		coalesce(i.due_date, CASE WHEN coalesce(nullif(d.payment_terms,''),v.payment_terms)='15th of next month' THEN (date_trunc('month', i.invoice_date) + interval '1 month 14 days')::date
+			ELSE i.invoice_date + (CASE WHEN coalesce(nullif(d.payment_terms,''),v.payment_terms) ~ '^Net [0-9]+$' THEN substring(coalesce(nullif(d.payment_terms,''),v.payment_terms) from 5)::int ELSE 0 END) END),
 		CASE WHEN v.msme THEN (coalesce((SELECT received_at::date FROM goods_receipt g WHERE g.id=i.goods_receipt_id), i.created_at::date) + (SELECT (value)::int FROM setting WHERE key='msme_days'))::text ELSE '' END,
 		coalesce(i.due_date, i.invoice_date) - current_date,
 		CASE i.status WHEN 'MATCHED' THEN 'Payment approval pending' WHEN 'PAY_APPROVED' THEN 'Approved, not in Zoho' WHEN 'PUSHED' THEN 'In Zoho, unpaid' ELSE i.status END, coalesce(i.zoho_bill_id,''), d.id

@@ -7,6 +7,7 @@ import { useLookups } from '../api/lookups'
 import { Checks, Field } from '../ui/Field'
 import { Errors } from '../ui/Errors'
 import { PHASE, usePhase } from '../releasephase/phase'
+import { PAYMENT_TERMS } from '../api/types'
 import { useAction } from '../ui/useAction'
 
 export interface Vendor {
@@ -79,7 +80,7 @@ export function VendorForm() {
               <Field label={id ? 'New account number' : 'Account number'}>{inp('bank_account', { type: 'password', inputMode: 'numeric', autoComplete: 'off' })}</Field>
               <Field label="Re-enter account number">{inp('bank_account_confirm', { inputMode: 'numeric', autoComplete: 'off' })}</Field>
               <Field label="Cancelled cheque or bank letter"><input type="file" accept="image/*,application/pdf" onChange={(e) => setProof(e.target.files?.[0] || null)} /></Field>
-              <Field label="Payment terms"><select value={f.payment_terms} onChange={(e) => set('payment_terms', e.target.value)}>{['Net 15', 'Net 30', 'Net 45', 'Advance'].map((t) => <option key={t}>{t}</option>)}</select></Field>
+              <Field label="Payment terms"><select value={f.payment_terms} onChange={(e) => set('payment_terms', e.target.value)}>{PAYMENT_TERMS.map((t) => <option key={t}>{t}</option>)}</select></Field>
             </div></section>
           <section className="card"><h2>What they supply</h2>
             {goods ? <>

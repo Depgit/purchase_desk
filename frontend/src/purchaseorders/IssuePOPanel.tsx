@@ -4,6 +4,7 @@ import { post } from '../api/client'
 import type { Doc } from '../api/types'
 import { addDays, inr, today } from '../format/format'
 import { Errors } from '../ui/Errors'
+import { PAYMENT_TERMS } from '../api/types'
 import { useAction } from '../ui/useAction'
 
 export function IssuePOPanel({ doc, onDone }: { doc: Doc; onDone: () => void }) {
@@ -24,7 +25,7 @@ export function IssuePOPanel({ doc, onDone }: { doc: Doc; onDone: () => void }) 
         ))}
         <label className="field"><span>Deliver by</span><input type="date" min={today()} value={due} onChange={(e) => setDue(e.target.value)} /></label>
         <label className="field"><span>Payment terms</span>
-          <select value={terms} onChange={(e) => setTerms(e.target.value)}>{['Net 15', 'Net 30', 'Net 45', 'Advance'].map((t) => <option key={t}>{t}</option>)}</select></label>
+          <select value={terms} onChange={(e) => setTerms(e.target.value)}>{PAYMENT_TERMS.map((t) => <option key={t}>{t}</option>)}</select></label>
       </div>
       <p className="sub">PO value incl. GST: <b>{inr(total)}</b></p>
       <Errors list={a.errors} />

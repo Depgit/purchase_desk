@@ -143,7 +143,7 @@ func abs(v float64) float64 {
 	return v
 }
 
-// payBy: invoice date plus the payment-term days; an MSME vendor must also be paid within the MSME limit from receipt.
+// payBy: the due date from the invoice date and the payment terms (money.DueDate); an MSME vendor must also be paid within the MSME limit from receipt.
 func payBy(x Invoice, st flowsettings.Settings) (string, string) {
 	if x.DueDate != "" && !x.VendorMSME {
 		return x.DueDate, ""
@@ -152,7 +152,7 @@ func payBy(x Invoice, st flowsettings.Settings) (string, string) {
 	if !ok {
 		return "", ""
 	}
-	due := base.AddDate(0, 0, money.TermsDays(x.Terms))
+	due := money.DueDate(base, x.Terms)
 	limit := ""
 	if x.VendorMSME {
 		recv := x.CreatedAt

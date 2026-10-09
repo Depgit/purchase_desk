@@ -56,3 +56,6 @@ export interface Property {
   l1_user_id: number | null; l1_name: string; l2_name: string; kind: string; plan_pct: number; ird_pct: number; banquet_pct: number; active: boolean; inactive_reason: string
 }
 export interface Option { id: number; name: string }
+
+/** Payment terms, as the server accepts them. "15th of next month": anything dated in October is due on 15 November. */
+export const PAYMENT_TERMS = ['Net 15', 'Net 30', 'Net 45', '15th of next month', 'Advance']

@@ -276,7 +276,9 @@ func payload(b *bill, taxes map[float64]string) (map[string]any, []string) {
 	date := b.InvoiceDate
 	due := date
 	if d, ok := clock.ParseDate(date); ok {
-		due = clock.YMD(d.AddDate(0, 0, days))
+		dd := money.DueDate(d, b.Terms)
+		due = clock.YMD(dd)
+		days = int(dd.Sub(d).Hours()/24 + 0.5) // "15th of next month" has no fixed day count; Zoho gets the exact due date
 	}
 	tags := []map[string]string{{"tag_id": b.TagID, "tag_option_id": b.TagOptionID}}
 	items := []map[string]any{}
