@@ -184,9 +184,9 @@ func (s *Service) saveSubCategory(w http.ResponseWriter, r *http.Request) error 
 		}
 		if in.CategoryID != 0 && in.CategoryID != catID {
 			var ok bool
-			_ = s.DB.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM category WHERE id=$1 AND active)`, in.CategoryID).Scan(&ok)
+			_ = s.DB.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM category WHERE id=$1)`, in.CategoryID).Scan(&ok)
 			if !ok {
-				return httpjson.Bad("Choose an active category.")
+				return httpjson.Bad("Choose a category from the list.")
 			}
 			catID = in.CategoryID
 		}
