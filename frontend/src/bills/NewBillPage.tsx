@@ -8,6 +8,8 @@ import { thisMonth, today } from '../format/format'
 import { Errors } from '../ui/Errors'
 import { Seg } from '../ui/Tabs'
 import { useAction } from '../ui/useAction'
+import { useSession } from '../auth/session'
+import { SearchSelect } from '../ui/SearchSelect'
 
 interface FormData { types: { id: number; name: string; section: string; default_gst: number; vendors: { id: number; name: string }[] }[]; amc_durations: number[]; approver: string }
 
@@ -15,6 +17,7 @@ export function NewBillPage() {
   const { section: s0 = 'utility' } = useParams()
   const nav = useNavigate()
   const l = useLookups()
+  const { me } = useSession()
   const { data } = useApi<FormData>('/bills/form')
   const [section, setSection] = useState(s0)
   const [typeId, setTypeId] = useState(0)
@@ -31,10 +34,12 @@ export function NewBillPage() {
   const a = useAction()
   const types = useMemo(() => (data?.types || []).filter((t) => t.section === section), [data, section])
   const type = types.find((t) => t.id === typeId)
-  const props = (l?.properties || []).filter((p) => p.active)
+  // Only the properties the person may raise for, the same check the server makes when the bill is submitted.
+  const props = useMemo(() => (l?.properties || []).filter((p) => p.active && (me?.is_admin || me?.roles.some((g) => g.rights.includes('raise')
+    && (g.scope === 'all' || (g.scope === 'clusters' && g.cluster_ids.includes(p.cluster_id)) || (g.scope === 'properties' && g.property_ids.includes(p.id)))))), [l, me])
   useEffect(() => { if (types.length && !types.some((t) => t.id === typeId)) setTypeId(types[0].id) }, [types, typeId])
   useEffect(() => { if (type) { setGst(type.default_gst); setVid(type.vendors[0]?.id || 0) } }, [type])
-  useEffect(() => { if (!pid && props.length) setPid(props[0].id) }, [props, pid])
+  useEffect(() => { if ((!pid || !props.some((p) => p.id === pid)) && props.length) setPid(props[0].id) }, [props, pid])
   useEffect(() => { if (data?.amc_durations.length) setMonths(data.amc_durations[data.amc_durations.length - 1]) }, [data])
   const amc = section === 'amc'
   return (
@@ -45,10 +50,12 @@ export function NewBillPage() {
         <section className="card">
           <Seg value={section} onChange={setSection} items={[['utility', 'Utility bill'], ['amc', 'Maintenance AMC']]} />
           <div className="grid2">
-            <label className="field"><span>Property</span><select value={pid} onChange={(e) => setPid(+e.target.value)}>{props.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}</select></label>
-            <label className="field"><span>{amc ? 'AMC for' : 'Utility'}</span><select value={typeId} onChange={(e) => setTypeId(+e.target.value)}>{types.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}</select></label>
+            <label className="field"><span>Property</span>{props.length
+              ? <SearchSelect value={String(pid)} onChange={(v) => setPid(+v)} placeholder="Search property or code" ariaLabel="Property" items={props.map((p) => ({ value: String(p.id), label: p.name, hint: p.code }))} />
+              : <span className="hint">No property is assigned to you for bills. Ask the System Admin to add one under Users & Rights.</span>}</label>
+            <label className="field"><span>{amc ? 'AMC for' : 'Utility'}</span><SearchSelect value={String(typeId)} onChange={(v) => setTypeId(+v)} placeholder="Search bill type" ariaLabel="Bill type" items={types.map((t) => ({ value: String(t.id), label: t.name, hint: 'GST ' + t.default_gst + '%' }))} /></label>
             <label className="field"><span>Vendor</span>
-              {type?.vendors.length ? <select value={vid} onChange={(e) => setVid(+e.target.value)}>{type.vendors.map((v) => <option key={v.id} value={v.id}>{v.name}</option>)}</select>
+              {type?.vendors.length ? <SearchSelect value={String(vid)} onChange={(v) => setVid(+v)} placeholder="Search vendor" ariaLabel="Vendor" items={type.vendors.map((v) => ({ value: String(v.id), label: v.name }))} />
                 : <select disabled><option>No verified vendor for this bill type</option></select>}
               {!type?.vendors.length && <span className="hint">Onboard the vendor under Vendors and tick this bill type; Finance verifies the bank details.</span>}</label>
             <label className="field"><span>{amc ? 'Start month' : 'Bill month'}</span><input type="month" value={period} onChange={(e) => setPeriod(e.target.value)} /></label>
