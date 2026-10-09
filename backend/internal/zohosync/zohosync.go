@@ -43,6 +43,7 @@ func (s *Service) Routes(r chi.Router) {
 	r.Post("/zoho/connected", httpjson.Wrap(s.setConnected))
 	r.Post("/zoho/sync", httpjson.Wrap(s.syncNow))
 	r.Get("/zoho/lists", httpjson.Wrap(s.lists))
+	r.Get("/zoho/items", httpjson.Wrap(s.items))
 	r.Get("/zoho/mappings", httpjson.Wrap(s.mappings))
 	r.Put("/zoho/mappings", httpjson.Wrap(s.setMapping))
 	r.Post("/zoho/properties/match", httpjson.Wrap(s.matchProperties))
@@ -353,6 +354,8 @@ type SyncResult struct {
 	Accounts, Taxes, TagOptions, Locations, Contacts int
 	New                                              []string
 	VendorsLinked, PropertiesLinked                  int
+	Items                                            int
+	ItemsError                                       string // set when Zoho refused the item list; the rest of the sync still ran
 }
 
 // Sync reads every list from Zoho, marks records gone from Zoho as inactive, then links vendors by GSTIN and properties by tag name.
@@ -385,6 +388,10 @@ func (s *Service) Sync(ctx context.Context) (*SyncResult, error) {
 	contacts, err := c.Vendors(ctx)
 	if err != nil {
 		return fail(err)
+	}
+	items, err := c.Items(ctx)
+	if err != nil {
+		items, res.ItemsError = nil, err.Error() // items are for reference; a token without item access still syncs the rest
 	}
 	err = pgx.BeginFunc(ctx, s.DB, func(tx pgx.Tx) error {
 		stamp := time.Now()
@@ -452,6 +459,23 @@ func (s *Service) Sync(ctx context.Context) (*SyncResult, error) {
 		// A record no longer returned by Zoho was deleted there: mark it inactive so bills that need it are held.
 		for _, t := range []string{"zoho_account", "zoho_tax", "zoho_tag", "zoho_tag_option", "zoho_contact"} {
 			if _, err := tx.Exec(ctx, fmt.Sprintf(`UPDATE %s SET active=FALSE WHERE synced_at < $1`, t), stamp); err != nil {
+				return err
+			}
+		}
+		if items != nil {
+			for _, it := range items {
+				if _, err := tx.Exec(ctx, `INSERT INTO zoho_item(item_id,name,sku,hsn_or_sac,unit,product_type,item_type,brand,purchase_rate,tax_pct,purchase_account_id,active,synced_at)
+					VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+					ON CONFLICT (item_id) DO UPDATE SET name=EXCLUDED.name, sku=EXCLUDED.sku, hsn_or_sac=EXCLUDED.hsn_or_sac, unit=EXCLUDED.unit, product_type=EXCLUDED.product_type,
+					item_type=EXCLUDED.item_type, brand=EXCLUDED.brand, purchase_rate=EXCLUDED.purchase_rate, tax_pct=EXCLUDED.tax_pct,
+					purchase_account_id=EXCLUDED.purchase_account_id, active=EXCLUDED.active, synced_at=EXCLUDED.synced_at`,
+					it.ID, it.Name, it.SKU, it.HSN, it.Unit, it.ProductType, it.ItemType, it.Brand, it.PurchaseRate, it.TaxPct, it.PurchaseAccountID, it.Status != "inactive", stamp); err != nil {
+					return err
+				}
+			}
+			res.Items = len(items)
+			// Items deleted in Zoho are kept but marked inactive, like accounts and vendors.
+			if _, err := tx.Exec(ctx, `UPDATE zoho_item SET active=FALSE WHERE synced_at < $1`, stamp); err != nil {
 				return err
 			}
 		}
@@ -526,8 +550,11 @@ func (s *Service) syncNow(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return httpjson.Bad("Sync failed: %v", err)
 	}
-	msg := fmt.Sprintf("Synced: %d accounts, %d taxes, %d tag options, %d locations, %d vendor contacts. Linked automatically: %d vendors, %d properties.",
-		res.Accounts, res.Taxes, res.TagOptions, res.Locations, res.Contacts, res.VendorsLinked, res.PropertiesLinked)
+	msg := fmt.Sprintf("Synced: %d accounts, %d taxes, %d tag options, %d locations, %d vendor contacts, %d items. Linked automatically: %d vendors, %d properties.",
+		res.Accounts, res.Taxes, res.TagOptions, res.Locations, res.Contacts, res.Items, res.VendorsLinked, res.PropertiesLinked)
+	if res.ItemsError != "" {
+		msg += " Items were not read: " + res.ItemsError + "."
+	}
 	if len(res.New) > 0 {
 		msg += " New in Zoho: " + strings.Join(res.New, "; ") + "."
 	}
@@ -1010,4 +1037,38 @@ func (s *Service) createVendor(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 	return httpjson.OK(w, map[string]string{"message": v.Name + " created in Zoho and linked."})
+}
+
+// ZohoItem is one item read from Zoho Books, as shown on the Items tab.
+type ZohoItem struct {
+	ID           string  `json:"id"`
+	Name         string  `json:"name"`
+	SKU          string  `json:"sku"`
+	HSN          string  `json:"hsn_or_sac"`
+	Unit         string  `json:"unit"`
+	ProductType  string  `json:"product_type"`
+	ItemType     string  `json:"item_type"`
+	Brand        string  `json:"brand"`
+	PurchaseRate float64 `json:"purchase_rate"`
+	TaxPct       float64 `json:"tax_pct"`
+	Account      string  `json:"purchase_account"`
+	Active       bool    `json:"active"`
+}
+
+// items lists the Zoho items saved by the last sync. They are read only: Purchase Desk's own SKUs stay the item master.
+func (s *Service) items(w http.ResponseWriter, r *http.Request) error {
+	rows, err := s.DB.Query(r.Context(), `SELECT i.item_id, i.name, i.sku, i.hsn_or_sac, i.unit, i.product_type, i.item_type, i.brand,
+		i.purchase_rate::float8, i.tax_pct::float8, coalesce(a.name,''), i.active
+		FROM zoho_item i LEFT JOIN zoho_account a ON a.account_id=i.purchase_account_id ORDER BY i.active DESC, i.name`)
+	if err != nil {
+		return err
+	}
+	out, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (ZohoItem, error) {
+		var x ZohoItem
+		return x, row.Scan(&x.ID, &x.Name, &x.SKU, &x.HSN, &x.Unit, &x.ProductType, &x.ItemType, &x.Brand, &x.PurchaseRate, &x.TaxPct, &x.Account, &x.Active)
+	})
+	if err != nil {
+		return err
+	}
+	return httpjson.OK(w, out)
 }

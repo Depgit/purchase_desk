@@ -13,6 +13,7 @@ import { Modal } from '../ui/Modal'
 import { Pill } from '../ui/Pill'
 import { Tabs } from '../ui/Tabs'
 import { useAction } from '../ui/useAction'
+import { DataTable } from '../ui/DataTable'
 import { SearchSelect } from '../ui/SearchSelect'
 import { useToast } from '../ui/Toast'
 
@@ -27,7 +28,7 @@ interface Maps {
   vendors: { vendor_id: number; code: string; name: string; vendor_type: string; gstin: string; state_code: string; bank_verified: boolean; contact_id: string; contact_name: string; contact_gst: string; contact_active: boolean; how: string; suggest_id: string; suggest_name: string }[]
   can_edit: boolean
 }
-type Tab = 'conn' | 'prop' | 'acc' | 'tax' | 'ven' | 'queue' | 'journal' | 'map'
+type Tab = 'items' | 'conn' | 'prop' | 'acc' | 'tax' | 'ven' | 'queue' | 'journal' | 'map'
 const EXP = ['expense', 'cost_of_goods_sold', 'other_expense']
 
 export function ZohoBooksPage() {
@@ -54,12 +55,13 @@ export function ZohoBooksPage() {
         <div className="acts">{hasStep('finance') && <button className="btn ghost" disabled={a.busy} onClick={() => a.run(() => post('/zoho/sync'), (r: any) => { reloadAll(); return r.message })}>Sync now</button>}</div></div>
       <Errors list={a.errors} />
       <div className="tiles">{tile('prop', 'Properties with a reporting tag', 'prop')}{tile('acc', 'Sub-categories with an account', 'acc')}{tile('bt', 'Bill types with an account', 'acc')}{tile('tax', 'GST rates with a tax code', 'tax')}{tile('ven', 'Vendors linked', 'ven')}</div>
-      <Tabs value={tab} onChange={setTab} items={[['conn', 'Connection'], ['prop', 'Properties'], ['acc', 'Accounts'], ['tax', 'Taxes'], ['ven', 'Vendors'], ['queue', 'Push queue'], ['journal', 'Warehouse journal'], ['map', 'Field map']]} />
+      <Tabs value={tab} onChange={setTab} items={[['conn', 'Connection'], ['prop', 'Properties'], ['acc', 'Accounts'], ['tax', 'Taxes'], ['ven', 'Vendors'], ['items', 'Items'], ['queue', 'Push queue'], ['journal', 'Warehouse journal'], ['map', 'Field map']]} />
       {tab === 'conn' && <Connection c={conn.data} lists={lists.data} onDone={reloadAll} />}
       {tab === 'prop' && m && lists.data && <Properties m={m} lists={lists.data} onDone={reloadAll} />}
       {tab === 'acc' && m && lists.data && <Accounts m={m} lists={lists.data} onDone={reloadAll} />}
       {tab === 'tax' && m && lists.data && <Taxes m={m} lists={lists.data} onDone={reloadAll} />}
       {tab === 'ven' && m && lists.data && <Vendors m={m} lists={lists.data} onDone={reloadAll} />}
+      {tab === 'items' && <ZohoItems />}
       {tab === 'queue' && <Queue />}
       {tab === 'journal' && <Journals />}
       {tab === 'map' && <FieldMap />}
@@ -328,5 +330,37 @@ function FieldMap() {
   return (
     <section className="card flush"><div className="scroll"><table><thead><tr><th>Zoho field</th><th>Filled from</th><th>Rule</th></tr></thead>
       <tbody>{rows.map((r) => <tr key={r[0]}><td className="id">{r[0]}</td><td>{r[1]}</td><td>{r[2]}</td></tr>)}</tbody></table></div></section>
+  )
+}
+
+interface ZItem { id: string; name: string; sku: string; hsn_or_sac: string; unit: string; product_type: string; item_type: string; brand: string; purchase_rate: number; tax_pct: number; purchase_account: string; active: boolean }
+const ITEM_TYPE: Record<string, string> = { purchases: 'Purchases', sales: 'Sales', sales_and_purchases: 'Sales and purchases', inventory: 'Inventory' }
+
+/** The items read from Zoho Books on the last sync. Read only: Purchase Desk's own SKUs stay the item master. */
+function ZohoItems() {
+  const { data } = useApi<ZItem[]>('/zoho/items')
+  const rows = data || []
+  return (
+    <>
+      <p className="note">Items in Zoho Books, read on every Sync now. They are for reference next to Purchase Desk's own items (SKUs); nothing here is sent back to Zoho.</p>
+      <DataTable screen="zoho-items" rows={rows} rowKey={(r) => r.id} dim={(r) => !r.active}
+        search={(r) => [r.name, r.sku, r.hsn_or_sac, r.brand, r.purchase_account].join(' ')}
+        filters={[
+          { id: 'st', label: 'Status', options: [['', 'Active and inactive'], ['a', 'Active'], ['i', 'Inactive']], test: (r, v) => v === 'a' ? r.active : !r.active },
+          { id: 'pt', label: 'Goods or service', options: [['', 'Goods and services'], ['goods', 'Goods'], ['service', 'Services']], test: (r, v) => r.product_type === v },
+          { id: 'it', label: 'Used for', options: [['', 'Any use'], ...Object.entries(ITEM_TYPE)], test: (r, v) => r.item_type === v },
+        ]}
+        columns={[
+          { key: 'name', label: 'Item', render: (r) => <>{r.name}{r.sku && <><br /><span className="hint">{r.sku}</span></>}</>, sort: (r) => r.name, csv: (r) => r.name },
+          { key: 'type', label: 'Type', render: (r) => r.product_type === 'service' ? 'Service' : 'Goods', csv: (r) => r.product_type },
+          { key: 'use', label: 'Used for', render: (r) => ITEM_TYPE[r.item_type] || r.item_type, csv: (r) => r.item_type },
+          { key: 'hsn', label: 'HSN / SAC', render: (r) => r.hsn_or_sac || '—', csv: (r) => r.hsn_or_sac },
+          { key: 'unit', label: 'Unit', render: (r) => r.unit || '—', csv: (r) => r.unit },
+          { key: 'rate', label: 'Purchase rate', right: true, render: (r) => r.purchase_rate ? inr(r.purchase_rate) : '—', sort: (r) => r.purchase_rate, csv: (r) => r.purchase_rate },
+          { key: 'tax', label: 'GST', right: true, render: (r) => r.tax_pct + '%', sort: (r) => r.tax_pct, csv: (r) => r.tax_pct },
+          { key: 'acc', label: 'Purchase account', render: (r) => r.purchase_account || '—', csv: (r) => r.purchase_account },
+          { key: 'status', label: 'Status', render: (r) => <Pill tone={r.active ? 'ok' : 'off'}>{r.active ? 'Active' : 'Inactive'}</Pill>, csv: (r) => r.active ? 'Active' : 'Inactive' },
+        ]} csvName="zoho-items" />
+    </>
   )
 }

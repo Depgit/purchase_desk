@@ -481,6 +481,36 @@ func (c *Client) Vendors(ctx context.Context) ([]Contact, error) {
 	return out, err
 }
 
+// Item is one item of the Zoho Books item list.
+type Item struct {
+	ID                string  `json:"item_id"`
+	Name              string  `json:"name"`
+	SKU               string  `json:"sku"`
+	HSN               string  `json:"hsn_or_sac"`
+	Unit              string  `json:"unit"`
+	ProductType       string  `json:"product_type"`
+	ItemType          string  `json:"item_type"`
+	Brand             string  `json:"brand"`
+	PurchaseRate      float64 `json:"purchase_rate"`
+	TaxPct            float64 `json:"tax_percentage"`
+	PurchaseAccountID string  `json:"purchase_account_id"`
+	Status            string  `json:"status"`
+}
+
+// Items reads every item, active and inactive (GET /items, 200 a page). Saltstayz had 333 on 9 Oct 2026.
+func (c *Client) Items(ctx context.Context) ([]Item, error) {
+	out := []Item{}
+	err := c.ListAll(ctx, "/items", "items", url.Values{}, func(raw json.RawMessage) error {
+		var x Item
+		if err := json.Unmarshal(raw, &x); err != nil {
+			return err
+		}
+		out = append(out, x)
+		return nil
+	})
+	return out, err
+}
+
 // CreateVendor creates a vendor contact from details verified in Purchase Desk.
 func (c *Client) CreateVendor(ctx context.Context, body map[string]any) (Contact, error) {
 	var out struct {

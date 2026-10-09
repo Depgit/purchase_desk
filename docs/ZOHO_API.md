@@ -43,12 +43,14 @@ H="Authorization: Zoho-oauthtoken $AT"
 | 10 | One bill: status, balance | `GET /bills/{bill_id}` | `GetBill` |
 | 11 | Payments on a bill: date and reference | `GET /bills/{bill_id}/payments` | `BillPayments` |
 | 12 | Options of a reporting tag (one call per tag) | `GET /reportingtags/options?tag_id={tag_id}` (list under key `options`) | `ReportingTags` |
+| 13b | Items, every page (active and inactive), for the Items tab | `GET /items?page=N&per_page=200` | `Items` |
 | 13 | Look for an existing bill before creating one (used when the custom field is missing) | `GET /bills?vendor_id=&bill_number=` | `FindBill` |
 
 ```bash
 curl -s "$B/organizations?$O" -H "$H"
 curl -s "$B/chartofaccounts?$O&filter_by=AccountType.All&per_page=200&page=1" -H "$H"
 curl -s "$B/settings/taxes?$O" -H "$H"
+curl -s "$B/items?$O&per_page=200&page=1" -H "$H"   # one page of 200; add &page=2, 3 ... for the rest
 curl -s "$B/reportingtags?$O" -H "$H"
 curl -s "$B/locations?$O" -H "$H"
 curl -s "$B/contacts?$O&contact_type=vendor&per_page=200&page=1" -H "$H"   # one page of 200; add &page=2, 3 ... for the rest

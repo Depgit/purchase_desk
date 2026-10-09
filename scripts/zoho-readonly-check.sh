@@ -43,6 +43,7 @@ check "3. Chart of accounts, page 1 (GET /chartofaccounts)"           "/chartofa
 check "4. Taxes and tax groups (GET /settings/taxes)"                 "/settings/taxes?$ORG"                                        taxes
 check "5. Reporting tags (GET /reportingtags)"                        "/reportingtags?$ORG"                                         tags
 check "6. Locations (GET /locations, optional)"                       "/locations?$ORG"                                             locations
+check "7b. Items, page 1 (GET /items)" "/items?$ORG&per_page=200&page=1" items
 check "7. Vendor contacts, page 1 (GET /contacts?contact_type=vendor)" "/contacts?$ORG&contact_type=vendor&per_page=200&page=1" contacts
 check "8. Bill custom fields (GET /settings/customfields?entity=bill)" "/settings/customfields?$ORG&entity=bill"                      customfields
 SINCE=$(python3 -c 'import datetime;print((datetime.datetime.now()-datetime.timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%S+0530"))')

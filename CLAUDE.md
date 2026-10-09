@@ -107,7 +107,7 @@ Wiring lives in `router/router.go`. Startup, migrations and background jobs live
 - **worklist**: menu badge counts. `GET /worklist`.
 - **zohoapi**: the Zoho HTTP client with token refresh, 429 handling and pagination. Calls are listed in `docs/ZOHO_API.md`.
 - **zohopush**: builds the bill, pushes it in 3 steps, reads payments back, `Held` reasons. `GET /zoho/queue`, `GET /invoices/{id}/zoho-preview`, `POST /zoho/push`, `POST /zoho/read-payments`.
-- **zohosync**: the connection (encrypted, tested before save), list sync, the four mappings, vendor link and create. `GET|PUT /zoho/connection`, `POST /zoho/test|connected|sync`, `GET /zoho/lists`, `GET|PUT /zoho/mappings`, `POST /zoho/properties/match`, `POST /zoho/properties/{id}/create-option`, `POST /zoho/accounts`, `POST /zoho/vendors/{id}/link|unlink|create`.
+- **zohosync**: the connection (encrypted, tested before save), list sync (accounts, taxes, tags, locations, vendors, and items into `zoho_item`, read only, shown on the Items tab via `GET /zoho/items`), the four mappings, vendor link and create. `GET|PUT /zoho/connection`, `POST /zoho/test|connected|sync`, `GET /zoho/lists`, `GET|PUT /zoho/mappings`, `POST /zoho/properties/match`, `POST /zoho/properties/{id}/create-option`, `POST /zoho/accounts`, `POST /zoho/vendors/{id}/link|unlink|create`.
 
 ## Frontend: `frontend/src/<folder>`
 
