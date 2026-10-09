@@ -5,6 +5,7 @@ package invoices
 
 import (
 	"context"
+	"math"
 	"net/http"
 	"strings"
 	"time"
@@ -84,6 +85,9 @@ type Invoice struct {
 	Difference    float64    `json:"difference"`
 	WithinTol     bool       `json:"within_tolerance"`
 	Held          []string   `json:"held"`
+	TDS           float64    `json:"tds_amount"`   // tax deducted at source on service lines, on the value before GST
+	TDSSections   string     `json:"tds_sections"` // the sections it falls under, for example "194C"
+	NetPayable    float64    `json:"net_payable"`  // what the vendor is paid: amount less TDS
 	CreatedAt     time.Time  `json:"created_at"`
 	Lines         []RLine    `json:"lines,omitempty"`
 }
@@ -107,7 +111,9 @@ const selectInvoice = `SELECT i.id, i.document_id, d.number, d.kind, coalesce(d.
 	i.invoice_number, i.invoice_date::text, i.amount, i.gst_pct, i.file_id, i.status, i.match_remark, coalesce(i.due_date::text,''),
 	coalesce(i.zoho_bill_id,''), i.zoho_status, i.zoho_balance, i.zoho_paid, i.zoho_error, i.paid_at, i.payment_ref, i.created_at,
 	coalesce((SELECT sum(l.qty*l.rate*(1+l.gst_pct/100)) FROM goods_receipt_line gl JOIN document_line l ON l.id=gl.line_id WHERE gl.goods_receipt_id=g.id),0),
-	coalesce((SELECT sum(gl.qty*l.rate*(1+l.gst_pct/100)) FROM goods_receipt_line gl JOIN document_line l ON l.id=gl.line_id WHERE gl.goods_receipt_id=g.id),0)
+	coalesce((SELECT sum(gl.qty*l.rate*(1+l.gst_pct/100)) FROM goods_receipt_line gl JOIN document_line l ON l.id=gl.line_id WHERE gl.goods_receipt_id=g.id),0),
+	coalesce((SELECT sum(gl.qty*l.rate*l.tds_pct/100) FROM goods_receipt_line gl JOIN document_line l ON l.id=gl.line_id WHERE gl.goods_receipt_id=g.id),0),
+	coalesce((SELECT string_agg(DISTINCT l.tds_section, ', ') FROM goods_receipt_line gl JOIN document_line l ON l.id=gl.line_id WHERE gl.goods_receipt_id=g.id AND l.tds_pct>0),'')
 	FROM invoice i JOIN document d ON d.id=i.document_id JOIN vendor v ON v.id=i.vendor_id JOIN property p ON p.id=i.property_id
 	JOIN cluster k ON k.id=p.cluster_id JOIN city c ON c.id=k.city_id
 	LEFT JOIN goods_receipt g ON g.id=i.goods_receipt_id LEFT JOIN bill_type bt ON bt.id=d.bill_type_id LEFT JOIN expense_head eh ON eh.id=d.expense_head_id`
@@ -119,10 +125,13 @@ func scan(st flowsettings.Settings) func(pgx.CollectableRow) (Invoice, error) {
 			&x.VendorID, &x.Vendor, &x.VendorMSME, &x.VendorGST, &x.Terms, &x.PropertyID, &x.Property, &x.ClusterID, &x.City, &x.BillType,
 			&x.Number, &x.Date, &x.Amount, &x.GST, &x.FileID, &x.Status, &x.MatchRemark, &x.DueDate,
 			&x.ZohoBillID, &x.ZohoStatus, &x.ZohoBalance, &x.ZohoPaid, &x.ZohoError, &x.PaidAt, &x.PaymentRef, &x.CreatedAt,
-			&x.OrderedValue, &x.ReceivedValue)
+			&x.OrderedValue, &x.ReceivedValue, &x.TDS, &x.TDSSections)
 		if err != nil {
 			return x, err
 		}
+		// TDS is rounded to the nearest rupee (Income Tax Act, section 288B) and taken off what the vendor is paid.
+		x.TDS = math.Round(x.TDS)
+		x.NetPayable = money.Round2(x.Amount - x.TDS)
 		x.OrderedValue, x.ReceivedValue = money.Round2(x.OrderedValue), money.Round2(x.ReceivedValue)
 		bill := x.Kind == "bill" || x.Kind == "corp_bill"
 		if bill {

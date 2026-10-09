@@ -211,6 +211,12 @@ Routes are in `app/App.tsx`. The left menu, top bar, badges and search are in `l
 - Dispatch requires a scheduled delivery and cannot exceed stock.
 - A shortage at receipt is booked as pilferage. "Cannot supply" releases the budget.
 
+**TDS (services)**
+- Brand is required. Two fixed brands (`brand.kind`): "Other brand" (`other`) for unbranded goods and "Service" (`service`). They cannot be renamed or made inactive.
+- A service item must carry a TDS section from `indiantax.TDSSections` (194C 1% or 2%, 194J 2% or 10%, 194I 2% or 10%, 194H 2%, or NONE). `sku.tds_section` and `sku.tds_pct` are copied onto each `document_line` when the request is raised.
+- TDS on an invoice = sum of received qty × rate × tds_pct, on the value before GST, rounded to the rupee (section 288B). `Invoice.TDS`, `TDSSections` and `NetPayable` (amount − TDS) show on the invoice, in Payments and in the payables report.
+- Zoho: the bill still goes at full value with the TDS written in its notes and a warning in the preview, until TDS on a bill (`tds_tax_id`) is tested in a test organisation. Yearly thresholds and lower-deduction certificates are not applied.
+
 **Masters**
 - Nothing is deleted. Masters carry `active` plus who, when and why they went inactive.
 - Duplicate names are blocked with `norm_key()`, which compares ignoring case, spaces and punctuation.

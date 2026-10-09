@@ -100,7 +100,7 @@ func (s *Service) define() map[string]*kind {
 		"items": {
 			title: "Items", module: "Items", allowed: masters,
 			required: []string{"category", "sub_category", "item_name", "unit", "gst_percent"}, // brand may be blank for services
-			sample:   "category,sub_category,brand,item_name,unit,gst_percent,hsn,properties\nHousekeeping,Guest Amenities,Aroma Leaf,Body lotion 30 ml,box of 250,18,33049910,ALL\nEngineering,Electrical,BrightVolt,Pool pump capacitor,piece,18,,P01;P23\n",
+			sample:   "category,sub_category,brand,item_name,unit,gst_percent,hsn,properties,tds_section\nHousekeeping,Guest Amenities,Aroma Leaf,Body lotion 30 ml,box of 250,18,33049910,ALL,\nEngineering,Electrical,BrightVolt,Pool pump capacitor,piece,18,,P01;P23,\n",
 			check: func(ctx context.Context, x *run, row csvfile.Row) result {
 				var scID, catID int64
 				if err := x.q.QueryRow(ctx, `SELECT sc.id, c.id FROM sub_category sc JOIN category c ON c.id=sc.category_id WHERE norm_key(c.name)=norm_key($1) AND norm_key(sc.name)=norm_key($2)`,
@@ -115,7 +115,7 @@ func (s *Service) define() map[string]*kind {
 				if !ok {
 					return bad("GST %% must be a number")
 				}
-				in := &items.SKUInput{SubCategoryID: scID, BrandName: row.Get("brand"), ItemName: row.Get("item_name"), PackSizeID: packID, GST: gst, HSN: row.Get("hsn"), Scope: "all"}
+				in := &items.SKUInput{SubCategoryID: scID, BrandName: row.Get("brand"), ItemName: row.Get("item_name"), PackSizeID: packID, GST: gst, HSN: row.Get("hsn"), Scope: "all", TDSSection: strings.ToUpper(strings.TrimSpace(row.Get("tds_section")))}
 				if p := strings.TrimSpace(row.Get("properties")); p != "" && !strings.EqualFold(p, "ALL") {
 					in.Scope = "selected"
 					for _, code := range strings.FieldsFunc(p, func(r rune) bool { return r == ';' || r == '|' }) {

@@ -47,7 +47,7 @@ export function InvoicePage() {
           )}
           {x.status === 'MATCHED' && hasStep('finance') && (
             <section className="card act"><h2>Payment approval</h2>
-              <dl className="kv"><dt>Payable</dt><dd>{inr(x.amount)}</dd><dt>Terms</dt><dd>{x.payment_terms} · pay by {day(x.pay_by)}</dd></dl>
+              <dl className="kv"><dt>Invoice amount</dt><dd>{inr(x.amount)}</dd>{x.tds_amount > 0 && <><dt>TDS ({x.tds_sections})</dt><dd>− {inr(x.tds_amount)}</dd></>}<dt>Pay the vendor</dt><dd><b>{inr(x.net_payable)}</b></dd><dt>Terms</dt><dd>{x.payment_terms} · pay by {day(x.pay_by)}</dd></dl>
               {x.vendor_msme && <p className="note warn">MSME vendor: pay by {day(x.msme_limit)} at the latest.</p>}
               {!x.vendor_gst_registered && <p className="note warn">Unregistered vendor: no GST is charged.</p>}
               <Errors list={a.errors} />
@@ -79,7 +79,7 @@ export function InvoicePage() {
         <div className="stack">
           <section className="card"><h2>Details</h2>
             <dl className="kv">
-              <dt>Invoice amount</dt><dd>{inr(x.amount)}</dd><dt>Received value</dt><dd>{x.kind === 'bill' ? '—' : inr(x.received_value)}</dd>
+              <dt>Invoice amount</dt><dd>{inr(x.amount)}</dd>{x.tds_amount > 0 && <><dt>TDS ({x.tds_sections})</dt><dd>− {inr(x.tds_amount)}, on the value before GST</dd><dt>Net payable</dt><dd><b>{inr(x.net_payable)}</b></dd></>}<dt>Received value</dt><dd>{x.kind === 'bill' ? '—' : inr(x.received_value)}</dd>
               <dt>Pay by</dt><dd>{day(x.pay_by)}</dd>{x.match_remark && <><dt>Match remark</dt><dd>{x.match_remark}</dd></>}
               {zoho && <><dt>Zoho bill</dt><dd>{x.zoho_bill_id || '—'}{x.zoho_status ? ` · ${x.zoho_status}` : ''}</dd></>}
               {x.zoho_balance != null && <><dt>Balance in Zoho</dt><dd>{inr(x.zoho_balance)}</dd></>}

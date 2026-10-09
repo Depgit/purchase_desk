@@ -108,7 +108,7 @@ func init() {
 			[]Column{c("bill", "Bill"), c("section", "Type"), c("item", "Bill type"), c("property", "Property"), c("vendor", "Vendor"), c("invoice", "Invoice no."), c("period", "Period"), cr("months", "Months"),
 				cr("amount", "Amount"), cr("prev", "Previous bill"), c("status", "Status")}, bills},
 		"payables": {"Payables and due dates", "What is due, including MSME limits", "Vendors, items and bills",
-			[]Column{c("invoice", "Invoice"), c("doc", "Document"), c("vendor", "Vendor"), c("msme", "MSME"), c("property", "Property"), cr("amount", "Amount"), c("inv_date", "Invoice date"), c("due", "Pay by"),
+			[]Column{c("invoice", "Invoice"), c("doc", "Document"), c("vendor", "Vendor"), c("msme", "MSME"), c("property", "Property"), cr("amount", "Amount"), cr("tds", "TDS"), cr("net", "Net payable"), c("inv_date", "Invoice date"), c("due", "Pay by"),
 				c("msme_limit", "MSME limit"), cr("days", "Days to due"), c("status", "Status"), c("zoho", "Zoho bill")}, payables},
 		"rates": {"Vendor rates and validity", "Expiring and expired rates, to plan renewals", "Vendors, items and bills",
 			[]Column{c("vendor", "Vendor"), c("sku", "SKU"), c("item", "Item"), cr("rate", "Rate ex GST"), cr("gst", "GST %"), c("from", "Valid from"), c("to", "Valid to"), cr("days", "Days left"), c("status", "Status"), c("mapped", "Mapped")}, rates},
@@ -540,15 +540,16 @@ func bills(ctx context.Context, s *Service, f Filter) ([][]any, []int64, error) 
 
 func payables(ctx context.Context, s *Service, f Filter) ([][]any, []int64, error) {
 	w, a := place(f, 1)
-	rows, err := s.DB.Query(ctx, `SELECT i.invoice_number, coalesce(d.po_number, d.number), v.legal_name, CASE WHEN v.msme THEN 'MSME' ELSE 'No' END, p.name, i.amount, i.invoice_date,
+	rows, err := s.DB.Query(ctx, `SELECT i.invoice_number, coalesce(d.po_number, d.number), v.legal_name, CASE WHEN v.msme THEN 'MSME' ELSE 'No' END, p.name, i.amount, t.tds, i.amount - t.tds, i.invoice_date,
 		coalesce(i.due_date, CASE WHEN coalesce(nullif(d.payment_terms,''),v.payment_terms)='15th of next month' THEN (date_trunc('month', i.invoice_date) + interval '1 month 14 days')::date
 			ELSE i.invoice_date + (CASE WHEN coalesce(nullif(d.payment_terms,''),v.payment_terms) ~ '^Net [0-9]+$' THEN substring(coalesce(nullif(d.payment_terms,''),v.payment_terms) from 5)::int ELSE 0 END) END),
 		CASE WHEN v.msme THEN (coalesce((SELECT received_at::date FROM goods_receipt g WHERE g.id=i.goods_receipt_id), i.created_at::date) + (SELECT (value)::int FROM setting WHERE key='msme_days'))::text ELSE '' END,
 		coalesce(i.due_date, i.invoice_date) - current_date,
 		CASE i.status WHEN 'MATCHED' THEN 'Payment approval pending' WHEN 'PAY_APPROVED' THEN 'Approved, not in Zoho' WHEN 'PUSHED' THEN 'In Zoho, unpaid' ELSE i.status END, coalesce(i.zoho_bill_id,''), d.id
 		FROM invoice i JOIN document d ON d.id=i.document_id JOIN vendor v ON v.id=i.vendor_id`+placeJoin+`
-		WHERE i.status IN ('MATCHED','PAY_APPROVED','PUSHED')`+w+` ORDER BY 8`, a...)
-	return collect(rows, err, 12)
+		CROSS JOIN LATERAL (SELECT round(coalesce(sum(gl.qty*l.rate*l.tds_pct/100),0)) AS tds FROM goods_receipt_line gl JOIN document_line l ON l.id=gl.line_id WHERE gl.goods_receipt_id=i.goods_receipt_id) t
+		WHERE i.status IN ('MATCHED','PAY_APPROVED','PUSHED')`+w+` ORDER BY 10`, a...)
+	return collect(rows, err, 14)
 }
 
 func rates(ctx context.Context, s *Service, _ Filter) ([][]any, []int64, error) {

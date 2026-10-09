@@ -68,6 +68,13 @@ func (s *Service) setActive(w http.ResponseWriter, r *http.Request) error {
 	if kind == "user" && id == p.ID && !in.Active {
 		return httpjson.Bad("You cannot mark yourself inactive.")
 	}
+	if kind == "brand" && !in.Active {
+		var bk string
+		_ = s.DB.QueryRow(r.Context(), `SELECT kind FROM brand WHERE id=$1`, id).Scan(&bk)
+		if bk == "other" || bk == "service" {
+			return httpjson.Bad("Other brand and Service are fixed choices and stay active.")
+		}
+	}
 	var label string
 	q := fmt.Sprintf(`UPDATE %s SET active=$2, inactive_by=CASE WHEN $2 THEN NULL ELSE $3::bigint END, inactive_at=CASE WHEN $2 THEN NULL ELSE now() END,
 		inactive_reason=CASE WHEN $2 THEN NULL ELSE $4 END WHERE id=$1 RETURNING %s`, k.table, k.label)

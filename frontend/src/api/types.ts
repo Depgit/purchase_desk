@@ -43,6 +43,7 @@ export interface ListRow {
   po_closed_short: boolean; received_value: number; my_turn: boolean; department: string
 }
 export interface Invoice {
+  tds_amount: number; tds_sections: string; net_payable: number
   id: number; document_id: number; document_number: string; kind: string; po_number: string; grn_number: string; delivery_no: number
   received_at: string | null; vendor_id: number; vendor: string; vendor_msme: boolean; vendor_gst_registered: boolean; payment_terms: string
   property_id: number; property: string; cluster_id: number; city: string; bill_type: string; invoice_number: string; invoice_date: string

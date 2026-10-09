@@ -1,6 +1,7 @@
 // Package items manages the item hierarchy: category, sub-category, SKU, plus brands and pack sizes.
 // One SKU = sub-category + brand + item name + pack size, and the same combination cannot exist twice.
-// Brand is optional (services have none). The code field hsn holds an HSN code for goods or a SAC code for services.
+// Brand is required; two fixed brands cover the rest: "Other brand" (unbranded goods) and "Service". A service item
+// carries a TDS section and rate (indiantax.TDSSections). The code field hsn holds an HSN code for goods or a SAC code for services.
 package items
 
 import (
@@ -37,6 +38,7 @@ func (s *Service) Routes(r chi.Router) {
 	r.Post("/pack-sizes", httpjson.Wrap(s.createPackSize))
 	r.Put("/pack-sizes/{id}", httpjson.Wrap(s.createPackSize))
 	r.Get("/skus", httpjson.Wrap(s.listSKUs))
+	r.Get("/tds-sections", httpjson.Wrap(func(w http.ResponseWriter, r *http.Request) error { return httpjson.OK(w, indiantax.TDSSections) }))
 	r.Post("/skus", httpjson.Wrap(s.saveSKU))
 	r.Put("/skus/{id}", httpjson.Wrap(s.saveSKU))
 }
@@ -221,6 +223,7 @@ type Named struct {
 	Name   string `json:"name"`
 	Active bool   `json:"active"`
 	SKUs   int    `json:"skus"`
+	Kind   string `json:"kind,omitempty"` // brands only: brand, other ("Other brand") or service ("Service")
 }
 
 func (s *Service) listNamed(w http.ResponseWriter, r *http.Request, table, fk string) error {
@@ -239,7 +242,20 @@ func (s *Service) listNamed(w http.ResponseWriter, r *http.Request, table, fk st
 }
 
 func (s *Service) listBrands(w http.ResponseWriter, r *http.Request) error {
-	return s.listNamed(w, r, "brand", "brand_id")
+	// The two fixed brands come first, so pickers offer them before the named brands.
+	rows, err := s.DB.Query(r.Context(), `SELECT t.id, t.name, t.active, (SELECT count(*) FROM sku WHERE sku.brand_id=t.id), t.kind FROM brand t
+		ORDER BY CASE t.kind WHEN 'other' THEN 0 WHEN 'service' THEN 1 ELSE 2 END, t.name`)
+	if err != nil {
+		return err
+	}
+	out, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (Named, error) {
+		var x Named
+		return x, row.Scan(&x.ID, &x.Name, &x.Active, &x.SKUs, &x.Kind)
+	})
+	if err != nil {
+		return err
+	}
+	return httpjson.OK(w, out)
 }
 func (s *Service) listPackSizes(w http.ResponseWriter, r *http.Request) error {
 	return s.listNamed(w, r, "pack_size", "pack_size_id")
@@ -280,6 +296,13 @@ func (s *Service) createNamed(w http.ResponseWriter, r *http.Request, table, lab
 		var old string
 		if err := s.DB.QueryRow(r.Context(), fmt.Sprintf(`SELECT name FROM %s WHERE id=$1`, table), id).Scan(&old); err != nil {
 			return httpjson.NotFound(label)
+		}
+		if table == "brand" {
+			var kind string
+			_ = s.DB.QueryRow(r.Context(), `SELECT kind FROM brand WHERE id=$1`, id).Scan(&kind)
+			if kind != "brand" {
+				return httpjson.Bad("%s is a fixed choice and cannot be renamed.", old)
+			}
 		}
 		if _, err := s.DB.Exec(r.Context(), fmt.Sprintf(`UPDATE %s SET name=$2 WHERE id=$1`, table), id, in.Name); err != nil {
 			return err
@@ -322,12 +345,16 @@ type SKU struct {
 	PropertyIDs   []int64 `json:"property_ids"`
 	Active        bool    `json:"active"`
 	RatedVendors  int     `json:"rated_vendors"`
+	BrandKind     string  `json:"brand_kind"`
+	TDSSection    string  `json:"tds_section"`
+	TDSPct        float64 `json:"tds_pct"`
 }
 
 func (s *Service) listSKUs(w http.ResponseWriter, r *http.Request) error {
 	rows, err := s.DB.Query(r.Context(), `SELECT k.id, k.code, k.sub_category_id, sc.name, c.id, c.name, coalesce(k.brand_id,0), coalesce(b.name,''), k.item_name, k.pack_size_id, ps.name,
 		k.gst_pct, k.hsn, k.scope, k.cluster_ids, k.property_ids, k.active,
-		(SELECT count(DISTINCT rc.vendor_id) FROM rate_card rc WHERE rc.sku_id=k.id AND NOT rc.superseded AND current_date BETWEEN rc.valid_from AND rc.valid_to)
+		(SELECT count(DISTINCT rc.vendor_id) FROM rate_card rc WHERE rc.sku_id=k.id AND NOT rc.superseded AND current_date BETWEEN rc.valid_from AND rc.valid_to),
+		coalesce(b.kind,'brand'), k.tds_section, k.tds_pct
 		FROM sku k JOIN sub_category sc ON sc.id=k.sub_category_id JOIN category c ON c.id=sc.category_id
 		LEFT JOIN brand b ON b.id=k.brand_id JOIN pack_size ps ON ps.id=k.pack_size_id ORDER BY k.code`)
 	if err != nil {
@@ -336,7 +363,7 @@ func (s *Service) listSKUs(w http.ResponseWriter, r *http.Request) error {
 	out, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (SKU, error) {
 		var x SKU
 		return x, row.Scan(&x.ID, &x.Code, &x.SubCategoryID, &x.SubCategory, &x.CategoryID, &x.Category, &x.BrandID, &x.Brand, &x.ItemName,
-			&x.PackSizeID, &x.PackSize, &x.GST, &x.HSN, &x.Scope, &x.ClusterIDs, &x.PropertyIDs, &x.Active, &x.RatedVendors)
+			&x.PackSizeID, &x.PackSize, &x.GST, &x.HSN, &x.Scope, &x.ClusterIDs, &x.PropertyIDs, &x.Active, &x.RatedVendors, &x.BrandKind, &x.TDSSection, &x.TDSPct)
 	})
 	if err != nil {
 		return err
@@ -355,8 +382,10 @@ type SKUInput struct {
 	Scope         string  `json:"scope"`
 	ClusterIDs    []int64 `json:"cluster_ids"`
 	PropertyIDs   []int64 `json:"property_ids"`
+	TDSSection    string  `json:"tds_section"` // service items only, a code from indiantax.TDSSections
 
-	brandID int64 // filled by Validate when the brand already exists
+	brandID int64   // filled by Validate when the brand already exists
+	tdsPct  float64 // the section's rate, set by Validate
 }
 
 // NewBrand reports whether saving will create a new brand.
@@ -403,13 +432,14 @@ func Validate(ctx context.Context, q database.Q, in *SKUInput, selfID int64) []s
 		errs = append(errs, "HSN or SAC code must be 4 to 8 digits. Goods use HSN; services use a 6-digit SAC starting with 99.")
 	}
 	in.brandID = 0
+	brandKind := "brand"
 	if textclean.Key(in.BrandName) == "" {
-		in.BrandName = "" // no brand, for example a service
+		errs = append(errs, "Pick a brand. Use Other brand for unbranded goods, or Service for a service.")
 	} else {
 		var bActive bool
 		var bName string
 		in.brandID = 0
-		if err := q.QueryRow(ctx, `SELECT id, name, active FROM brand WHERE norm_key(name)=norm_key($1)`, in.BrandName).Scan(&in.brandID, &bName, &bActive); err == nil {
+		if err := q.QueryRow(ctx, `SELECT id, name, active, kind FROM brand WHERE norm_key(name)=norm_key($1)`, in.BrandName).Scan(&in.brandID, &bName, &bActive, &brandKind); err == nil {
 			if !bActive {
 				errs = append(errs, "Brand "+bName+" is inactive. Mark it active under Settings, Item Setup.")
 			}
@@ -417,6 +447,17 @@ func Validate(ctx context.Context, q database.Q, in *SKUInput, selfID int64) []s
 		} else if len(in.BrandName) < 2 || strings.ContainsAny(in.BrandName, `<>"`) {
 			errs = append(errs, "Brand name is not valid.")
 		}
+	}
+	// TDS is deducted on services only. A service item must say which section applies, or "No TDS".
+	in.tdsPct = 0
+	if brandKind == "service" {
+		if sec, ok := indiantax.TDSFor(in.TDSSection); ok {
+			in.tdsPct = sec.Pct
+		} else {
+			errs = append(errs, "Choose the TDS section for this service, or No TDS.")
+		}
+	} else {
+		in.TDSSection = ""
 	}
 	if in.Scope != "all" && in.Scope != "selected" {
 		errs = append(errs, "Availability must be all properties or selected properties.")
@@ -433,7 +474,7 @@ func Validate(ctx context.Context, q database.Q, in *SKUInput, selfID int64) []s
 	if in.PropertyIDs == nil {
 		in.PropertyIDs = []int64{}
 	}
-	if len(errs) == 0 && (in.brandID != 0 || in.BrandName == "") {
+	if len(errs) == 0 && in.brandID != 0 {
 		var dup string
 		_ = q.QueryRow(ctx, `SELECT code || CASE WHEN active THEN '' ELSE ' (inactive)' END FROM sku WHERE sub_category_id=$1 AND coalesce(brand_id,0)=$2 AND norm_key(item_name)=norm_key($3) AND pack_size_id=$4 AND id<>$5`,
 			in.SubCategoryID, in.brandID, in.ItemName, in.PackSizeID, selfID).Scan(&dup)
@@ -469,8 +510,8 @@ func Create(ctx context.Context, tx pgx.Tx, u *access.User, in *SKUInput) (strin
 		return "", err
 	}
 	code := fmt.Sprintf("%s-%04d", prefix, n)
-	_, err := tx.Exec(ctx, `INSERT INTO sku(code,sub_category_id,brand_id,item_name,pack_size_id,gst_pct,hsn,scope,cluster_ids,property_ids,created_by)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`, code, in.SubCategoryID, in.brandRef(), in.ItemName, in.PackSizeID, in.GST, in.HSN, in.Scope, in.ClusterIDs, in.PropertyIDs, u.ID)
+	_, err := tx.Exec(ctx, `INSERT INTO sku(code,sub_category_id,brand_id,item_name,pack_size_id,gst_pct,hsn,scope,cluster_ids,property_ids,created_by,tds_section,tds_pct)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`, code, in.SubCategoryID, in.brandRef(), in.ItemName, in.PackSizeID, in.GST, in.HSN, in.Scope, in.ClusterIDs, in.PropertyIDs, u.ID, in.TDSSection, in.tdsPct)
 	if err != nil {
 		return "", err
 	}
@@ -514,8 +555,8 @@ func (s *Service) saveSKU(w http.ResponseWriter, r *http.Request) error {
 		if err := tx.QueryRow(r.Context(), `SELECT k.code||' · '||concat_ws(' ', b.name, k.item_name)||' · '||k.gst_pct||'%' FROM sku k LEFT JOIN brand b ON b.id=k.brand_id WHERE k.id=$1`, id).Scan(&old); err != nil {
 			return err
 		}
-		if err := tx.QueryRow(r.Context(), `UPDATE sku SET brand_id=$2, item_name=$3, pack_size_id=$4, gst_pct=$5, hsn=$6, scope=$7, cluster_ids=$8, property_ids=$9 WHERE id=$1 RETURNING code`,
-			id, in.brandRef(), in.ItemName, in.PackSizeID, in.GST, in.HSN, in.Scope, in.ClusterIDs, in.PropertyIDs).Scan(&code); err != nil {
+		if err := tx.QueryRow(r.Context(), `UPDATE sku SET brand_id=$2, item_name=$3, pack_size_id=$4, gst_pct=$5, hsn=$6, scope=$7, cluster_ids=$8, property_ids=$9, tds_section=$10, tds_pct=$11 WHERE id=$1 RETURNING code`,
+			id, in.brandRef(), in.ItemName, in.PackSizeID, in.GST, in.HSN, in.Scope, in.ClusterIDs, in.PropertyIDs, in.TDSSection, in.tdsPct).Scan(&code); err != nil {
 			return err
 		}
 		return auditlog.Write(r.Context(), tx, u, "Items", "SKU edited", code, fmt.Sprintf("%s → %s · %v%%", old, strings.TrimSpace(in.BrandName+" "+in.ItemName), in.GST))

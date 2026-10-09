@@ -15,7 +15,7 @@ import { useAction } from '../ui/useAction'
 export interface SKU {
   id: number; code: string; sub_category_id: number; sub_category: string; category_id: number; category: string; brand_id: number; brand: string
   item_name: string; pack_size_id: number; pack_size: string; gst_pct: number; hsn: string; scope: string; cluster_ids: number[]; property_ids: number[]
-  active: boolean; rated_vendors: number
+  active: boolean; rated_vendors: number; brand_kind: string; tds_section: string; tds_pct: number
 }
 
 export function ItemsPage() {
@@ -47,6 +47,7 @@ export function ItemsPage() {
           { key: 'scope', label: 'Available at', render: scope, csv: scope },
           { key: 'gst', label: 'GST', right: true, render: (s) => s.gst_pct + '%', sort: (s) => s.gst_pct, csv: (s) => s.gst_pct },
           { key: 'hsn', label: 'HSN / SAC', render: (s) => s.hsn || '—', csv: (s) => s.hsn },
+          { key: 'tds', label: 'TDS', render: (s) => s.brand_kind !== 'service' ? '—' : s.tds_pct ? `${s.tds_section.replace(/-.*/, '')} · ${s.tds_pct}%` : 'No TDS', csv: (s) => s.tds_pct ? `${s.tds_section} ${s.tds_pct}%` : '' },
           { key: 'rated', label: 'Vendors with valid rate', right: true, render: (s) => s.rated_vendors, sort: (s) => s.rated_vendors, csv: (s) => s.rated_vendors },
           { key: 'status', label: 'Status', render: (s) => <ActiveToggle kind="sku" id={s.id} name={s.code} active={s.active} onDone={reload} />, csv: (s) => s.active ? 'Active' : 'Inactive' },
           { key: 'edit', label: '', render: (s) => ed ? <button className="link" onClick={() => setEdit(s)}>Edit</button> : null },
@@ -62,21 +63,28 @@ function SKUModal({ sku, onClose, onDone }: { sku: SKU | null; onClose: () => vo
   const subs = (l?.subCategories || []).filter((s) => s.active || s.id === sku?.sub_category_id)
   const [f, setF] = useState({ sub_category_id: sku?.sub_category_id || subs[0]?.id || 0, brand: sku?.brand || '', item_name: sku?.item_name || '',
     pack_size_id: sku?.pack_size_id || l?.packSizes.find((p) => p.active)?.id || 0, gst_pct: sku?.gst_pct ?? 18, hsn: sku?.hsn || '',
-    scope: sku?.scope || 'all', cluster_ids: sku?.cluster_ids || [], property_ids: sku?.property_ids || [] })
+    scope: sku?.scope || 'all', cluster_ids: sku?.cluster_ids || [], property_ids: sku?.property_ids || [], tds_section: sku?.tds_section || '' })
   const a = useAction()
   const set = (k: string, v: unknown) => setF({ ...f, [k]: v })
+  // A service item (brand "Service") must say how much TDS is deducted when it is paid.
+  const sections = useApi<{ code: string; label: string; pct: number }[]>('/tds-sections')
+  const key = (x: string) => x.toLowerCase().replace(/[^a-z0-9]/g, '')
+  const service = (l?.brands || []).find((b) => key(b.name) === key(f.brand))?.kind === 'service'
   return (
     <Modal title={sku ? 'Edit ' + sku.code : 'Add item'} onClose={onClose} wide>
       <div className="grid2">
         <Field label="Sub-category" hint={sku ? 'Fixed: it sets the SKU code.' : 'The SKU code is generated from its 2 letters.'}>
           <select disabled={!!sku} value={f.sub_category_id} onChange={(e) => set('sub_category_id', +e.target.value)}>{subs.map((s) => <option key={s.id} value={s.id}>{s.category} › {s.name}</option>)}</select></Field>
-        <Field label="Brand (optional)" hint="Pick from the list, or type a new brand and it is added with the SKU. Leave empty for a service or an unbranded item.">
+        <Field label="Brand" hint="Pick from the list or type a new brand. Use Other brand for unbranded goods, or Service for a service (it then asks for TDS).">
           <input list="brands" value={f.brand} onChange={(e) => set('brand', e.target.value)} autoComplete="off" />
           <datalist id="brands">{l?.brands.filter((b) => b.active).map((b) => <option key={b.id} value={b.name} />)}</datalist></Field>
         <Field label="Item name" hint="Without the brand name."><input value={f.item_name} onChange={(e) => set('item_name', e.target.value)} /></Field>
         <Field label="Pack size"><select value={f.pack_size_id} onChange={(e) => set('pack_size_id', +e.target.value)}>{l?.packSizes.filter((p) => p.active || p.id === sku?.pack_size_id).map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}</select></Field>
         <Field label="GST %"><select value={f.gst_pct} onChange={(e) => set('gst_pct', +e.target.value)}>{[0, 5, 12, 18, 28, 40].map((g) => <option key={g} value={g}>{g}%</option>)}</select></Field>
         <Field label="HSN or SAC code" hint="HSN for goods (4 to 8 digits), SAC for services (6 digits starting with 99). Sent to Zoho on every bill line."><input value={f.hsn} inputMode="numeric" maxLength={8} placeholder="e.g. 34011190 or 998533" onChange={(e) => set('hsn', e.target.value.replace(/\D/g, ''))} /></Field>
+        {service && <Field label="TDS on this service" hint="Deducted from the vendor's payment, on the value before GST. Choose No TDS if none applies.">
+          <select value={f.tds_section} onChange={(e) => set('tds_section', e.target.value)}><option value="">Choose the TDS section</option>
+            {(sections.data || []).map((x) => <option key={x.code} value={x.code}>{x.label}</option>)}</select></Field>}
         <Field label="Available at"><select value={f.scope} onChange={(e) => set('scope', e.target.value)}><option value="all">All properties (master item)</option><option value="selected">Selected properties only</option></select></Field>
       </div>
       {f.scope === 'selected' && <>

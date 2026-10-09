@@ -9,7 +9,7 @@ export interface Lookups {
   properties: Property[]
   categories: { id: number; name: string; is_fb: boolean }[]
   subCategories: { id: number; name: string; code: string; category_id: number; category: string; is_fb: boolean; active: boolean }[]
-  brands: { id: number; name: string; active: boolean }[]
+  brands: { id: number; name: string; active: boolean; kind?: string }[] // kind: brand, other ("Other brand") or service ("Service")
   packSizes: { id: number; name: string; active: boolean }[]
   billTypes: { id: number; name: string; section: string; default_gst: number; active: boolean }[]
   people: { id: number; name: string; active: boolean; steps: string[] }[]

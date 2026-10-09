@@ -77,6 +77,8 @@ type bill struct {
 
 	TagID, TagOptionID, LocationID string
 	TagOK                          bool
+	TDS                            float64 // TDS on service lines, rounded to the rupee
+	TDSSections                    string
 	ContactID                      string
 	ContactOK                      bool
 	BillAccount                    string
@@ -146,6 +148,10 @@ func load(ctx context.Context, q database.Q, invoiceID int64) (*bill, error) {
 			return nil, err
 		}
 	}
+	// TDS is held back from the vendor's payment. It is noted on the bill; the bill itself stays at its full value.
+	_ = q.QueryRow(ctx, `SELECT coalesce(sum(gl.qty*l.rate*l.tds_pct/100),0), coalesce(string_agg(DISTINCT l.tds_section, ', ') FILTER (WHERE l.tds_pct>0),'')
+		FROM invoice i JOIN goods_receipt_line gl ON gl.goods_receipt_id=i.goods_receipt_id JOIN document_line l ON l.id=gl.line_id WHERE i.id=$1`, invoiceID).Scan(&b.TDS, &b.TDSSections)
+	b.TDS = math.Round(b.TDS)
 	return b, nil
 }
 
@@ -280,6 +286,11 @@ func payload(b *bill, taxes map[float64]string) (map[string]any, []string) {
 		due = clock.YMD(dd)
 		days = int(dd.Sub(d).Hours()/24 + 0.5) // "15th of next month" has no fixed day count; Zoho gets the exact due date
 	}
+	notes := "Purchase Desk " + b.DocNumber + " · " + b.Property
+	if b.TDS > 0 {
+		notes += fmt.Sprintf(" · TDS %s to deduct: %s, pay the vendor %s", b.TDSSections, money.INR(b.TDS), money.INR(b.Amount-b.TDS))
+		warn = append(warn, fmt.Sprintf("TDS of %s (%s) is written in the bill notes but not applied in Zoho; record it in Zoho when paying the vendor.", money.INR(b.TDS), b.TDSSections))
+	}
 	tags := []map[string]string{{"tag_id": b.TagID, "tag_option_id": b.TagOptionID}}
 	items := []map[string]any{}
 	computed := 0.0
@@ -339,7 +350,7 @@ func payload(b *bill, taxes map[float64]string) (map[string]any, []string) {
 	p := map[string]any{
 		"vendor_id": b.ContactID, "bill_number": b.InvoiceNo, "reference_number": ref, "date": date, "due_date": due,
 		"payment_terms": days, "payment_terms_label": b.Terms, "gst_treatment": gstTreatment, "tags": tags, "is_inclusive_tax": false,
-		"line_items": items, "notes": "Purchase Desk " + b.DocNumber + " · " + b.Property,
+		"line_items": items, "notes": notes,
 	}
 	if b.KeyField != "" {
 		p["custom_fields"] = []map[string]string{{"api_name": b.KeyField, "value": key(b)}}

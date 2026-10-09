@@ -52,6 +52,8 @@ export function PaymentsPage() {
           { key: 'vendor', label: 'Vendor', render: (r) => <>{r.vendor}{r.vendor_msme && <> <Pill tone="warn">MSME</Pill></>}{!r.vendor_gst_registered && <> <Pill tone="off">Unregistered</Pill></>}</>, csv: (r) => r.vendor },
           { key: 'property', label: 'Property', render: (r) => r.property, csv: (r) => r.property },
           { key: 'amt', label: 'Amount', right: true, render: (r) => inr(r.amount), sort: (r) => r.amount, csv: (r) => r.amount },
+          { key: 'tds', label: 'TDS', right: true, render: (r) => r.tds_amount ? <span title={r.tds_sections}>− {inr(r.tds_amount)}</span> : '—', sort: (r) => r.tds_amount, csv: (r) => r.tds_amount },
+          { key: 'net', label: 'Net payable', right: true, render: (r) => inr(r.net_payable), sort: (r) => r.net_payable, csv: (r) => r.net_payable },
           { key: 'payby', label: 'Pay by', render: (r) => overdue(r) ? <Pill tone="bad">Overdue {day(r.pay_by)}</Pill> : day(r.pay_by), sort: (r) => r.pay_by, csv: (r) => r.pay_by },
           ...(zoho ? [{ key: 'zoho', label: 'Zoho bill', render: (r: Invoice) => r.zoho_bill_id || (r.held.length ? <Pill tone="bad">Held: {r.held[0]}{r.held.length > 1 ? ` +${r.held.length - 1}` : ''}</Pill> : '—'), csv: (r: Invoice) => r.zoho_bill_id }] : []),
           { key: 'status', label: 'Status', render: (r) => <Pill tone={LABEL[r.status]?.[1] || ''}>{!zoho && r.status === 'PAY_APPROVED' ? 'Payment approved' : LABEL[r.status]?.[0] || r.status}</Pill>, csv: (r) => r.status },

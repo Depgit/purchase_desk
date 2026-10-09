@@ -311,7 +311,8 @@ func (s *Service) create(w http.ResponseWriter, r *http.Request) error {
 				return err
 			}
 			for _, l := range ls {
-				if _, err := tx.Exec(ctx, `INSERT INTO document_line(document_id,sku_id,qty,rate,gst_pct,estimated) VALUES ($1,$2,$3,$4,$5,$6)`, id, l.sku, l.qty, l.rate, l.gst, l.est); err != nil {
+				if _, err := tx.Exec(ctx, `INSERT INTO document_line(document_id,sku_id,qty,rate,gst_pct,estimated,tds_section,tds_pct)
+					SELECT $1,$2,$3,$4,$5,$6,k.tds_section,k.tds_pct FROM sku k WHERE k.id=$2`, id, l.sku, l.qty, l.rate, l.gst, l.est); err != nil {
 					return err
 				}
 			}
