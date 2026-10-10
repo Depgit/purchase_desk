@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -47,6 +48,10 @@ type kind struct {
 	allowed  func(u *access.User) bool
 	check    func(ctx context.Context, x *run, row csvfile.Row) result
 	commit   func(ctx context.Context, tx pgx.Tx, x *run, objs []any) error
+	export   exportFn                                           // "Download current data", in the upload's columns; nil when there is none
+	keyOf    func(row csvfile.Row) string                       // the row's key in that file; an uploaded row equal to it is skipped as unchanged
+	onSame   func(ctx context.Context, x *run, row csvfile.Row) // sees a skipped unchanged row (a user's other roles)
+	after    func(ctx context.Context, x *run) []result         // extra changes found once every row is read (a role row deleted)
 }
 
 type result struct {
@@ -61,6 +66,7 @@ type run struct {
 	u          *access.User
 	q          database.Q
 	seen       map[string]bool
+	memo       map[string]any // rows that build one record together (a user's roles)
 	propertyID int64
 }
 
@@ -79,6 +85,62 @@ func num(v string) (float64, bool) {
 
 func bad(msg string, a ...any) result { return result{msg: fmt.Sprintf(msg, a...)} }
 
+// userLogin is the email (or, without one, the mobile) that ties a user's role rows together.
+func userLogin(row csvfile.Row) string {
+	if e := strings.ToLower(strings.TrimSpace(row.Get("email"))); e != "" {
+		return e
+	}
+	return strings.TrimSpace(row.Get("mobile"))
+}
+
+// userGrant reads a users row's role, property access ("all", "cluster:A;B" or property codes) and category limits.
+func userGrant(ctx context.Context, x *run, row csvfile.Row) (users.RoleGrant, string) {
+	var roleID int64
+	if err := x.q.QueryRow(ctx, `SELECT id FROM role WHERE active AND (lower(code)=lower($1) OR norm_key(name)=norm_key($1))`, row.Get("role")).Scan(&roleID); err != nil {
+		return users.RoleGrant{}, fmt.Sprintf("Unknown role %q", row.Get("role"))
+	}
+	g := users.RoleGrant{RoleID: roleID, Scope: "all", ClusterIDs: []int64{}, PropertyIDs: []int64{}, CategoryIDs: []int64{}}
+	acc := strings.TrimSpace(row.Get("access"))
+	switch {
+	case acc == "" || strings.EqualFold(acc, "all"):
+	case strings.HasPrefix(strings.ToLower(acc), "cluster:"):
+		g.Scope = "clusters"
+		for _, n := range strings.Split(acc[8:], ";") {
+			var id int64
+			if err := x.q.QueryRow(ctx, `SELECT id FROM cluster WHERE norm_key(name)=norm_key($1)`, n).Scan(&id); err != nil {
+				return g, fmt.Sprintf("Unknown cluster %q", n)
+			}
+			g.ClusterIDs = append(g.ClusterIDs, id)
+		}
+	default:
+		g.Scope = "properties"
+		for _, c := range strings.Split(acc, ";") {
+			var id int64
+			if err := x.q.QueryRow(ctx, `SELECT id FROM property WHERE upper(code)=upper($1)`, strings.TrimSpace(c)).Scan(&id); err != nil {
+				return g, fmt.Sprintf("Unknown property code %q", c)
+			}
+			g.PropertyIDs = append(g.PropertyIDs, id)
+		}
+	}
+	for _, c := range strings.Split(row.Get("categories"), ";") {
+		if strings.TrimSpace(c) == "" {
+			continue
+		}
+		var id int64
+		if err := x.q.QueryRow(ctx, `SELECT id FROM category WHERE norm_key(name)=norm_key($1)`, c).Scan(&id); err != nil {
+			return g, fmt.Sprintf("Unknown category %q", c)
+		}
+		g.CategoryIDs = append(g.CategoryIDs, id)
+	}
+	return g, ""
+}
+
+// editRow is a checked row: an edit of record id, or a new record when id is 0.
+type editRow struct {
+	id  int64
+	obj any
+}
+
 func (s *Service) Routes(r chi.Router) {
 	s.kinds = s.define()
 	// Uploads that belong to a later release phase are left out until RELEASE_PHASE reaches it.
@@ -87,7 +149,10 @@ func (s *Service) Routes(r chi.Router) {
 			delete(s.kinds, name)
 		}
 	}
+	s.kinds["mappings"] = s.mappingsKind()
 	r.Get("/uploads/{kind}/sample", httpjson.Wrap(s.sample))
+	r.Get("/uploads/{kind}/export", httpjson.Wrap(s.export))
+	r.Get("/uploads/{kind}/workbook", httpjson.Wrap(s.workbook))
 	r.Post("/uploads/{kind}/check", httpjson.Wrap(s.checkOnly))
 	r.Post("/uploads/{kind}/import", httpjson.Wrap(s.importRows))
 }
@@ -100,12 +165,27 @@ func (s *Service) define() map[string]*kind {
 		"items": {
 			title: "Items", module: "Items", allowed: masters,
 			required: []string{"category", "sub_category", "item_name", "unit", "gst_percent"}, // brand may be blank for services
-			sample:   "category,sub_category,brand,item_name,unit,gst_percent,hsn,properties,tds_section\nHousekeeping,Guest Amenities,Aroma Leaf,Body lotion 30 ml,box of 250,18,33049910,ALL,\nEngineering,Electrical,BrightVolt,Pool pump capacitor,piece,18,,P01;P23,\n",
+			sample:   "sku_code,category,sub_category,brand,item_name,unit,gst_percent,hsn,properties,tds_section\n,Housekeeping,Guest Amenities,Aroma Leaf,Body lotion 30 ml,box of 250,18,33049910,ALL,\n,Engineering,Electrical,BrightVolt,Pool pump capacitor,piece,18,,P01;P23,\n",
+			keyOf:    key("sku_code"),
 			check: func(ctx context.Context, x *run, row csvfile.Row) result {
 				var scID, catID int64
 				if err := x.q.QueryRow(ctx, `SELECT sc.id, c.id FROM sub_category sc JOIN category c ON c.id=sc.category_id WHERE norm_key(c.name)=norm_key($1) AND norm_key(sc.name)=norm_key($2)`,
 					row.Get("category"), row.Get("sub_category")).Scan(&scID, &catID); err != nil {
 					return bad("Sub-category %q not found in category %q", row.Get("sub_category"), row.Get("category"))
+				}
+				// A row with a sku_code edits that SKU; its sub-category (and so its code) stays as it is.
+				id := int64(0)
+				if code := strings.TrimSpace(row.Get("sku_code")); code != "" {
+					var cur int64
+					if err := x.q.QueryRow(ctx, `SELECT id, sub_category_id FROM sku WHERE upper(code)=upper($1)`, code).Scan(&id, &cur); err != nil {
+						return bad("Unknown SKU code %s. Leave sku_code blank to add a new item", code)
+					}
+					if cur != scID {
+						return bad("The sub-category of %s cannot change. Add it as a new item and mark %s inactive", code, code)
+					}
+					if x.dup("code" + strings.ToUpper(code)) {
+						return bad("Duplicate row in the file")
+					}
 				}
 				var packID int64
 				if err := x.q.QueryRow(ctx, `SELECT id FROM pack_size WHERE norm_key(name)=norm_key($1)`, row.Get("unit")).Scan(&packID); err != nil {
@@ -116,41 +196,66 @@ func (s *Service) define() map[string]*kind {
 					return bad("GST %% must be a number")
 				}
 				in := &items.SKUInput{SubCategoryID: scID, BrandName: row.Get("brand"), ItemName: row.Get("item_name"), PackSizeID: packID, GST: gst, HSN: row.Get("hsn"), Scope: "all", TDSSection: strings.ToUpper(strings.TrimSpace(row.Get("tds_section")))}
-				if p := strings.TrimSpace(row.Get("properties")); p != "" && !strings.EqualFold(p, "ALL") {
-					in.Scope = "selected"
-					for _, code := range strings.FieldsFunc(p, func(r rune) bool { return r == ';' || r == '|' }) {
-						var id int64
-						if err := x.q.QueryRow(ctx, `SELECT id FROM property WHERE upper(code)=upper($1)`, strings.TrimSpace(code)).Scan(&id); err != nil {
-							return bad("Unknown property code %s", code)
-						}
-						in.PropertyIDs = append(in.PropertyIDs, id)
-					}
+				all, clusters, props, problem := scope(ctx, x.q, row.Get("properties"))
+				if problem != "" {
+					return bad("%s", problem)
 				}
-				if errs := items.Validate(ctx, x.q, in, 0); len(errs) > 0 {
+				if !all {
+					in.Scope, in.ClusterIDs, in.PropertyIDs = "selected", clusters, props
+				}
+				if errs := items.Validate(ctx, x.q, in, id); len(errs) > 0 {
 					return bad("%s", strings.Join(errs, " "))
 				}
 				if x.dup(fmt.Sprintf("%d|%s|%s|%d", scID, textclean.Key(in.BrandName), textclean.Key(in.ItemName), packID)) {
 					return bad("Duplicate row in the file")
 				}
 				msg := "New SKU"
+				if id != 0 {
+					msg = "Updates " + strings.ToUpper(strings.TrimSpace(row.Get("sku_code")))
+				}
 				if in.NewBrand() {
 					msg += " · new brand " + in.BrandName
 				}
-				return result{ok: true, msg: msg, obj: in}
+				return result{ok: true, msg: msg, obj: &editRow{id, in}}
 			},
 			commit: func(ctx context.Context, tx pgx.Tx, x *run, objs []any) error {
 				for _, o := range objs {
-					if _, err := items.Create(ctx, tx, x.u, o.(*items.SKUInput)); err != nil {
+					e := o.(*editRow)
+					in := e.obj.(*items.SKUInput)
+					var err error
+					if e.id == 0 {
+						_, err = items.Create(ctx, tx, x.u, in)
+					} else {
+						_, err = items.Update(ctx, tx, x.u, e.id, in)
+					}
+					if err != nil {
 						return err
 					}
 				}
 				return nil
+			},
+			export: func(ctx context.Context, q database.Q, r *http.Request) ([]string, [][]string, error) {
+				heads := []string{"sku_code", "category", "sub_category", "brand", "item_name", "unit", "gst_percent", "hsn", "properties", "tds_section"}
+				rows, err := rowsOf(ctx, q, `SELECT k.code, c.name, sc.name, coalesce(b.name,''), k.item_name, ps.name, k.gst_pct::float8::text, k.hsn,
+					`+fmt.Sprintf(scopeSQL, "k.scope='all'", "k.cluster_ids", "k.property_ids")+`, coalesce(k.tds_section,'')
+					FROM sku k JOIN sub_category sc ON sc.id=k.sub_category_id JOIN category c ON c.id=sc.category_id LEFT JOIN brand b ON b.id=k.brand_id JOIN pack_size ps ON ps.id=k.pack_size_id
+					WHERE k.active ORDER BY k.code`)
+				return heads, rows, err
 			},
 		},
 		"rates": {
 			title: "Vendor rates", module: "Vendor Rates", allowed: masters,
 			required: []string{"vendor_code", "sku_code", "rate_ex_gst", "gst_percent", "valid_from", "valid_to"},
 			sample:   "vendor_code,vendor_name,sku_code,item_name,unit,rate_ex_gst,gst_percent,valid_from,valid_to\nV001,Shree Balaji Hotel Supplies,GA-0001,Soap bar 20 g,box of 500,1380,18,2026-11-01,2027-03-31\n",
+			keyOf:    key("vendor_code", "sku_code"),
+			export: func(ctx context.Context, q database.Q, r *http.Request) ([]string, [][]string, error) {
+				heads := []string{"vendor_code", "vendor_name", "sku_code", "item_name", "unit", "rate_ex_gst", "gst_percent", "valid_from", "valid_to"}
+				rows, err := rowsOf(ctx, q, `SELECT DISTINCT ON (rc.vendor_id, rc.sku_id) v.code, v.legal_name, k.code, concat_ws(' ', b.name, k.item_name), ps.name,
+					rc.rate::float8::text, rc.gst_pct::float8::text, to_char(rc.valid_from,'YYYY-MM-DD'), to_char(rc.valid_to,'YYYY-MM-DD')
+					FROM rate_card rc JOIN vendor v ON v.id=rc.vendor_id JOIN sku k ON k.id=rc.sku_id LEFT JOIN brand b ON b.id=k.brand_id JOIN pack_size ps ON ps.id=k.pack_size_id
+					WHERE NOT rc.superseded AND rc.valid_to >= current_date AND v.active AND k.active ORDER BY rc.vendor_id, rc.sku_id, rc.valid_from DESC`)
+				return heads, rows, err
+			},
 			check: func(ctx context.Context, x *run, row csvfile.Row) result {
 				if row.Get("rate_ex_gst") == "" {
 					return result{skip: true, msg: "Skipped, no rate entered"}
@@ -190,6 +295,18 @@ func (s *Service) define() map[string]*kind {
 			title: "Monthly budgets", module: "Budgets", allowed: func(u *access.User) bool { return hasUpload(u) && (u.IsAdmin || u.HasStep("cc")) },
 			required: []string{"property_code", "sub_category", "monthly_budget"},
 			sample:   "property_code,property_name,month,sub_category,monthly_budget\nP01,Sector 45 Gurugram," + clock.YMD(clock.Today())[:7] + ",Guest Amenities,65000\n",
+			keyOf:    key("property_code", "month", "sub_category"),
+			export: func(ctx context.Context, q database.Q, r *http.Request) ([]string, [][]string, error) {
+				m := clock.MonthStart(clock.Today())
+				if v, ok := clock.ParseMonth(r.URL.Query().Get("month")); ok {
+					m = v
+				}
+				heads := []string{"property_code", "property_name", "month", "sub_category", "monthly_budget"}
+				rows, err := rowsOf(ctx, q, `SELECT p.code, p.name, to_char($1::date,'YYYY-MM'), sc.name, coalesce(bu.amount,0)::float8::text
+					FROM property p CROSS JOIN sub_category sc LEFT JOIN budget bu ON bu.property_id=p.id AND bu.sub_category_id=sc.id AND bu.month=$1
+					WHERE p.active AND p.kind='live' AND sc.active ORDER BY p.code, sc.name`, m)
+				return heads, rows, err
+			},
 			check: func(ctx context.Context, x *run, row csvfile.Row) result {
 				var pid, sid int64
 				if err := x.q.QueryRow(ctx, `SELECT id FROM property WHERE upper(code)=upper($1)`, row.Get("property_code")).Scan(&pid); err != nil {
@@ -274,6 +391,12 @@ func (s *Service) define() map[string]*kind {
 			title: "F&B cost % by property", module: "Properties", allowed: masters,
 			required: []string{"property_code", "plan_cost_pct", "ird_cost_pct", "banquet_cost_pct"},
 			sample:   "property_code,property_name,plan_cost_pct,ird_cost_pct,banquet_cost_pct\nP01,Sector 45 Gurugram,34,31,38\n",
+			keyOf:    key("property_code"),
+			export: func(ctx context.Context, q database.Q, r *http.Request) ([]string, [][]string, error) {
+				heads := []string{"property_code", "property_name", "plan_cost_pct", "ird_cost_pct", "banquet_cost_pct"}
+				rows, err := rowsOf(ctx, q, `SELECT code, name, plan_pct::float8::text, ird_pct::float8::text, banquet_pct::float8::text FROM property WHERE active AND kind='live' ORDER BY code`)
+				return heads, rows, err
+			},
 			check: func(ctx context.Context, x *run, row csvfile.Row) result {
 				var pid int64
 				var op, oi, ob float64
@@ -304,18 +427,34 @@ func (s *Service) define() map[string]*kind {
 		"properties": {
 			title: "Properties", module: "Properties", allowed: masters,
 			required: []string{"property_name", "ezee_code", "cluster"},
-			sample:   "property_name,ezee_code,cluster,stage,property_manager_login,plan_cost_pct,ird_cost_pct,banquet_cost_pct\n\"Sector 45, Gurugram\",EZ-10401,Gurugram North,live,ravi.kumar@saltstayz.com,35,32,38\n",
+			sample:   "property_code,property_name,ezee_code,cluster,stage,property_manager_login,plan_cost_pct,ird_cost_pct,banquet_cost_pct\n,\"Sector 45, Gurugram\",EZ-10401,Gurugram North,live,ravi.kumar@saltstayz.com,35,32,38\n",
+			keyOf:    key("property_code"),
 			check: func(ctx context.Context, x *run, row csvfile.Row) result {
-				in := geography.PropertyInput{Name: row.Get("property_name"), EzeeCode: row.Get("ezee_code"), Kind: strings.ToLower(strings.ReplaceAll(textclean.Default(row.Get("stage"), "live"), "-", "")), PlanPct: 35, IRDPct: 32, BanquetPct: 38}
+				in := geography.PropertyInput{Kind: "live", PlanPct: 35, IRDPct: 32, BanquetPct: 38}
+				// A row with a property_code edits that property; a blank stage or cost % keeps what is on file.
+				id := int64(0)
+				if code := strings.TrimSpace(row.Get("property_code")); code != "" {
+					if err := x.q.QueryRow(ctx, `SELECT id, kind, plan_pct::float8, ird_pct::float8, banquet_pct::float8 FROM property WHERE upper(code)=upper($1)`, code).
+						Scan(&id, &in.Kind, &in.PlanPct, &in.IRDPct, &in.BanquetPct); err != nil {
+						return bad("Unknown property code %s. Leave property_code blank to add a new property", code)
+					}
+					if x.dup("code" + strings.ToUpper(code)) {
+						return bad("Duplicate row in the file")
+					}
+				}
+				in.Name, in.EzeeCode = row.Get("property_name"), row.Get("ezee_code")
+				if v := row.Get("stage"); strings.TrimSpace(v) != "" {
+					in.Kind = strings.ToLower(strings.ReplaceAll(strings.ReplaceAll(strings.TrimSpace(v), "-", ""), " ", ""))
+				}
 				if err := x.q.QueryRow(ctx, `SELECT id FROM cluster WHERE norm_key(name)=norm_key($1)`, row.Get("cluster")).Scan(&in.ClusterID); err != nil {
 					return bad("Unknown cluster %q. Add it under Cities & Clusters", row.Get("cluster"))
 				}
 				if l := row.Get("property_manager_login"); l != "" {
-					var id int64
-					if err := x.q.QueryRow(ctx, `SELECT id FROM app_user WHERE email=$1::citext OR mobile=$1`, strings.TrimSpace(l)).Scan(&id); err != nil {
+					var uid int64
+					if err := x.q.QueryRow(ctx, `SELECT id FROM app_user WHERE email=$1::citext OR mobile=$1`, strings.TrimSpace(l)).Scan(&uid); err != nil {
 						return bad("No user signs in with %s", l)
 					}
-					in.L1UserID = &id
+					in.L1UserID = &uid
 				}
 				for col, dst := range map[string]*float64{"plan_cost_pct": &in.PlanPct, "ird_cost_pct": &in.IRDPct, "banquet_cost_pct": &in.BanquetPct} {
 					if v := row.Get(col); v != "" {
@@ -326,125 +465,279 @@ func (s *Service) define() map[string]*kind {
 						*dst = f
 					}
 				}
-				if errs := geography.ValidateProperty(ctx, x.q, &in, 0); len(errs) > 0 {
+				if errs := geography.ValidateProperty(ctx, x.q, &in, id); len(errs) > 0 {
 					return bad("%s", strings.Join(errs, " "))
 				}
 				if x.dup(textclean.Key(in.Name)) || x.dup("ez"+in.EzeeCode) {
 					return bad("Duplicate row in the file")
 				}
-				return result{ok: true, msg: "New property", obj: in}
+				msg := "New property"
+				if id != 0 {
+					msg = "Updates " + strings.ToUpper(strings.TrimSpace(row.Get("property_code")))
+				}
+				return result{ok: true, msg: msg, obj: &editRow{id, in}}
 			},
 			commit: func(ctx context.Context, tx pgx.Tx, x *run, objs []any) error {
 				for _, o := range objs {
-					if _, _, err := geography.CreateProperty(ctx, tx, x.u, o.(geography.PropertyInput)); err != nil {
+					e := o.(*editRow)
+					in := e.obj.(geography.PropertyInput)
+					var err error
+					if e.id == 0 {
+						_, _, err = geography.CreateProperty(ctx, tx, x.u, in)
+					} else {
+						err = geography.UpdateProperty(ctx, tx, x.u, e.id, in)
+					}
+					if err != nil {
 						return err
 					}
 				}
 				return nil
+			},
+			export: func(ctx context.Context, q database.Q, r *http.Request) ([]string, [][]string, error) {
+				heads := []string{"property_code", "property_name", "ezee_code", "cluster", "stage", "property_manager_login", "plan_cost_pct", "ird_cost_pct", "banquet_cost_pct"}
+				rows, err := rowsOf(ctx, q, `SELECT p.code, p.name, p.ezee_code, k.name, p.kind, coalesce(u.email::text, u.mobile, ''),
+					p.plan_pct::float8::text, p.ird_pct::float8::text, p.banquet_pct::float8::text
+					FROM property p JOIN cluster k ON k.id=p.cluster_id LEFT JOIN app_user u ON u.id=p.l1_user_id WHERE p.active ORDER BY p.code`)
+				return heads, rows, err
 			},
 		},
 		"users": {
 			title: "Users", module: "Users", allowed: func(u *access.User) bool { return u.IsAdmin },
 			required: []string{"name", "department", "role"},
 			sample:   "name,email,mobile,department,role,access,categories,password\nRavi Kumar,ravi.kumar@saltstayz.com,9810000001,Operations,Property Manager (L1),P01,,\nNeha Bansal,neha.bansal@saltstayz.com,,Operations,Cluster Manager (L2),cluster:Gurugram North,,\nSunil Yadav,,9810000002,Housekeeping,Property Staff,P01,Housekeeping,\n",
-			check: func(ctx context.Context, x *run, row csvfile.Row) result {
-				var roleID int64
-				if err := x.q.QueryRow(ctx, `SELECT id FROM role WHERE active AND (lower(code)=lower($1) OR norm_key(name)=norm_key($1))`, row.Get("role")).Scan(&roleID); err != nil {
-					return bad("Unknown role %q", row.Get("role"))
+			// A user's unchanged role rows are skipped but still count: if another of their rows changed, their roles are
+			// rebuilt from every row, unchanged ones included. A user whose rows are all unchanged is not touched.
+			keyOf: func(row csvfile.Row) string {
+				if l := userLogin(row); l != "" && strings.TrimSpace(row.Get("role")) != "" {
+					return l + "|" + textclean.Key(row.Get("role"))
 				}
-				g := users.RoleGrant{RoleID: roleID, Scope: "all"}
-				acc := strings.TrimSpace(row.Get("access"))
-				switch {
-				case acc == "" || strings.EqualFold(acc, "all"):
-				case strings.HasPrefix(strings.ToLower(acc), "cluster:"):
-					g.Scope = "clusters"
-					for _, n := range strings.Split(acc[8:], ";") {
-						var id int64
-						if err := x.q.QueryRow(ctx, `SELECT id FROM cluster WHERE norm_key(name)=norm_key($1)`, n).Scan(&id); err != nil {
-							return bad("Unknown cluster %q", n)
-						}
-						g.ClusterIDs = append(g.ClusterIDs, id)
-					}
-				default:
-					g.Scope = "properties"
-					for _, c := range strings.Split(acc, ";") {
-						var id int64
-						if err := x.q.QueryRow(ctx, `SELECT id FROM property WHERE upper(code)=upper($1)`, strings.TrimSpace(c)).Scan(&id); err != nil {
-							return bad("Unknown property code %q", c)
-						}
-						g.PropertyIDs = append(g.PropertyIDs, id)
-					}
+				return ""
+			},
+			onSame: func(ctx context.Context, x *run, row csvfile.Row) {
+				g, problem := userGrant(ctx, x, row)
+				if problem != "" {
+					return
 				}
-				for _, c := range strings.Split(row.Get("categories"), ";") {
-					if strings.TrimSpace(c) == "" {
+				login := userLogin(row)
+				if e, ok := x.memo["user:"+login].(*editRow); ok {
+					in := e.obj.(*users.UserInput)
+					in.Roles = append(in.Roles, g)
+					return
+				}
+				pending, _ := x.memo["pending:"+login].([]users.RoleGrant)
+				x.memo["pending:"+login] = append(pending, g)
+			},
+			// A user whose rows are all unchanged but who holds more roles than the file lists had a role row deleted:
+			// their roles become the rows left. A user missing from the file entirely is left as is.
+			after: func(ctx context.Context, x *run) []result {
+				out := []result{}
+				for k, v := range x.memo {
+					login, ok := strings.CutPrefix(k, "pending:")
+					if !ok || x.memo["user:"+login] != nil {
 						continue
 					}
+					grants := v.([]users.RoleGrant)
 					var id int64
-					if err := x.q.QueryRow(ctx, `SELECT id FROM category WHERE norm_key(name)=norm_key($1)`, c).Scan(&id); err != nil {
-						return bad("Unknown category %q", c)
+					var n int
+					in := &users.UserInput{}
+					if err := x.q.QueryRow(ctx, `SELECT u.id, u.name, coalesce(u.email::text,''), coalesce(u.mobile,''), u.department, (SELECT count(*) FROM user_role ur WHERE ur.user_id=u.id)
+						FROM app_user u WHERE ($1 LIKE '%@%' AND u.email=$1::citext) OR u.mobile=$1 LIMIT 1`, login).Scan(&id, &in.Name, &in.Email, &in.Mobile, &in.Department, &n); err != nil || n <= len(grants) {
+						continue
 					}
-					g.CategoryIDs = append(g.CategoryIDs, id)
+					in.Roles = grants
+					if errs := users.ValidateUser(ctx, x.q, in, id, 0); len(errs) > 0 {
+						out = append(out, bad("%s: %s", in.Name, strings.Join(errs, " ")))
+						continue
+					}
+					out = append(out, result{ok: true, msg: fmt.Sprintf("Removes %d role(s) from %s", n-len(grants), in.Name), obj: &editRow{id, in}})
 				}
-				in := users.UserInput{Name: row.Get("name"), Email: row.Get("email"), Mobile: row.Get("mobile"), Department: row.Get("department"), Password: row.Get("password"), Roles: []users.RoleGrant{g}}
-				if errs := users.ValidateUser(ctx, x.q, &in, 0, x.u.ID); len(errs) > 0 {
+				return out
+			},
+			check: func(ctx context.Context, x *run, row csvfile.Row) result {
+				g, problem := userGrant(ctx, x, row)
+				if problem != "" {
+					return bad("%s", problem)
+				}
+				// One row per role: rows with the same email (or mobile) build one user, and an existing user's roles become
+				// exactly the rows in the file. A blank password keeps the current one.
+				login := userLogin(row)
+				if e, ok := x.memo["user:"+login].(*editRow); ok && login != "" {
+					in := e.obj.(*users.UserInput)
+					for _, have := range in.Roles {
+						if have.RoleID == g.RoleID {
+							return bad("This role is listed twice for %s", in.Name)
+						}
+					}
+					var step string
+					_ = x.q.QueryRow(ctx, `SELECT step FROM role WHERE id=$1`, g.RoleID).Scan(&step)
+					if !releasephase.RoleOn(step) {
+						return bad("Warehouse and corporate roles open in a later phase of the rollout")
+					}
+					in.Roles = append(in.Roles, g)
+					return result{ok: true, msg: "Adds the role " + row.Get("role") + " to " + in.Name}
+				}
+				pending, _ := x.memo["pending:"+login].([]users.RoleGrant)
+				in := &users.UserInput{Name: row.Get("name"), Email: row.Get("email"), Mobile: row.Get("mobile"), Department: row.Get("department"), Password: row.Get("password"), Roles: append(pending, g)}
+				id := int64(0)
+				_ = x.q.QueryRow(ctx, `SELECT id FROM app_user WHERE ($1<>'' AND email=$1::citext) OR ($2<>'' AND mobile=$2) ORDER BY (email=$1::citext) DESC NULLS LAST LIMIT 1`,
+					strings.TrimSpace(in.Email), strings.TrimSpace(in.Mobile)).Scan(&id)
+				// selfID 0: whether the Admin keeps their own Admin role is checked once all the rows are read.
+				if errs := users.ValidateUser(ctx, x.q, in, id, 0); len(errs) > 0 {
 					return bad("%s", strings.Join(errs, " "))
 				}
-				if (in.Email != "" && x.dup(in.Email)) || (in.Mobile != "" && x.dup(in.Mobile)) {
-					return bad("Duplicate row in the file")
+				e := &editRow{id, in}
+				if login != "" {
+					x.memo["user:"+login] = e
 				}
-				return result{ok: true, msg: "New user", obj: in}
+				msg := "New user"
+				if id != 0 {
+					msg = "Updates " + in.Name
+				}
+				return result{ok: true, msg: msg, obj: e}
 			},
 			commit: func(ctx context.Context, tx pgx.Tx, x *run, objs []any) error {
 				for _, o := range objs {
-					if _, err := users.SaveUser(ctx, tx, x.u, 0, o.(users.UserInput)); err != nil {
+					e, ok := o.(*editRow)
+					if !ok {
+						continue // an extra role row, already added to its user
+					}
+					in := e.obj.(*users.UserInput)
+					if e.id != 0 && e.id == x.u.ID {
+						admin := false
+						for _, g := range in.Roles {
+							var step string
+							_ = tx.QueryRow(ctx, `SELECT step FROM role WHERE id=$1`, g.RoleID).Scan(&step)
+							admin = admin || step == "admin"
+						}
+						if !admin {
+							return httpjson.Bad("You cannot remove your own System Admin role. Keep a row with the System Admin role for %s.", in.Name)
+						}
+					}
+					if _, err := users.SaveUser(ctx, tx, x.u, e.id, *in); err != nil {
 						return err
 					}
 				}
 				return nil
+			},
+			export: func(ctx context.Context, q database.Q, r *http.Request) ([]string, [][]string, error) {
+				heads := []string{"name", "email", "mobile", "department", "role", "access", "categories", "password"}
+				rows, err := rowsOf(ctx, q, `SELECT u.name, coalesce(u.email::text,''), coalesce(u.mobile,''), u.department, r.name,
+					CASE ur.scope WHEN 'all' THEN 'all' WHEN 'clusters' THEN 'cluster:'||(SELECT string_agg(c.name, ';' ORDER BY c.name) FROM cluster c WHERE c.id = ANY(ur.cluster_ids))
+						ELSE (SELECT string_agg(p.code, ';' ORDER BY p.code) FROM property p WHERE p.id = ANY(ur.property_ids)) END,
+					coalesce((SELECT string_agg(c.name, ';' ORDER BY c.name) FROM category c WHERE c.id = ANY(ur.category_ids)),''), ''
+					FROM app_user u JOIN user_role ur ON ur.user_id=u.id JOIN role r ON r.id=ur.role_id WHERE u.active ORDER BY u.name, r.id`)
+				return heads, rows, err
 			},
 		},
 		"vendors": {
 			title: "Vendors", module: "Vendors", allowed: masters,
 			required: []string{"vendor_type", "legal_name", "address", "city", "pin", "contact_person", "mobile", "email", "pan", "bank_holder", "bank_account", "ifsc", "payment_terms", "supplies"},
-			sample:   "vendor_type,legal_name,address,city,pin,contact_person,mobile,email,gstin,pan,msme,udyam,bank_holder,bank_account,ifsc,payment_terms,supplies\ngoods,Shree Balaji Hotel Supplies,Plot 12 Udyog Vihar,Gurugram,122016,Rakesh Gupta,9810011111,orders@shreebalaji.example,06AABCS4107K1Z1,AABCS4107K,yes,UDYAM-HR-05-0012345,Shree Balaji Hotel Supplies,123456789012,HDFC0001234,Net 30,Guest Amenities;Cleaning Chemicals\nutility,Electricity DISCOM,Sector 29,Gurugram,122001,Billing desk,9810022222,billing@discom.example,,AABCD1234E,no,,DHBVN,987654321098,SBIN0001234,Net 15,Electricity\n",
+			sample:   "vendor_code,vendor_type,legal_name,address,city,pin,contact_person,mobile,email,gstin,pan,msme,udyam,bank_holder,bank_account,ifsc,payment_terms,supplies\n,goods,Shree Balaji Hotel Supplies,Plot 12 Udyog Vihar,Gurugram,122016,Rakesh Gupta,9810011111,orders@shreebalaji.example,06AABCS4107K1Z1,AABCS4107K,yes,UDYAM-HR-05-0012345,Shree Balaji Hotel Supplies,123456789012,HDFC0001234,Net 30,Guest Amenities;Cleaning Chemicals\n,utility,Electricity DISCOM,Sector 29,Gurugram,122001,Billing desk,9810022222,billing@discom.example,,AABCD1234E,no,,DHBVN,987654321098,SBIN0001234,Net 15,Electricity\n",
+			keyOf:    key("vendor_code"),
 			check: func(ctx context.Context, x *run, row csvfile.Row) result {
 				in := vendors.Input{Type: strings.ToLower(row.Get("vendor_type")), Name: row.Get("legal_name"), Address: row.Get("address"), City: row.Get("city"), PIN: row.Get("pin"),
 					Contact: row.Get("contact_person"), Mobile: row.Get("mobile"), Email: row.Get("email"), GSTIN: row.Get("gstin"), PAN: row.Get("pan"),
-					MSME: textclean.Contains([]string{"yes", "y", "true", "1"}, strings.ToLower(row.Get("msme"))), Udyam: row.Get("udyam"),
-					BankHolder: row.Get("bank_holder"), BankAccount: row.Get("bank_account"), BankAccount2: row.Get("bank_account"), IFSC: row.Get("ifsc"), Terms: row.Get("payment_terms")}
+					MSME: yes(row.Get("msme")), Udyam: row.Get("udyam"),
+					BankHolder: row.Get("bank_holder"), BankAccount: strings.TrimSpace(row.Get("bank_account")), IFSC: row.Get("ifsc"), Terms: row.Get("payment_terms")}
+				in.BankAccount2 = in.BankAccount
 				in.GSTRegistered = strings.TrimSpace(in.GSTIN) != ""
+				// A row with a vendor_code edits that vendor. Bank details, GSTIN and PAN are locked here: they change only
+				// on the vendor screen, where Finance re-verifies them. Account numbers are never in the download.
+				id := int64(0)
+				if code := strings.TrimSpace(row.Get("vendor_code")); code != "" {
+					var vt, gstin, pan, holder, ifsc string
+					var gstReg bool
+					if err := x.q.QueryRow(ctx, `SELECT id, vendor_type, gst_registered, coalesce(gstin,''), coalesce(pan,''), coalesce(bank_holder,''), coalesce(ifsc,'') FROM vendor WHERE upper(code)=upper($1)`, code).
+						Scan(&id, &vt, &gstReg, &gstin, &pan, &holder, &ifsc); err != nil {
+						return bad("Unknown vendor code %s. Leave vendor_code blank to add a new vendor", code)
+					}
+					if vt == "warehouse" {
+						return bad("The Central Warehouse is set up by the system and cannot be edited here")
+					}
+					if x.dup("code" + strings.ToUpper(code)) {
+						return bad("Duplicate row in the file")
+					}
+					locked := []string{}
+					differs := func(col, cur string) bool {
+						v := strings.TrimSpace(row.Get(col))
+						return v != "" && !strings.EqualFold(textclean.Key(v), textclean.Key(cur))
+					}
+					if in.BankAccount != "" {
+						locked = append(locked, "bank_account")
+					}
+					for col, cur := range map[string]string{"bank_holder": holder, "ifsc": ifsc, "gstin": gstin, "pan": pan} {
+						if differs(col, cur) {
+							locked = append(locked, col)
+						}
+					}
+					if gstin != "" && row.Has("gstin") && strings.TrimSpace(row.Get("gstin")) == "" {
+						locked = append(locked, "gstin")
+					}
+					if len(locked) > 0 {
+						sort.Strings(locked)
+						return bad("%s cannot be changed in a bulk upload. Change bank details, GSTIN and PAN on the vendor screen, so Finance re-verifies them", strings.Join(locked, ", "))
+					}
+					in.GSTRegistered, in.GSTIN, in.PAN = gstReg, gstin, pan
+					in.BankHolder, in.BankAccount, in.BankAccount2, in.IFSC = "", "", "", ""
+				}
 				for _, n := range strings.Split(row.Get("supplies"), ";") {
 					if strings.TrimSpace(n) == "" {
 						continue
 					}
-					var id int64
+					var sid int64
 					if in.Type == "goods" {
-						if err := x.q.QueryRow(ctx, `SELECT id FROM sub_category WHERE norm_key(name)=norm_key($1)`, n).Scan(&id); err != nil {
+						if err := x.q.QueryRow(ctx, `SELECT id FROM sub_category WHERE norm_key(name)=norm_key($1)`, n).Scan(&sid); err != nil {
 							return bad("Unknown sub-category %q", n)
 						}
-						in.SubCategoryIDs = append(in.SubCategoryIDs, id)
+						in.SubCategoryIDs = append(in.SubCategoryIDs, sid)
 					} else {
-						if err := x.q.QueryRow(ctx, `SELECT id FROM bill_type WHERE norm_key(name)=norm_key($1)`, n).Scan(&id); err != nil {
+						if err := x.q.QueryRow(ctx, `SELECT id FROM bill_type WHERE norm_key(name)=norm_key($1)`, n).Scan(&sid); err != nil {
 							return bad("Unknown bill type %q", n)
 						}
-						in.BillTypeIDs = append(in.BillTypeIDs, id)
+						in.BillTypeIDs = append(in.BillTypeIDs, sid)
 					}
 				}
-				if errs := x.s.Vendors.Validate(ctx, &in, 0, nil, false); len(errs) > 0 {
+				if errs := x.s.Vendors.Validate(ctx, &in, id, nil, false); len(errs) > 0 {
 					return bad("%s", strings.Join(errs, " "))
 				}
 				if x.dup(textclean.Key(in.Name)) || x.dup("pan"+in.PAN) {
 					return bad("Duplicate row in the file")
 				}
-				return result{ok: true, msg: "New vendor, bank verification pending", obj: &in}
+				msg := "New vendor, bank verification pending"
+				if id != 0 {
+					msg = "Updates " + strings.ToUpper(strings.TrimSpace(row.Get("vendor_code")))
+				}
+				return result{ok: true, msg: msg, obj: &editRow{id, &in}}
 			},
 			commit: func(ctx context.Context, tx pgx.Tx, x *run, objs []any) error {
 				for _, o := range objs {
-					if _, _, err := x.s.Vendors.Insert(ctx, tx, x.u, o.(*vendors.Input), nil, "", ""); err != nil {
+					e := o.(*editRow)
+					in := e.obj.(*vendors.Input)
+					if e.id == 0 {
+						if _, _, err := x.s.Vendors.Insert(ctx, tx, x.u, in, nil, "", ""); err != nil {
+							return err
+						}
+						continue
+					}
+					enc, last4, err := x.s.Vendors.Seal(in.BankAccount)
+					if err != nil {
+						return err
+					}
+					if _, _, err := x.s.Vendors.Update(ctx, tx, x.u, e.id, in, nil, enc, last4); err != nil {
 						return err
 					}
 				}
 				return nil
+			},
+			export: func(ctx context.Context, q database.Q, r *http.Request) ([]string, [][]string, error) {
+				heads := []string{"vendor_code", "vendor_type", "legal_name", "address", "city", "pin", "contact_person", "mobile", "email", "gstin", "pan", "msme", "udyam", "bank_holder", "bank_account", "ifsc", "payment_terms", "supplies"}
+				rows, err := rowsOf(ctx, q, `SELECT v.code, v.vendor_type, v.legal_name, coalesce(v.address,''), coalesce(v.city,''), coalesce(v.pin,''), coalesce(v.contact_person,''),
+					coalesce(v.mobile,''), coalesce(v.email,''), coalesce(v.gstin,''), coalesce(v.pan,''), CASE WHEN v.msme THEN 'yes' ELSE 'no' END, coalesce(v.udyam,''),
+					coalesce(v.bank_holder,''), '', coalesce(v.ifsc,''), v.payment_terms,
+					CASE WHEN v.vendor_type='goods' THEN coalesce((SELECT string_agg(sc.name, ';' ORDER BY sc.name) FROM vendor_sub_category x JOIN sub_category sc ON sc.id=x.sub_category_id WHERE x.vendor_id=v.id),'')
+						ELSE coalesce((SELECT string_agg(b.name, ';' ORDER BY b.name) FROM vendor_bill_type x JOIN bill_type b ON b.id=x.bill_type_id WHERE x.vendor_id=v.id),'') END
+					FROM vendor v WHERE v.active AND v.vendor_type<>'warehouse' ORDER BY v.code`)
+				return heads, rows, err
 			},
 		},
 		"request_lines": {
@@ -486,7 +779,18 @@ func (s *Service) define() map[string]*kind {
 			title: "Property to Zoho reporting tag", module: "Zoho", allowed: func(u *access.User) bool { return u.IsAdmin || u.HasStep("finance") },
 			required: []string{"property_code", "reporting_tag_option"},
 			sample:   "property_code,property_name,reporting_tag,reporting_tag_option\nP01,Sector 45 Gurugram,Haryana,Sector 45 Gurugram\n",
+			keyOf:    key("property_code"),
+			export: func(ctx context.Context, q database.Q, r *http.Request) ([]string, [][]string, error) {
+				heads := []string{"property_code", "property_name", "reporting_tag", "reporting_tag_option"}
+				rows, err := rowsOf(ctx, q, `SELECT p.code, p.name, coalesce(t.name,''), coalesce(o.name,'') FROM property p
+					LEFT JOIN zoho_map_property m ON m.property_id=p.id LEFT JOIN zoho_tag_option o ON o.option_id=m.tag_option_id LEFT JOIN zoho_tag t ON t.tag_id=o.tag_id
+					WHERE p.active ORDER BY p.code`)
+				return heads, rows, err
+			},
 			check: func(ctx context.Context, x *run, row csvfile.Row) result {
+				if strings.TrimSpace(row.Get("reporting_tag_option")) == "" {
+					return result{skip: true, msg: "Skipped, no option entered"}
+				}
 				var pid int64
 				if err := x.q.QueryRow(ctx, `SELECT id FROM property WHERE upper(code)=upper($1)`, row.Get("property_code")).Scan(&pid); err != nil {
 					return bad("Unknown property code")
@@ -560,6 +864,7 @@ func (s *Service) sample(w http.ResponseWriter, r *http.Request) error {
 }
 
 type rowOut struct {
+	Sheet   string            `json:"sheet"`
 	Line    int               `json:"line"`
 	Values  map[string]string `json:"values"`
 	OK      bool              `json:"ok"`
@@ -568,35 +873,42 @@ type rowOut struct {
 	Object  any               `json:"object,omitempty"`
 }
 
-func (s *Service) checkAll(r *http.Request, q database.Q, k *kind) ([]rowOut, []any, error) {
-	var in struct {
-		Text string `json:"text"`
-	}
-	if err := httpjson.Decode(r, &in); err != nil {
-		return nil, nil, err
-	}
-	heads, rows, err := csvfile.Parse(in.Text)
-	if err != nil {
-		return nil, nil, httpjson.Bad("%v", err)
+// checkRows checks one table of an upload against q and returns every row's result and the clean rows' objects.
+func (s *Service) checkRows(r *http.Request, q database.Q, p part) ([]rowOut, []any, error) {
+	k := p.kind
+	where := ""
+	if p.sheet != "" {
+		where = "Sheet " + p.sheet + ": "
 	}
 	miss := []string{}
 	for _, h := range k.required {
-		if !textclean.Contains(heads, h) {
+		if !textclean.Contains(p.heads, h) {
 			miss = append(miss, h)
 		}
 	}
 	if len(miss) > 0 {
-		return nil, nil, httpjson.Bad("Missing column: %s.", strings.Join(miss, ", "))
+		return nil, nil, httpjson.Bad("%sMissing column: %s.", where, strings.Join(miss, ", "))
 	}
-	if len(rows) > 20000 {
-		return nil, nil, httpjson.Bad("Upload at most 20,000 rows at a time.")
+	if len(p.rows) > 20000 {
+		return nil, nil, httpjson.Bad("%sUpload at most 20,000 rows at a time.", where)
 	}
-	x := &run{s: s, u: access.From(r), q: q, seen: map[string]bool{}, propertyID: int64(httpjson.QInt(r, "property_id", 0))}
+	x := &run{s: s, u: access.From(r), q: q, seen: map[string]bool{}, memo: map[string]any{}, propertyID: int64(httpjson.QInt(r, "property_id", 0))}
+	cur, err := s.currentRows(r, q, k)
+	if err != nil {
+		return nil, nil, err
+	}
 	out := []rowOut{}
 	objs := []any{}
-	for _, row := range rows {
+	for _, row := range p.rows {
+		if cur != nil && cur.same(k, row) {
+			if k.onSame != nil {
+				k.onSame(r.Context(), x, row)
+			}
+			out = append(out, rowOut{Sheet: p.sheet, Line: row.Line, Values: row.Values, Skip: true, Message: "No change"})
+			continue
+		}
 		res := k.check(r.Context(), x, row)
-		ro := rowOut{Line: row.Line, Values: row.Values, OK: res.ok, Skip: res.skip, Message: res.msg}
+		ro := rowOut{Sheet: p.sheet, Line: row.Line, Values: row.Values, OK: res.ok, Skip: res.skip, Message: res.msg}
 		if res.ok {
 			objs = append(objs, res.obj)
 			if k.commit == nil {
@@ -605,50 +917,133 @@ func (s *Service) checkAll(r *http.Request, q database.Q, k *kind) ([]rowOut, []
 		}
 		out = append(out, ro)
 	}
+	if k.after != nil {
+		for i, res := range k.after(r.Context(), x) {
+			out = append(out, rowOut{Sheet: p.sheet, Line: -1 - i, Values: map[string]string{}, OK: res.ok, Message: res.msg})
+			if res.ok {
+				objs = append(objs, res.obj)
+			}
+		}
+	}
 	return out, objs, nil
 }
 
-func (s *Service) checkOnly(w http.ResponseWriter, r *http.Request) error {
+// load reads the upload and checks the user may change every list in it.
+func (s *Service) load(r *http.Request) ([]part, error) {
 	k, err := s.kind(r)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	rows, objs, err := s.checkAll(r, s.DB, k)
+	ps, err := s.parts(r, chi.URLParam(r, "kind"), k)
 	if err != nil {
-		return err
-	}
-	return httpjson.OK(w, map[string]any{"rows": rows, "valid": len(objs)})
-}
-
-// importRows checks the file again inside the transaction and saves only the clean rows.
-func (s *Service) importRows(w http.ResponseWriter, r *http.Request) error {
-	k, err := s.kind(r)
-	if err != nil {
-		return err
-	}
-	if k.commit == nil {
-		return httpjson.Bad("This upload adds rows to the form; use Check file.")
+		return nil, err
 	}
 	u := access.From(r)
-	var rows []rowOut
-	var objs []any
+	for _, p := range ps {
+		if !p.kind.allowed(u) {
+			return nil, httpjson.Forbidden("You do not have the right to change %s (sheet %s). Remove that sheet from the file, or ask the System Admin.", strings.ToLower(p.kind.title), p.sheet)
+		}
+	}
+	return ps, nil
+}
+
+// checkOnly shows what an upload would do. A workbook is tried out in a transaction that is rolled back, sheet by
+// sheet in order, so a row that depends on an earlier sheet (a vendor's new sub-category, then its rate) checks right.
+func (s *Service) checkOnly(w http.ResponseWriter, r *http.Request) error {
+	ps, err := s.load(r)
+	if err != nil {
+		return err
+	}
+	if len(ps) == 1 && ps[0].sheet == "" {
+		rows, objs, err := s.checkRows(r, s.DB, ps[0])
+		if err != nil {
+			return err
+		}
+		return httpjson.OK(w, map[string]any{"rows": rows, "valid": len(objs)})
+	}
+	all := []rowOut{}
+	valid := 0
+	tx, err := s.DB.Begin(r.Context())
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(r.Context())
+	for _, p := range ps {
+		rows, objs, err := s.checkRows(r, tx, p)
+		if err != nil {
+			return err
+		}
+		if len(objs) > 0 && p.kind.commit != nil {
+			if err := applySheet(r.Context(), tx, s, access.From(r), p, objs); err != nil {
+				for i := range rows {
+					if rows[i].OK {
+						rows[i].OK, rows[i].Message = false, "Not saved: "+err.Error()
+					}
+				}
+				objs = nil
+			}
+		}
+		all = append(all, rows...)
+		valid += len(objs)
+	}
+	return httpjson.OK(w, map[string]any{"rows": all, "valid": valid})
+}
+
+// applySheet saves one checked table inside a savepoint, so a failed sheet in a dry run does not spoil the next one.
+func applySheet(ctx context.Context, tx pgx.Tx, s *Service, u *access.User, p part, objs []any) error {
+	sp, err := tx.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	if err := p.kind.commit(ctx, sp, &run{s: s, u: u, q: sp, seen: map[string]bool{}, memo: map[string]any{}}, objs); err != nil {
+		_ = sp.Rollback(ctx)
+		return err
+	}
+	return sp.Commit(ctx)
+}
+
+// importRows checks the upload again inside one transaction and saves only the clean rows, sheet by sheet in order.
+// If any sheet cannot be saved, nothing is saved.
+func (s *Service) importRows(w http.ResponseWriter, r *http.Request) error {
+	ps, err := s.load(r)
+	if err != nil {
+		return err
+	}
+	u := access.From(r)
+	imported, skipped := 0, 0
 	err = pgx.BeginFunc(r.Context(), s.DB, func(tx pgx.Tx) error {
-		var err error
-		if rows, objs, err = s.checkAll(r, tx, k); err != nil {
-			return err
+		for _, p := range ps {
+			if p.kind.commit == nil {
+				return httpjson.Bad("This upload adds rows to the form; use Check file.")
+			}
+			rows, objs, err := s.checkRows(r, tx, p)
+			if err != nil {
+				return err
+			}
+			skipped += len(rows) - len(objs)
+			if len(objs) == 0 {
+				continue
+			}
+			if err := p.kind.commit(r.Context(), tx, &run{s: s, u: u, q: tx, seen: map[string]bool{}, memo: map[string]any{}}, objs); err != nil {
+				if p.sheet != "" {
+					return httpjson.Bad("Sheet %s could not be saved, so nothing was saved: %v", p.sheet, err)
+				}
+				return err
+			}
+			imported += len(objs)
+			if err := auditlog.Write(r.Context(), tx, u, p.kind.module, "Bulk upload", p.kind.title, fmt.Sprintf("%d rows imported, %d rows not imported", len(objs), len(rows)-len(objs))); err != nil {
+				return err
+			}
 		}
-		if len(objs) == 0 {
-			return httpjson.Bad("No clean rows to import.")
+		if imported == 0 {
+			return httpjson.Bad("No changed rows to import.")
 		}
-		if err := k.commit(r.Context(), tx, &run{s: s, u: u, q: tx, seen: map[string]bool{}}, objs); err != nil {
-			return err
-		}
-		return auditlog.Write(r.Context(), tx, u, k.module, "Bulk upload", k.title, fmt.Sprintf("%d rows imported, %d rows not imported", len(objs), len(rows)-len(objs)))
+		return nil
 	})
 	if err != nil {
 		return err
 	}
-	return httpjson.OK(w, map[string]any{"imported": len(objs), "skipped": len(rows) - len(objs), "message": fmt.Sprintf("%d rows imported", len(objs))})
+	return httpjson.OK(w, map[string]any{"imported": imported, "skipped": skipped, "message": fmt.Sprintf("%d rows imported", imported)})
 }
 
 type clockTime = time.Time

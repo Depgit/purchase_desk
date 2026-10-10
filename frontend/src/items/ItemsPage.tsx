@@ -29,7 +29,7 @@ export function ItemsPage() {
   return (
     <>
       <div className="head"><div><h1>Items (SKU)</h1><p className="sub">The same combination of sub-category, brand, item and pack size cannot be added twice. Categories, sub-categories and pack sizes come from Settings › Item Setup.</p></div>
-        <div className="acts">{ed && <>{hasRight('upload') && <button className="btn ghost" onClick={() => setUpload(true)}>Bulk upload</button>}<button className="btn" onClick={() => setEdit('new')}>+ Add item</button></>}</div></div>
+        <div className="acts">{ed && <>{hasRight('upload') && <button className="btn ghost" onClick={() => setUpload(true)}>Bulk upload / edit</button>}<button className="btn" onClick={() => setEdit('new')}>+ Add item</button></>}</div></div>
       <DataTable screen="skus" rows={data || []} rowKey={(s) => s.id} dim={(s) => !s.active} search={(s) => [s.code, s.brand, s.item_name, s.sub_category, s.hsn].join(' ')}
         filters={[
           { id: 'cat', label: 'Category', options: [['', 'All categories'], ...(l?.categories || []).map((c) => [String(c.id), c.name] as [string, string])], test: (s, v) => String(s.category_id) === v },
@@ -53,7 +53,7 @@ export function ItemsPage() {
           { key: 'edit', label: '', render: (s) => ed ? <button className="link" onClick={() => setEdit(s)}>Edit</button> : null },
         ]} csvName="items" />
       {edit && <SKUModal sku={edit === 'new' ? null : edit} onClose={() => setEdit(null)} onDone={() => { setEdit(null); reload(); refreshLookups() }} />}
-      {upload && <UploadModal kind="items" title="Bulk upload items" onClose={() => setUpload(false)} onDone={() => { reload(); refreshLookups() }} />}
+      {upload && <UploadModal kind="items" title="Bulk upload or edit items" onClose={() => setUpload(false)} onDone={() => { reload(); refreshLookups() }} />}
     </>
   )
 }

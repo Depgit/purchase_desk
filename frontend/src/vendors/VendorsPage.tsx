@@ -25,7 +25,7 @@ export function VendorsPage() {
   return (
     <>
       <div className="head"><div><h1>Vendors</h1><p className="sub">Goods suppliers, utility providers, AMC contractors and other services. A vendor is used only when active and bank verified.</p></div>
-        <div className="acts">{hasRight('masters') && <>{hasRight('upload') && <button className="btn ghost" onClick={() => setUpload(true)}>Bulk upload</button>}
+        <div className="acts">{hasRight('masters') && <>{hasRight('upload') && <button className="btn ghost" onClick={() => setUpload(true)}>Bulk upload / edit</button>}
           <button className="btn" onClick={() => nav('/vendors/new')}>+ Onboard vendor</button></>}</div></div>
       <DataTable screen="vendors" rows={data || []} rowKey={(v) => v.id} dim={(v) => !v.active}
         search={(v) => [v.code, v.legal_name, v.city, v.gstin, v.pan, ...v.supplies].join(' ')}
@@ -52,7 +52,7 @@ export function VendorsPage() {
           { key: 'edit', label: '', render: (v) => hasRight('masters') && v.vendor_type !== 'warehouse' ? <button className="link" onClick={() => nav(`/vendors/${v.id}/edit`)}>Edit</button> : null },
         ]} csvName="vendors" />
       {a.errors.length > 0 && <p className="note bad">{a.errors.join(' ')}</p>}
-      {upload && <UploadModal kind="vendors" title="Bulk upload vendors (opening data)" onClose={() => setUpload(false)} onDone={reload} />}
+      {upload && <UploadModal kind="vendors" title="Bulk upload or edit vendors" onClose={() => setUpload(false)} onDone={reload} />}
     </>
   )
 }

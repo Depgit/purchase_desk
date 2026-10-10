@@ -4,6 +4,7 @@ package spreadsheet
 import (
 	"bytes"
 	"fmt"
+	"net/http"
 	"strings"
 	"unicode/utf8"
 
@@ -14,6 +15,7 @@ type Sheet struct {
 	Name  string
 	Heads []string
 	Rows  [][]any
+	Text  bool // format every column as text, so what someone types (dates, mobiles, codes) comes back as typed
 }
 
 // Build returns the .xlsx bytes. Numbers stay numbers, so the vendor can add them up in Excel.
@@ -21,6 +23,7 @@ func Build(sheets []Sheet) ([]byte, error) {
 	f := excelize.NewFile()
 	defer f.Close()
 	bold, _ := f.NewStyle(&excelize.Style{Font: &excelize.Font{Bold: true}, Fill: excelize.Fill{Type: "pattern", Pattern: 1, Color: []string{"E3EAFD"}}})
+	text, _ := f.NewStyle(&excelize.Style{NumFmt: 49}) // "@": text
 	used := map[string]int{}
 	for i, sh := range sheets {
 		name := sheetName(sh.Name, used)
@@ -59,6 +62,12 @@ func Build(sheets []Sheet) ([]byte, error) {
 			}
 			_ = f.SetColWidth(name, col, col, float64(w+2))
 		}
+		if sh.Text && len(sh.Heads) > 0 {
+			last, _ := excelize.ColumnNumberToName(len(sh.Heads))
+			_ = f.SetColStyle(name, "A:"+last, text)
+			l, _ := excelize.CoordinatesToCellName(len(sh.Heads), 1)
+			_ = f.SetCellStyle(name, "A1", l, bold)
+		}
 		_ = f.SetPanes(name, &excelize.Panes{Freeze: true, YSplit: 1, TopLeftCell: "A2", ActivePane: "bottomLeft"})
 	}
 	var b bytes.Buffer
@@ -84,4 +93,35 @@ func sheetName(n string, used map[string]int) string {
 	}
 	used[n]++
 	return n
+}
+
+// Read returns every sheet of an .xlsx file as rows of cell text, in sheet order.
+func Read(data []byte) ([]string, map[string][][]string, error) {
+	f, err := excelize.OpenReader(bytes.NewReader(data))
+	if err != nil {
+		return nil, nil, err
+	}
+	defer f.Close()
+	names := f.GetSheetList()
+	out := map[string][][]string{}
+	for _, n := range names {
+		rows, err := f.GetRows(n)
+		if err != nil {
+			return nil, nil, err
+		}
+		out[n] = rows
+	}
+	return names, out, nil
+}
+
+// Send writes the sheets to the response as an .xlsx download named name.
+func Send(w http.ResponseWriter, name string, sheets []Sheet) error {
+	b, err := Build(sheets)
+	if err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, name))
+	_, err = w.Write(b)
+	return err
 }

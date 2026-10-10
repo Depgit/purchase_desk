@@ -317,6 +317,15 @@ func CreateProperty(ctx context.Context, tx pgx.Tx, u *access.User, in PropertyI
 	return id, code, auditlog.Write(ctx, tx, u, "Properties", "Property added", in.Name, detail)
 }
 
+// UpdateProperty saves a validated edit of property id. Its code stays as it is.
+func UpdateProperty(ctx context.Context, tx pgx.Tx, u *access.User, id int64, in PropertyInput) error {
+	if _, err := tx.Exec(ctx, `UPDATE property SET name=$2, ezee_code=$3, cluster_id=$4, l1_user_id=$5, kind=$6, plan_pct=$7, ird_pct=$8, banquet_pct=$9 WHERE id=$1`,
+		id, in.Name, in.EzeeCode, in.ClusterID, in.L1UserID, in.Kind, in.PlanPct, in.IRDPct, in.BanquetPct); err != nil {
+		return err
+	}
+	return auditlog.Write(ctx, tx, u, "Properties", "Property changed", in.Name, in.Kind)
+}
+
 func (s *Service) saveProperty(w http.ResponseWriter, r *http.Request) error {
 	p := access.From(r)
 	if err := access.NeedRight(p, access.Masters, "edit masters"); err != nil {
@@ -342,11 +351,7 @@ func (s *Service) saveProperty(w http.ResponseWriter, r *http.Request) error {
 			id, _, err = CreateProperty(r.Context(), tx, p, in)
 			return err
 		}
-		if _, err := tx.Exec(r.Context(), `UPDATE property SET name=$2, ezee_code=$3, cluster_id=$4, l1_user_id=$5, kind=$6, plan_pct=$7, ird_pct=$8, banquet_pct=$9 WHERE id=$1`,
-			id, in.Name, in.EzeeCode, in.ClusterID, in.L1UserID, in.Kind, in.PlanPct, in.IRDPct, in.BanquetPct); err != nil {
-			return err
-		}
-		return auditlog.Write(r.Context(), tx, p, "Properties", "Property changed", in.Name, in.Kind)
+		return UpdateProperty(r.Context(), tx, p, id, in)
 	})
 	if err != nil {
 		return err

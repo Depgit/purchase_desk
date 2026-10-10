@@ -31,13 +31,13 @@ export function BudgetsPage() {
       <div className="head"><div><h1>Budgets</h1><p className="sub">One amount per property, sub-category and month, split evenly into days and into 7-day weeks from the 1st. Spend counts on the day a request is finally approved.</p></div>
         <div className="acts"><input type="month" value={m} onChange={(e) => setM(e.target.value)} aria-label="Month" style={{ width: 'auto' }} />
           <button className="btn ghost" onClick={() => download(`/budgets/export?month=${m}`, `budgets-${m}.csv`)}>Download budgets CSV</button>
-          {canEdit && hasRight('upload') && <><button className="btn ghost" onClick={() => setUpload('budgets')}>Bulk upload budgets</button><button className="btn ghost" onClick={() => setUpload('fb_sales')}>Upload F&amp;B sales</button></>}</div></div>
+          {canEdit && hasRight('upload') && <><button className="btn ghost" onClick={() => setUpload('budgets')}>Bulk upload / edit budgets</button><button className="btn ghost" onClick={() => setUpload('fb_sales')}>Upload F&amp;B sales</button></>}</div></div>
       <Tabs value={tab} onChange={setTab} items={[['all', 'All properties'], ['one', 'Property detail'], ['fb', 'F&B sales']]} />
       {tab !== 'one' && <div className="tools"><select value={cl} onChange={(e) => setCl(e.target.value)} aria-label="Cluster"><option value="">All clusters</option>{l?.clusters.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}</select></div>}
       {tab === 'all' && <Overview m={m} cl={cl} onOpen={(id) => { setPid(id); setTab('one') }} />}
       {tab === 'one' && <PropertyDetail m={m} pid={pid} setPid={setPid} props={live.map((p) => [p.id, p.name])} canEdit={canEdit} />}
       {tab === 'fb' && <Sales m={m} cl={cl} />}
-      {upload && <UploadModal kind={upload} title={upload === 'budgets' ? 'Bulk upload monthly budgets' : 'Upload F&B sales'} onClose={() => setUpload(null)} />}
+      {upload && <UploadModal kind={upload} title={upload === 'budgets' ? 'Bulk upload or edit monthly budgets' : 'Upload F&B sales'} exportQuery={`?month=${m}`} onClose={() => setUpload(null)} />}
     </>
   )
 }

@@ -1,7 +1,8 @@
-// The list used on every screen: search, filters, 25 rows per page, click a heading to sort,
+// The list used on every screen: search, filters, a date range, 25 rows per page, click a heading to sort,
 // a column chooser remembered per user, tick-boxes for bulk actions, and CSV download of the filtered list.
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { get, put, saveBlob } from '../api/client'
+import { addDays, thisMonth, today } from '../format/format'
 import { Modal } from './Modal'
 
 export interface Column<T> {
@@ -19,6 +20,33 @@ export interface Filter<T> {
   test: (r: T, v: string) => boolean
 }
 
+/** The date a row is filtered on: a label for the picker and the row's date (YYYY-MM-DD or an ISO timestamp). */
+export interface DateFilter<T> {
+  label: string
+  value: (r: T) => string | null | undefined
+  /** Called with the first day of the chosen range ('' for any date), for lists the server limits to recent rows. */
+  onFrom?: (from: string) => void
+}
+
+const RANGES: [string, string][] = [['', 'Any date'], ['today', 'Today'], ['7', 'Last 7 days'], ['30', 'Last 30 days'], ['month', 'This month'], ['last', 'Last month'], ['custom', 'Choose dates']]
+
+// rangeOf turns a quick range into from and to days, both included.
+function rangeOf(r: string, from: string, to: string): [string, string] {
+  const t = today()
+  if (r === 'today') return [t, t]
+  if (r === '7' || r === '30') return [addDays(t, 1 - +r), t]
+  if (r === 'month') return [thisMonth() + '-01', t]
+  if (r === 'last') { const end = addDays(thisMonth() + '-01', -1); return [end.slice(0, 7) + '-01', end] }
+  return [from, to]
+}
+
+// dayOf gives the local calendar day of a date or timestamp, so a request raised at 1 am IST counts on that day.
+function dayOf(v: string): string {
+  if (v.length <= 10) return v
+  const d = new Date(v)
+  return isNaN(d.getTime()) ? v.slice(0, 10) : d.toLocaleDateString('en-CA')
+}
+
 interface Props<T> {
   screen: string
   rows: T[]
@@ -26,6 +54,7 @@ interface Props<T> {
   rowKey: (r: T) => string | number
   search?: (r: T) => string
   filters?: Filter<T>[]
+  date?: DateFilter<T>
   onOpen?: (r: T) => void
   selectable?: (r: T) => boolean
   selected?: Set<string | number>
@@ -47,10 +76,15 @@ function csvCell(v: unknown) {
 export function DataTable<T>(p: Props<T>) {
   const [q, setQ] = useState('')
   const [fv, setFv] = useState<Record<string, string>>({})
+  const [range, setRange] = useState('')
+  const [from, setFrom] = useState('')
+  const [to, setTo] = useState('')
   const [page, setPage] = useState(0)
   const [pref, setPref] = useState<Pref>({})
   const [chooser, setChooser] = useState(false)
   const size = p.pageSize || 25
+  const onFrom = p.date?.onFrom
+  useEffect(() => { onFrom?.(range ? rangeOf(range, from, to)[0] : '') }, [range, from, to, onFrom])
 
   useEffect(() => {
     get<Pref>('/prefs/list-' + p.screen).then((x) => setPref(x || {})).catch(() => {})
@@ -68,6 +102,11 @@ export function DataTable<T>(p: Props<T>) {
       const v = fv[f.id]
       if (v) rows = rows.filter((r) => f.test(r, v))
     }
+    if (p.date && range) {
+      const [a, b] = rangeOf(range, from, to)
+      const dv = p.date.value
+      rows = rows.filter((r) => { const v = dv(r); if (!v) return false; const d = dayOf(v); return (!a || d >= a) && (!b || d <= b) })
+    }
     if (q && p.search) {
       const s = q.toLowerCase()
       rows = rows.filter((r) => p.search!(r).toLowerCase().includes(s))
@@ -84,7 +123,7 @@ export function DataTable<T>(p: Props<T>) {
       }
     }
     return rows
-  }, [p.rows, p.filters, p.search, p.columns, fv, q, pref.sort])
+  }, [p.rows, p.filters, p.search, p.columns, p.date, range, from, to, fv, q, pref.sort])
 
   const pages = Math.max(1, Math.ceil(filtered.length / size))
   const pg = Math.min(page, pages - 1)
@@ -112,6 +151,15 @@ export function DataTable<T>(p: Props<T>) {
             {f.options.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
           </select>
         ))}
+        {p.date && <>
+          <select aria-label={p.date.label} title={p.date.label} value={range} onChange={(e) => { setRange(e.target.value); setPage(0) }}>
+            {RANGES.map(([v, l]) => <option key={v} value={v}>{v ? l : p.date!.label + ': any'}</option>)}
+          </select>
+          {range === 'custom' && <>
+            <input type="date" aria-label="From" value={from} max={to || undefined} onChange={(e) => { setFrom(e.target.value); setPage(0) }} style={{ width: 'auto' }} />
+            <input type="date" aria-label="To" value={to} min={from || undefined} onChange={(e) => { setTo(e.target.value); setPage(0) }} style={{ width: 'auto' }} />
+          </>}
+        </>}
         <span style={{ flex: 1 }} />
         {p.actions}
         <button className="btn ghost" onClick={() => setChooser(true)}>Columns{pref.cols?.length ? ` (${pref.cols.length} of ${p.columns.length})` : ''}</button>

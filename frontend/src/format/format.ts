@@ -38,3 +38,9 @@ export function addDays(ymd: string, n: number): string {
 export function qty(v: number): string { return Number.isInteger(v) ? String(v) : v.toFixed(3).replace(/0+$/, '') }
 export function plural(n: number, one: string, many: string) { return `${n} ${n === 1 ? one : many}` }
 export function lineValue(q: number, rate: number, gst: number) { return q * rate * (1 + gst / 100) }
+
+/** Days to ask a document list for so a date range starting on `from` is complete: at least the usual 90. */
+export function daysBack(from: string): number {
+  if (!from) return 90
+  return Math.max(90, Math.ceil((Date.now() - new Date(from + 'T00:00:00').getTime()) / 86400000) + 1)
+}

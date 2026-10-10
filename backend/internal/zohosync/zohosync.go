@@ -46,6 +46,7 @@ func (s *Service) Routes(r chi.Router) {
 	r.Get("/zoho/items", httpjson.Wrap(s.items))
 	r.Post("/zoho/accounts/match", httpjson.Wrap(s.matchByName("accounts")))
 	r.Post("/zoho/items/match", httpjson.Wrap(s.matchByName("items")))
+	r.Post("/zoho/items/{id}/create", httpjson.Wrap(s.createItem))
 	r.Get("/zoho/mappings", httpjson.Wrap(s.mappings))
 	r.Put("/zoho/mappings", httpjson.Wrap(s.setMapping))
 	r.Post("/zoho/properties/match", httpjson.Wrap(s.matchProperties))
@@ -767,9 +768,10 @@ func (s *Service) mappings(w http.ResponseWriter, r *http.Request) error {
 }
 
 type mapIn struct {
-	Kind  string `json:"kind"` // property_tag, property_location, subcat, billtype, special, head, tax, item
-	Key   string `json:"key"`
-	Value string `json:"value"` // empty clears
+	Kind  string   `json:"kind"` // property_tag, property_location, subcat, billtype, special, head, tax, item
+	Key   string   `json:"key"`
+	Keys  []string `json:"keys"`  // several rows set to the same value at once
+	Value string   `json:"value"` // empty clears
 }
 
 func (s *Service) setMapping(w http.ResponseWriter, r *http.Request) error {
@@ -781,7 +783,21 @@ func (s *Service) setMapping(w http.ResponseWriter, r *http.Request) error {
 	if err := httpjson.Decode(r, &in); err != nil {
 		return err
 	}
-	ctx := r.Context()
+	keys := in.Keys
+	if len(keys) == 0 {
+		keys = []string{in.Key}
+	}
+	for _, k := range keys {
+		if err := s.saveMapping(r.Context(), u, in.Kind, k, in.Value); err != nil {
+			return err
+		}
+	}
+	return httpjson.OK(w, map[string]any{"ok": true, "saved": len(keys)})
+}
+
+// saveMapping checks and saves one mapping row; an empty value clears it.
+func (s *Service) saveMapping(ctx context.Context, u *access.User, kind, key, value string) error {
+	in := mapIn{Kind: kind, Key: key, Value: value}
 	var err error
 	label := in.Kind + " " + in.Key
 	switch in.Kind {
@@ -847,7 +863,7 @@ func (s *Service) setMapping(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 	_ = auditlog.Write(ctx, s.DB, u, "Zoho", "Mapping changed", label, textclean.Default(in.Value, "cleared"))
-	return httpjson.OK(w, map[string]bool{"ok": true})
+	return nil
 }
 
 func (s *Service) matchProperties(w http.ResponseWriter, r *http.Request) error {
@@ -884,35 +900,207 @@ func (s *Service) createTagOption(w http.ResponseWriter, r *http.Request) error 
 	if err != nil {
 		return err
 	}
-	if conn.PropertyTagID == "" {
-		return httpjson.Bad("Choose the reporting tag that new options go under first, on the Connection tab.")
+	var name, locationID string
+	if err := s.DB.QueryRow(r.Context(), `SELECT p.name, coalesce(m.location_id,'') FROM property p LEFT JOIN zoho_map_property m ON m.property_id=p.id WHERE p.id=$1`, pid).
+		Scan(&name, &locationID); err != nil {
+		return httpjson.NotFound("Property")
 	}
-	var name string
-	if err := s.DB.QueryRow(r.Context(), `SELECT name FROM property WHERE id=$1`, pid).Scan(&name); err != nil {
+	// The option goes under the reporting tag of the property's Zoho location (its region, e.g. Delhi), named after
+	// the property. Zoho's live tag list is checked, so a tag that exists there (even a draft) is reused, never duplicated.
+	// Without a location, the tag chosen on the Connection tab is used.
+	tagID, err := s.regionTag(r.Context(), locationID)
+	if err != nil {
 		return err
 	}
-	var exists string
-	_ = s.DB.QueryRow(r.Context(), `SELECT option_id FROM zoho_tag_option WHERE tag_id=$1 AND norm_key(name)=norm_key($2)`, conn.PropertyTagID, name).Scan(&exists)
-	if exists != "" {
-		return httpjson.Bad("An option named %s already exists in Zoho. Pick it from the list.", name)
-	}
-	tags, err := c.ReportingTags(r.Context())
+	live, err := c.ReportingTags(r.Context())
 	if err != nil {
 		return httpjson.Bad("Zoho: %v", err)
 	}
-	for _, t := range tags {
-		if t.ID == conn.PropertyTagID {
-			if err := c.AddTagOption(r.Context(), t, name); err != nil {
-				return httpjson.Bad("Zoho did not create the option: %v", err)
+	var locName, locState string
+	if locationID != "" {
+		_ = s.DB.QueryRow(r.Context(), `SELECT name, state_code FROM zoho_location WHERE location_id=$1`, locationID).Scan(&locName, &locState)
+	}
+	if tagID == "" && locName != "" {
+		for _, t := range live {
+			if textclean.Key(t.Name) == textclean.Key(locName) || textclean.Key(t.Name) == textclean.Key(indiantax.StateName(locState)) {
+				tagID = t.ID
+				break
 			}
-			if _, err := s.Sync(r.Context()); err != nil {
-				return httpjson.Bad("Created in Zoho, but reading it back failed: %v", err)
-			}
-			_ = auditlog.Write(r.Context(), s.DB, u, "Zoho", "Reporting tag option created in Zoho", name, t.Name)
-			return httpjson.OK(w, map[string]string{"message": `"` + name + `" created in Zoho and linked.`})
 		}
 	}
-	return httpjson.Bad("The reporting tag for new options was not found in Zoho. Sync and check the Connection tab.")
+	if tagID == "" && locName == "" {
+		tagID = conn.PropertyTagID
+	}
+	if tagID == "" && locName == "" {
+		return httpjson.Bad("Choose the property's Zoho location first, so the option goes under that region's reporting tag.")
+	}
+	var tag *zohoapi.ReportingTag
+	for i := range live {
+		if live[i].ID == tagID {
+			tag = &live[i]
+		}
+	}
+	if tag == nil && tagID != "" {
+		return httpjson.Bad("The reporting tag was not found in Zoho. Click Sync now and try again.")
+	}
+	if tag == nil {
+		// The region has no reporting tag yet: create one named after the location.
+		t, err := c.CreateReportingTag(r.Context(), locName)
+		if err != nil {
+			return httpjson.Bad("Zoho did not create the reporting tag %s: %v", locName, err)
+		}
+		if t.ID == "" {
+			return httpjson.Bad("Zoho did not return the new reporting tag %s. Click Sync now and try again.", locName)
+		}
+		inactive := false
+		t.IsActive = &inactive
+		tag = &t
+		_ = auditlog.Write(r.Context(), s.DB, u, "Zoho", "Reporting tag created in Zoho", locName, "for property "+name)
+	}
+	for _, o := range tag.Options {
+		if textclean.Key(o.Name) == textclean.Key(name) {
+			return httpjson.Bad("An option named %s already exists under %s in Zoho. Click Sync now and pick it from the list.", name, tag.Name)
+		}
+	}
+	if err := c.AddTagOption(r.Context(), tag.ID, name); err != nil {
+		return httpjson.Bad("Zoho did not add %s to the reporting tag %s: %v", name, tag.Name, err)
+	}
+	// A tag made through the API starts as a draft, and an inactive tag cannot be used on a bill: switch it on.
+	if tag.Status == "inactive" || (tag.IsActive != nil && !*tag.IsActive) {
+		if err := c.ActivateReportingTag(r.Context(), tag.ID); err != nil {
+			return httpjson.Bad("%s was added to %s, but Zoho did not activate the tag: %v. Activate it in Zoho, then click Sync now.", name, tag.Name, err)
+		}
+	}
+	if _, err := s.Sync(r.Context()); err != nil {
+		return httpjson.Bad("Created in Zoho, but reading it back failed: %v", err)
+	}
+	var optionID string
+	_ = s.DB.QueryRow(r.Context(), `SELECT option_id FROM zoho_tag_option WHERE tag_id=$1 AND norm_key(name)=norm_key($2) LIMIT 1`, tag.ID, name).Scan(&optionID)
+	if optionID == "" {
+		return httpjson.Bad("Created in Zoho under %s, but it did not come back on sync. Click Sync now and pick it from the list.", tag.Name)
+	}
+	if _, err := s.DB.Exec(r.Context(), `INSERT INTO zoho_map_property(property_id,tag_option_id,updated_by) VALUES ($1,$2,$3)
+		ON CONFLICT (property_id) DO UPDATE SET tag_option_id=EXCLUDED.tag_option_id, updated_by=EXCLUDED.updated_by, updated_at=now()`, pid, optionID, u.ID); err != nil {
+		return err
+	}
+	_ = auditlog.Write(r.Context(), s.DB, u, "Zoho", "Reporting tag option created in Zoho", name, tag.Name)
+	return httpjson.OK(w, map[string]string{"message": `"` + name + `" created in Zoho under ` + tag.Name + ` and linked.`})
+}
+
+// createItem creates a Purchase Desk item in Zoho and links it. An active Zoho item with the same SKU code or name is
+// linked instead of creating a second one. The purchase account comes from the item's sub-category mapping and the
+// GST from the tax mapping, so map those first.
+func (s *Service) createItem(w http.ResponseWriter, r *http.Request) error {
+	u := access.From(r)
+	if err := needMap(u); err != nil {
+		return err
+	}
+	id, err := httpjson.ID(r, "id")
+	if err != nil {
+		return err
+	}
+	ctx := r.Context()
+	var code, item, brand, brandKind, pack, hsn, subcat, accountID, linked string
+	var gst float64
+	var rate *float64
+	err = s.DB.QueryRow(ctx, `SELECT k.code, k.item_name, coalesce(b.name,''), coalesce(b.kind,''), ps.name, k.hsn, sc.name, coalesce(m.account_id,''), k.gst_pct::float8,
+		(SELECT rc.rate::float8 FROM rate_card rc WHERE rc.sku_id=k.id AND NOT rc.superseded ORDER BY rc.valid_from DESC LIMIT 1),
+		coalesce((SELECT item_id FROM zoho_map_item x WHERE x.sku_id=k.id),'')
+		FROM sku k LEFT JOIN brand b ON b.id=k.brand_id JOIN pack_size ps ON ps.id=k.pack_size_id JOIN sub_category sc ON sc.id=k.sub_category_id
+		LEFT JOIN zoho_map_account m ON m.kind='subcat' AND m.ref=sc.id::text LEFT JOIN zoho_account a ON a.account_id=m.account_id AND a.active
+		WHERE k.id=$1`, id).Scan(&code, &item, &brand, &brandKind, &pack, &hsn, &subcat, &accountID, &gst, &rate, &linked)
+	if err != nil {
+		return httpjson.NotFound("Item")
+	}
+	if linked != "" {
+		return httpjson.Bad("%s is already linked to a Zoho item.", item)
+	}
+	name := item
+	if brandKind == "brand" && brand != "" {
+		name = brand + " " + item
+	}
+	name += " (" + pack + ")"
+	if len([]rune(name)) > 100 {
+		name = string([]rune(name)[:100])
+	}
+	// One of this SKU code or name already in Zoho is linked, not duplicated.
+	var existing, existingName string
+	_ = s.DB.QueryRow(ctx, `SELECT item_id, name FROM zoho_item WHERE active AND ((sku<>'' AND norm_key(sku)=norm_key($1)) OR norm_key(name)=norm_key($2)) ORDER BY (norm_key(sku)=norm_key($1)) DESC LIMIT 1`, code, name).Scan(&existing, &existingName)
+	if existing != "" {
+		if _, err := s.DB.Exec(ctx, `INSERT INTO zoho_map_item(sku_id,item_id,how,updated_by) VALUES ($1,$2,'manual',$3)
+			ON CONFLICT (sku_id) DO UPDATE SET item_id=EXCLUDED.item_id, how='manual', updated_by=EXCLUDED.updated_by, updated_at=now()`, id, existing, u.ID); err != nil {
+			return err
+		}
+		_ = auditlog.Write(ctx, s.DB, u, "Zoho", "Mapping changed", "item "+code, existingName+" (already in Zoho)")
+		return httpjson.OK(w, map[string]string{"message": existingName + " already exists in Zoho, so it is linked."})
+	}
+	if !s.PushEnabled {
+		return httpjson.Bad("Writing to Zoho is switched off on this server (ZOHO_PUSH_ENABLED=false). Create it in Zoho, then click Sync now.")
+	}
+	if accountID == "" {
+		return httpjson.Bad("Map the Zoho account for the sub-category %s first (Accounts tab). Zoho needs a purchase account for the item.", subcat)
+	}
+	product := "goods"
+	if brandKind == "service" {
+		product = "service"
+	}
+	r0 := 0.0
+	if rate != nil {
+		r0 = *rate
+	}
+	body := map[string]any{"name": name, "sku": code, "unit": pack, "rate": r0, "purchase_rate": r0, "item_type": "purchases", "product_type": product,
+		"purchase_account_id": accountID, "purchase_description": subcat, "hsn_or_sac": hsn, "is_taxable": true}
+	// GST: the taxes mapped for this rate within the state and from another state.
+	prefs := []map[string]any{}
+	for _, sp := range []string{"intra", "inter"} {
+		var taxID string
+		_ = s.DB.QueryRow(ctx, `SELECT tax_id FROM zoho_map_tax WHERE gst_pct=$1 AND supply=$2`, gst, sp).Scan(&taxID)
+		if taxID == "" {
+			return httpjson.Bad("Map the Zoho tax for GST %v%% (%s) first (Taxes tab), so the item carries its GST.", gst, map[string]string{"intra": "within the state", "inter": "from another state"}[sp])
+		}
+		prefs = append(prefs, map[string]any{"tax_id": taxID, "tax_specification": sp})
+	}
+	body["item_tax_preferences"] = prefs
+	c, _, err := s.Client(ctx)
+	if err != nil {
+		return err
+	}
+	zi, err := c.CreateItem(ctx, body)
+	if err != nil {
+		return httpjson.Bad("Zoho did not create %s: %v", name, err)
+	}
+	if zi.ID == "" {
+		return httpjson.Bad("Zoho did not return the new item %s. Click Sync now and check the Items tab.", name)
+	}
+	if _, err := s.DB.Exec(ctx, `INSERT INTO zoho_item(item_id,name,sku,hsn_or_sac,unit,product_type,item_type,brand,purchase_rate,tax_pct,purchase_account_id,active,synced_at)
+		VALUES ($1,$2,$3,$4,$5,$6,'purchases','',$7,$8,$9,TRUE,now()) ON CONFLICT (item_id) DO NOTHING`, zi.ID, name, code, hsn, pack, product, r0, gst, accountID); err != nil {
+		return err
+	}
+	if _, err := s.DB.Exec(ctx, `INSERT INTO zoho_map_item(sku_id,item_id,how,updated_by) VALUES ($1,$2,'manual',$3)
+		ON CONFLICT (sku_id) DO UPDATE SET item_id=EXCLUDED.item_id, how='manual', updated_by=EXCLUDED.updated_by, updated_at=now()`, id, zi.ID, u.ID); err != nil {
+		return err
+	}
+	_ = auditlog.Write(ctx, s.DB, u, "Zoho", "Item created in Zoho", name, code)
+	return httpjson.OK(w, map[string]string{"message": name + " created in Zoho and linked."})
+}
+
+// regionTag is the active reporting tag named after a Zoho location or its state ("Delhi"; "Bangalore" is in KA, so
+// "Karnataka"), the same rule the Properties tab uses to narrow the option list. "" when there is none.
+func (s *Service) regionTag(ctx context.Context, locationID string) (string, error) {
+	if locationID == "" {
+		return "", nil
+	}
+	var lname, state string
+	if err := s.DB.QueryRow(ctx, `SELECT name, state_code FROM zoho_location WHERE location_id=$1`, locationID).Scan(&lname, &state); err != nil {
+		return "", nil
+	}
+	var tagID string
+	err := s.DB.QueryRow(ctx, `SELECT tag_id FROM zoho_tag WHERE active AND (norm_key(name)=norm_key($1) OR ($2<>'' AND norm_key(name)=norm_key($2)))
+		ORDER BY norm_key(name)=norm_key($1) DESC LIMIT 1`, lname, indiantax.StateName(state)).Scan(&tagID)
+	if err != nil && err != pgx.ErrNoRows {
+		return "", err
+	}
+	return tagID, nil
 }
 
 func (s *Service) createAccount(w http.ResponseWriter, r *http.Request) error {

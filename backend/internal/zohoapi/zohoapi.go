@@ -422,15 +422,61 @@ func (c *Client) ReportingTags(ctx context.Context) ([]ReportingTag, error) {
 	return tags, nil
 }
 
-// AddTagOption creates a new option (for a property) under a reporting tag.
-// Zoho replaces the option list on update, so the existing options are sent back with the new one.
-func (c *Client) AddTagOption(ctx context.Context, tag ReportingTag, name string) error {
-	opts := []map[string]any{}
-	for _, o := range tag.Options {
-		opts = append(opts, map[string]any{"tag_option_id": o.ID, "tag_option_name": o.Name})
+// CreateReportingTag creates a reporting tag (for a region, such as "Delhi") with no options yet. It is enabled on
+// purchases (bills) and journals at line level, because a bill carries the property tag on every line.
+func (c *Client) CreateReportingTag(ctx context.Context, name string) (ReportingTag, error) {
+	var out struct {
+		Tag ReportingTag `json:"tag"`
 	}
-	opts = append(opts, map[string]any{"tag_option_name": name})
-	return c.Do(ctx, http.MethodPut, "/reportingtags/"+url.PathEscape(tag.ID)+"/options", nil, map[string]any{"tag_options": opts}, nil, nil)
+	body := map[string]any{
+		"tag_name":     name,
+		"is_mandatory": false,
+		"entities":     []map[string]any{{"entity_name": "vendors", "is_enabled": false}},
+		"multi_preference_entities": map[string]any{"preference": "line_item", "entities": []map[string]any{
+			{"entity_name": "purchases", "is_enabled": true}, {"entity_name": "journals", "is_enabled": true}}},
+	}
+	err := c.Do(ctx, http.MethodPost, "/reportingtags", nil, body, nil, &out)
+	return out.Tag, err
+}
+
+// liveOption is a reporting tag option as GET /reportingtags/options returns it, with its nested children.
+type liveOption struct {
+	ID        string       `json:"option_id"`
+	Name      string       `json:"option_name"`
+	IsActive  *bool        `json:"is_active"`
+	IsDefault bool         `json:"is_default"`
+	Children  []liveOption `json:"children"`
+}
+
+func (o liveOption) body() map[string]any {
+	kids := []map[string]any{}
+	for _, k := range o.Children {
+		kids = append(kids, k.body())
+	}
+	return map[string]any{"option_id": o.ID, "option_name": o.Name, "is_active": o.IsActive == nil || *o.IsActive, "is_default": o.IsDefault, "children": kids}
+}
+
+// AddTagOption adds an option (a property) to a reporting tag. Zoho replaces the whole option list on update
+// (PUT /reportingtags/{id}/options, key "options", fields option_id / option_name), so every existing option is
+// sent back with its id and children, then the new one.
+func (c *Client) AddTagOption(ctx context.Context, tagID, name string) error {
+	var cur struct {
+		Options []liveOption `json:"options"`
+	}
+	if err := c.Do(ctx, http.MethodGet, "/reportingtags/options", url.Values{"tag_id": {tagID}}, nil, nil, &cur); err != nil {
+		return err
+	}
+	opts := []map[string]any{}
+	for _, o := range cur.Options {
+		opts = append(opts, o.body())
+	}
+	opts = append(opts, map[string]any{"option_name": name, "is_active": true, "is_default": false, "children": []map[string]any{}})
+	return c.Do(ctx, http.MethodPut, "/reportingtags/"+url.PathEscape(tagID)+"/options", nil, map[string]any{"options": opts}, nil, nil)
+}
+
+// ActivateReportingTag makes a tag usable on transactions. A tag created through the API starts as a draft.
+func (c *Client) ActivateReportingTag(ctx context.Context, tagID string) error {
+	return c.Do(ctx, http.MethodPost, "/reportingtags/"+url.PathEscape(tagID)+"/active", nil, nil, nil, nil)
 }
 
 type Location struct {
@@ -509,6 +555,15 @@ func (c *Client) Items(ctx context.Context) ([]Item, error) {
 		return nil
 	})
 	return out, err
+}
+
+// CreateItem creates an item (POST /items) from a Purchase Desk item. The reply carries it under "item".
+func (c *Client) CreateItem(ctx context.Context, body map[string]any) (Item, error) {
+	var out struct {
+		Item Item `json:"item"`
+	}
+	err := c.Do(ctx, http.MethodPost, "/items", nil, body, nil, &out)
+	return out.Item, err
 }
 
 // CreateVendor creates a vendor contact from details verified in Purchase Desk.

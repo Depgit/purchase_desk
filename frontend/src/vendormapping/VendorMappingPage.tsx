@@ -61,13 +61,14 @@ function Mappings({ level }: { level: 'sc' | 'sku' }) {
   const { hasRight } = useSession()
   const { data, reload } = useApi<Mapping[]>('/mappings?level=' + level)
   const [edit, setEdit] = useState<Mapping | 'new' | null>(null)
+  const [upload, setUpload] = useState(false)
   const a = useAction()
   const ed = hasRight('masters')
   return (
     <>
       <DataTable screen={'mappings-' + level} rows={data || []} rowKey={(m) => m.id} dim={(m) => !m.active}
         search={(m) => [m.vendor, m.sub_category, m.sku_code, m.item].join(' ')}
-        actions={ed ? <button className="btn" onClick={() => setEdit('new')}>+ Add mapping</button> : null}
+        actions={ed ? <>{hasRight('upload') && <button className="btn ghost" onClick={() => setUpload(true)}>Bulk upload / edit mappings</button>}<button className="btn" onClick={() => setEdit('new')}>+ Add mapping</button></> : null}
         filters={[
           { id: 'p', label: 'Property', options: [['', 'Any property'], ...(l?.properties || []).filter((p) => p.active).map((p) => [String(p.id), p.name] as [string, string])], test: (m, v) => m.all_properties || m.property_ids.includes(+v) },
           { id: 'act', label: 'Active', options: [['', 'Active and inactive'], ['1', 'Active only'], ['0', 'Inactive only']], test: (m, v) => m.active === (v === '1') },
@@ -85,6 +86,7 @@ function Mappings({ level }: { level: 'sc' | 'sku' }) {
             {ed && m.active && <> <button className="link" onClick={() => a.run(() => put(`/mappings/${m.id}/estimate`, { estimate_allowed: !m.estimate_allowed }), () => { reload(); return 'Rate rule changed' })}>{m.estimate_allowed ? 'Require SKU rates' : 'Allow estimate'}</button></>}</> }] : []),
           { key: 'status', label: 'Status', render: (m) => <ActiveToggle kind="mapping" id={m.id} name={`${m.vendor} / ${m.sku_code || m.sub_category}`} active={m.active} onDone={reload} />, csv: (m) => m.active ? 'Active' : 'Inactive' },
         ]} csvName={'vendor-mapping-' + level} />
+      {upload && <UploadModal kind="mappings" title="Bulk upload or edit vendor mapping" onClose={() => setUpload(false)} onDone={reload} />}
       {edit && <MappingModal level={level} m={edit === 'new' ? null : edit} onClose={() => setEdit(null)} onDone={() => { setEdit(null); reload() }} />}
     </>
   )
@@ -134,8 +136,8 @@ function Rates() {
   return (
     <>
       <p className="note"><b>Three steps for a vendor price list:</b> 1. Download the rate format for the vendor. 2. The vendor fills the new rate and validity against each SKU. 3. Bulk upload: every row is checked, and only clean rows are saved.</p>
-      <DataTable screen="rates" rows={data || []} rowKey={(r) => r.id} dim={(r) => r.status === 'Superseded'} search={(r) => [r.vendor, r.sku_code, r.item].join(' ')}
-        actions={<><button className="btn ghost" onClick={() => setFmt(true)}>Rate format</button>{ed && <>{hasRight('upload') && <button className="btn ghost" onClick={() => setUpload(true)}>Bulk upload</button>}<button className="btn" onClick={() => setAdd(true)}>+ Add rate</button></>}</>}
+      <DataTable screen="rates" rows={data || []} rowKey={(r) => r.id} date={{ label: 'Valid from', value: (r) => r.valid_from }} dim={(r) => r.status === 'Superseded'} search={(r) => [r.vendor, r.sku_code, r.item].join(' ')}
+        actions={<><button className="btn ghost" onClick={() => setFmt(true)}>Rate format</button>{ed && <>{hasRight('upload') && <button className="btn ghost" onClick={() => setUpload(true)}>Bulk upload / edit rates</button>}<button className="btn" onClick={() => setAdd(true)}>+ Add rate</button></>}</>}
         filters={[
           { id: 'v', label: 'Vendor', options: [['', 'All vendors'], ...(vendors.data || []).filter((v) => v.vendor_type === 'goods' || v.vendor_type === 'warehouse').map((v) => [String(v.id), v.legal_name] as [string, string])], test: (r, v) => String(r.vendor_id) === v },
           { id: 'st', label: 'Validity', options: [['', 'Any validity'], ['Active', 'Active'], ['Expiring soon', 'Expiring soon'], ['Expired', 'Expired'], ['Starts later', 'Starts later'], ['Superseded', 'Superseded']], test: (r, v) => r.status === v },
@@ -154,7 +156,7 @@ function Rates() {
         ]} csvName="vendor-rates" />
       {add && <RateModal onClose={() => setAdd(false)} onDone={() => { setAdd(false); reload() }} />}
       {fmt && <FormatModal onClose={() => setFmt(false)} />}
-      {upload && <UploadModal kind="rates" title="Bulk upload vendor rates" onClose={() => setUpload(false)} onDone={reload} />}
+      {upload && <UploadModal kind="rates" title="Bulk upload or edit vendor rates" onClose={() => setUpload(false)} onDone={reload} />}
     </>
   )
 }

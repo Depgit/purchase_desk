@@ -12,6 +12,7 @@ import { Modal } from '../ui/Modal'
 import { Pill } from '../ui/Pill'
 import { useAction } from '../ui/useAction'
 import { ZohoPreview } from './ZohoPreview'
+import { BulkResults, type BulkResult } from '../ui/BulkResults'
 import { PHASE, usePhase } from '../releasephase/phase'
 
 const LABEL: Record<string, [string, '' | 'ok' | 'warn' | 'bad']> = {
@@ -28,21 +29,29 @@ export function PaymentsPage() {
   const [preview, setPreview] = useState<number | null>(null)
   const [paid, setPaid] = useState<Invoice | null>(null)
   const [results, setResults] = useState<{ invoice_id: number; ok: boolean; message: string }[] | null>(null)
+  const [approved, setApproved] = useState<BulkResult[] | null>(null)
   const a = useAction()
   const rows = data || []
+  const picked = rows.filter((r) => sel.has(r.id))
+  const toApprove = picked.filter((r) => r.status === 'MATCHED').map((r) => r.id)
+  const toPush = picked.filter((r) => r.status === 'PAY_APPROVED').map((r) => r.id)
   const overdue = (r: Invoice) => r.status !== 'PAID' && r.pay_by && r.pay_by < new Date().toISOString().slice(0, 10)
   return (
     <>
       <div className="head"><div><h1>Payments</h1><p className="sub">{zoho ? 'Approve matched invoices and approved bills, push them to Zoho, and follow payment. Payment status is read back from Zoho.' : 'Approve matched invoices for payment. Once the bank transfer is done, the System Admin marks the invoice paid.'}</p></div>
-        <div className="acts">{fin && zoho && <>
+        <div className="acts">{fin && <button className="btn" disabled={!toApprove.length || a.busy} onClick={() => a.run(() => post<{ done: number; failed: number; results: BulkResult[] }>('/invoices/bulk', { action: 'approve-payment', ids: toApprove }), (r) => {
+            setApproved(r.results); setSel(new Set()); reload(); return `${r.done} approved for payment${r.failed ? `, ${r.failed} not approved` : ''}`
+          })}>Approve payment for selected ({toApprove.length})</button>}
+          {fin && zoho && <>
           <button className="btn ghost" disabled={a.busy} onClick={() => a.run(() => post('/zoho/read-payments'), (r: any) => { reload(); return r.message })}>Read payment status from Zoho</button>
-          <button className="btn" disabled={!sel.size || a.busy} onClick={() => a.run(() => post<{ pushed: number; failed: number; results: any[] }>('/zoho/push', { invoice_ids: [...sel] }), (r) => {
+          <button className="btn" disabled={!toPush.length || a.busy} onClick={() => a.run(() => post<{ pushed: number; failed: number; results: any[] }>('/zoho/push', { invoice_ids: toPush }), (r) => {
             setResults(r.results); setSel(new Set()); reload(); return `${r.pushed} pushed to Zoho${r.failed ? `, ${r.failed} not pushed` : ''}`
-          })}>Push selected to Zoho ({sel.size})</button></>}</div></div>
+          })}>Push selected to Zoho ({toPush.length})</button></>}</div></div>
       <Errors list={a.errors} />
+      {approved && <BulkResults title="Last bulk payment approval" results={approved} label={(id) => rows.find((x) => x.id === id)?.invoice_number || String(id)} onClose={() => setApproved(null)} />}
       {results && <section className="card"><h2>Last push</h2>{results.map((r) => <p key={r.invoice_id}><Pill tone={r.ok ? 'ok' : 'bad'}>{r.ok ? 'Pushed' : 'Not pushed'}</Pill> {rows.find((x) => x.id === r.invoice_id)?.invoice_number}: {r.message}</p>)}</section>}
-      <DataTable screen="payments" rows={rows} rowKey={(r) => r.id} onOpen={(r) => nav('/invoices/' + r.id)}
-        selectable={fin && zoho ? (r) => r.status === 'PAY_APPROVED' && !r.held.length : undefined} selected={sel} onSelect={setSel}
+      <DataTable screen="payments" rows={rows} rowKey={(r) => r.id} date={{ label: 'Invoice date', value: (r) => r.invoice_date }} onOpen={(r) => nav('/invoices/' + r.id)}
+        selectable={fin ? (r) => r.status === 'MATCHED' || (zoho && r.status === 'PAY_APPROVED' && !r.held.length) : undefined} selected={sel} onSelect={setSel}
         search={(r) => [r.invoice_number, r.vendor, r.property, r.po_number, r.document_number, r.zoho_bill_id].join(' ')}
         filters={[{ id: 'st', label: 'Status', options: [['', 'All'], ['MATCHED', 'Payment approval'], ['PAY_APPROVED', zoho ? 'Ready for Zoho' : 'Payment approved'], ...(zoho ? [['HELD', 'Held from Zoho'], ['PUSHED', 'In Zoho, to be paid']] as [string, string][] : []), ['PAID', 'Paid'], ['MSME', 'MSME vendors'], ['LATE', 'Overdue']],
           test: (r, v) => v === 'HELD' ? r.held.length > 0 : v === 'MSME' ? r.vendor_msme : v === 'LATE' ? !!overdue(r) : r.status === v }]}

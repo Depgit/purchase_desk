@@ -1,8 +1,8 @@
 // Zoho Books: connection, the hourly sync, and the four mappings a bill needs before it can be pushed:
 // property → reporting tag, sub-category / bill type → account, GST rate → tax, vendor → Zoho vendor.
-import { useState } from 'react'
+import { useState, type ReactNode } from 'react'
 import { Link } from 'react-router-dom'
-import { post, put } from '../api/client'
+import { ApiError, download, post, put } from '../api/client'
 import { useApi } from '../api/useApi'
 import { useSession } from '../auth/session'
 import { UploadModal } from '../bulkupload/UploadModal'
@@ -30,6 +30,11 @@ interface Maps {
 }
 type Tab = 'items' | 'conn' | 'prop' | 'acc' | 'tax' | 'ven' | 'queue' | 'journal' | 'map'
 const EXP = ['expense', 'cost_of_goods_sold', 'other_expense']
+// Every GST rate an item can carry (the SKU check allows these), each mapped within the state and from another state.
+const GST_RATES = [0, 5, 12, 18, 28, 40]
+// The Excel file for each tab, read live from Zoho on each click: every record Zoho holds now, with every field it returns.
+const EXPORT: Partial<Record<Tab, [string, string]>> = { conn: ['all', 'all Zoho lists'], prop: ['properties', 'reporting tags and locations'], acc: ['accounts', 'chart of accounts'],
+  tax: ['taxes', 'taxes'], ven: ['vendors', 'vendors'], items: ['items', 'items'], queue: ['bills', 'bills'], journal: ['journals', 'journals'] }
 
 export function ZohoBooksPage() {
   const [tab, setTab] = useState<Tab>('conn')
@@ -44,7 +49,7 @@ export function ZohoBooksPage() {
     prop: [m.properties.filter((p) => p.tag_option_id && p.tag_option_active).length, m.properties.length],
     acc: [m.sub_categories.filter((s) => s.account_id && s.account_active).length, m.sub_categories.length],
     bt: [m.bill_types.filter((s) => s.account_id && s.account_active).length, m.bill_types.length],
-    tax: [Object.keys(m.taxes).length, 8],
+    tax: [Object.keys(m.taxes).length, GST_RATES.length * 2],
     ven: [m.vendors.filter((v) => v.contact_id).length, m.vendors.length],
   } : null
   const tile = (k: keyof NonNullable<typeof counts>, label: string, t: Tab) => counts && <button className={'tile' + (tab === t ? ' on' : '')} onClick={() => setTab(t)}><span>{label}</span>
@@ -52,7 +57,9 @@ export function ZohoBooksPage() {
   return (
     <>
       <div className="head"><div><h1>Zoho Books</h1><p className="sub">Everything a bill needs before it can go to Zoho. A bill with a gap is held back and says what is missing. Purchase Desk only creates records in Zoho; it never edits or deletes them.</p></div>
-        <div className="acts">{hasStep('finance') && <button className="btn ghost" disabled={a.busy} onClick={() => a.run(() => post('/zoho/sync'), (r: any) => { reloadAll(); return r.message })}>Sync now</button>}</div></div>
+        <div className="acts">{EXPORT[tab] && <button className="btn ghost" disabled={a.busy} title={'Reads the ' + EXPORT[tab]![1] + ' from Zoho now and downloads every record'}
+            onClick={() => a.run(() => download('/zoho/export/' + EXPORT[tab]![0], 'zoho-' + EXPORT[tab]![0] + '.xlsx'), () => 'Downloaded the ' + EXPORT[tab]![1] + ' from Zoho')}>{a.busy ? 'Reading from Zoho…' : 'Download from Zoho (Excel)'}</button>}
+          {hasStep('finance') && <button className="btn ghost" disabled={a.busy} onClick={() => a.run(() => post('/zoho/sync'), (r: any) => { reloadAll(); return r.message })}>Sync now</button>}</div></div>
       <Errors list={a.errors} />
       <div className="tiles">{tile('prop', 'Properties with a reporting tag', 'prop')}{tile('acc', 'Sub-categories with an account', 'acc')}{tile('bt', 'Bill types with an account', 'acc')}{tile('tax', 'GST rates with a tax code', 'tax')}{tile('ven', 'Vendors linked', 'ven')}</div>
       <Tabs value={tab} onChange={setTab} items={[['conn', 'Connection'], ['prop', 'Properties'], ['acc', 'Accounts'], ['tax', 'Taxes'], ['ven', 'Vendors'], ['items', 'Items'], ['queue', 'Push queue'], ['journal', 'Warehouse journal'], ['map', 'Field map']]} />
@@ -74,6 +81,31 @@ function useMap(onDone: () => void) {
   return async (kind: string, key: string, value: string) => {
     try { await put('/zoho/mappings', { kind, key, value }); toast('Mapping saved'); onDone() } catch (e: any) { toast(e.message, true) }
   }
+}
+
+/** Row checkboxes on a mapping table: a set of keys, with tick-one and tick-all helpers. */
+function useTicks() {
+  const [sel, setSel] = useState<Set<string>>(new Set())
+  const flip = (k: string) => { const n = new Set(sel); n.has(k) ? n.delete(k) : n.add(k); setSel(n) }
+  const all = (keys: string[]) => keys.length > 0 && keys.every((k) => sel.has(k))
+  const flipAll = (keys: string[]) => { const n = new Set(sel); const on = all(keys); keys.forEach((k) => (on ? n.delete(k) : n.add(k))); setSel(n) }
+  return { sel, setSel, flip, all, flipAll }
+}
+
+/** The bar under a mapping table once rows are ticked: pick one value and set it on every ticked row, or clear them. */
+function BulkMapBar({ count, busy, picker, onApply, onClear, onCancel, extra }: { count: number; busy: boolean; picker: (v: string, set: (v: string) => void) => ReactNode
+  onApply: (v: string) => void; onClear: () => void; onCancel: () => void; extra?: ReactNode }) {
+  const [v, setV] = useState('')
+  if (!count) return null
+  return (
+    <div className="bulk"><b>{count} selected</b>
+      <div style={{ minWidth: 260, flex: 1 }}>{picker(v, setV)}</div>
+      <button className="btn" disabled={busy || !v} onClick={() => onApply(v)}>Set for {count}</button>
+      <button className="btn ghost" disabled={busy} onClick={onClear}>Clear mapping</button>
+      {extra}
+      <button className="link" onClick={onCancel}>Untick all</button>
+    </div>
+  )
 }
 
 function Connection({ c, lists, onDone }: { c: any; lists: Lists | null; onDone: () => void }) {
@@ -148,7 +180,6 @@ function Properties({ m, lists, onDone }: { m: Maps; lists: Lists; onDone: () =>
   const conn = useApi<any>('/zoho/connection')
   // A property may map to an option of any reporting tag, for example one tag per region; the bill carries that option's tag.
   const tags = lists.tags.filter((t) => t.active && lists.tag_options.some((o) => o.tag_id === t.id && o.active))
-  const canCreate = !!conn.data?.property_tag_id && !!conn.data?.push_enabled
   // With a Zoho location chosen, only the reporting tag of that location's region is offered (Delhi location: Delhi options).
   // Without a location, or when no tag matches the location, every tag is offered. The current option always stays visible.
   const regionTag = (p: { location_id: string }) => lists.locations.find((l) => l.id === p.location_id)?.tag_id || ''
@@ -156,6 +187,17 @@ function Properties({ m, lists, onDone }: { m: Maps; lists: Lists; onDone: () =>
     const only = regionTag(p)
     const cur = lists.tag_options.find((o) => o.id === p.tag_option_id)?.tag_id
     return only ? tags.filter((t) => t.id === only || t.id === cur) : tags
+  }
+  // "Create in Zoho" adds the property's name as an option under its location's region tag. If Zoho has no tag for that
+  // region yet, one named after the location is created first. Without a location, the Connection tab's tag is used.
+  const createTag = (p: { location_id: string }): { name: string; isNew: boolean } | undefined => {
+    if (!conn.data?.push_enabled) return undefined
+    const loc = lists.locations.find((l) => l.id === p.location_id)
+    const id = regionTag(p)
+    if (id) return { name: lists.tags.find((t) => t.id === id)?.name || '', isNew: false }
+    if (loc) return { name: loc.name, isNew: true }
+    const def = lists.tags.find((t) => t.id === conn.data?.property_tag_id)
+    return def ? { name: def.name, isNew: false } : undefined
   }
   const rows = m.properties.filter((p) => !gap || !p.tag_option_id)
   return (
@@ -170,7 +212,8 @@ function Properties({ m, lists, onDone }: { m: Maps; lists: Lists; onDone: () =>
           <td><SearchSelect disabled={!m.can_edit} value={p.tag_option_id} emptyLabel="Not mapped" placeholder="Search hotel or region" ariaLabel={'Reporting tag option for ' + p.name}
             items={tagsFor(p).flatMap((t) => lists.tag_options.filter((o) => o.tag_id === t.id && (o.active || o.id === p.tag_option_id)).map((o) => ({ value: o.id, label: o.name, group: t.name })))}
             onChange={(v) => save('property_tag', String(p.property_id), v)} />
-            {!p.tag_option_id && <> <Pill tone="bad">Bills held</Pill>{m.can_edit && canCreate && <> <button className="link" onClick={() => a.run(() => post(`/zoho/properties/${p.property_id}/create-option`), (r: any) => { onDone(); return r.message })}>Create in Zoho</button></>}</>}
+            {!p.tag_option_id && <> <Pill tone="bad">Bills held</Pill>{m.can_edit && createTag(p) && <> <button className="link" title={`Adds "${p.name}" as an option under the ${createTag(p)!.name} reporting tag in Zoho (creating and activating the tag if needed) and links it`}
+              onClick={() => a.run(() => post(`/zoho/properties/${p.property_id}/create-option`), (r: any) => { onDone(); return r.message })}>Create "{p.name}" under {createTag(p)!.name}</button></>}</>}
             {p.shared_with > 0 && <> <Pill tone="warn">Shared with {p.shared_with} other</Pill></>}</td>
           <td><select disabled={!m.can_edit} value={p.location_id} onChange={(e) => save('property_location', String(p.property_id), e.target.value)}><option value="">None</option>{lists.locations.filter((l) => l.active).map((l) => <option key={l.id} value={l.id}>{l.name}{l.extra ? ` (${l.extra})` : ''}</option>)}</select></td></tr>)}</tbody></table></div></section>
       {upload && <UploadModal kind="zoho_tags" title="Upload property to reporting tag mapping" onClose={() => setUpload(false)} onDone={onDone} />}
@@ -187,30 +230,57 @@ function AccountSelect({ value, accounts, types, disabled, onChange }: { value: 
 function Accounts({ m, lists, onDone }: { m: Maps; lists: Lists; onDone: () => void }) {
   const save = useMap(onDone)
   const a = useAction()
+  const t = useTicks()
   const [create, setCreate] = useState<{ name: string; kind: string; ref: string } | null>(null)
   const [gap, setGap] = useState(false)
   const show = <T extends { account_id: string }>(rows: T[]) => rows.filter((x) => !gap || !x.account_id)
   // An unmapped row offers to create its account in Zoho; an account of that name already there is simply selected.
   const createLink = (name: string, kind: string, ref: string, mapped: string) => m.can_edit && !mapped && <> <button className="link" onClick={() => setCreate({ name, kind, ref })}>Create in Zoho</button></>
+  // Ticked rows are keyed kind|ref, so sub-categories and bill types can be ticked together.
+  const rowsOf = (kind: string, list: { ref: string; name: string; account_id: string }[]) => show(list).map((x) => ({ ...x, kind, key: kind + '|' + x.ref }))
+  const subs = rowsOf('subcat', m.sub_categories), bills = rowsOf('billtype', m.bill_types)
+  const ticked = [...subs, ...bills].filter((x) => t.sel.has(x.key))
+  const setAll = (value: string) => a.run(async () => {
+    for (const kind of ['subcat', 'billtype']) {
+      const keys = ticked.filter((x) => x.kind === kind).map((x) => x.ref)
+      if (keys.length) await put('/zoho/mappings', { kind, keys, value })
+    }
+    return { message: `${ticked.length} ${value ? 'mapped' : 'cleared'}` }
+  }, (r: any) => { t.setSel(new Set()); onDone(); return r.message })
+  // Creates (or selects, if the name exists in Zoho) an expense account named after each ticked row that has none.
+  const createAll = () => a.run(async () => {
+    const todo = ticked.filter((x) => !x.account_id), failed: string[] = []
+    for (const x of todo) {
+      try { await post('/zoho/accounts', { Name: x.name, Code: '', Type: 'expense', Kind: x.kind, Ref: x.ref }) } catch (e: any) { failed.push(x.name + ': ' + e.message) }
+    }
+    if (failed.length) throw new ApiError(400, failed.length + ' not created', failed)
+    return { message: `${todo.length} account${todo.length === 1 ? '' : 's'} created or selected in Zoho` }
+  }, (r: any) => { t.setSel(new Set()); onDone(); return r.message })
+  const tickCell = (key: string) => m.can_edit && <td><input type="checkbox" checked={t.sel.has(key)} onChange={() => t.flip(key)} aria-label="Select row" /></td>
+  const tickHead = (keys: string[]) => m.can_edit && <th><input type="checkbox" checked={t.all(keys)} onChange={() => t.flipAll(keys)} aria-label="Select all" /></th>
   return (
     <>
-      <p className="note">Each bill line posts to one Zoho account. Goods use the account of the item's sub-category; utility and AMC bills use the bill type's account. Nothing posts to a guessed account: an unmapped one holds the bill.</p>
+      <p className="note">Each bill line posts to one Zoho account. Goods use the account of the item's sub-category; utility and AMC bills use the bill type's account. Nothing posts to a guessed account: an unmapped one holds the bill. Tick several rows to map them in one go.</p>
       <div className="tools"><label className="ck"><input type="checkbox" checked={gap} onChange={(e) => setGap(e.target.checked)} />Only not mapped</label>
         {m.can_edit && <><button className="btn ghost" onClick={() => a.run(() => post('/zoho/accounts/match'), (r: any) => { onDone(); return r.message })}>Match by name</button>
           <button className="btn ghost" onClick={() => setCreate({ name: '', kind: '', ref: '' })}>+ Create account in Zoho</button></>}</div>
       <Errors list={a.errors} />
       <div className="cols">
-        <section className="card flush"><h2>Sub-categories</h2><div className="scroll"><table><thead><tr><th>Sub-category</th><th>Category</th><th>Zoho account</th></tr></thead>
-          <tbody>{show(m.sub_categories).map((s) => <tr key={s.ref}><td className="id">{s.name}</td><td>{s.group}</td><td><AccountSelect value={s.account_id} accounts={lists.accounts} types={EXP} disabled={!m.can_edit} onChange={(v) => save('subcat', s.ref, v)} />
+        <section className="card flush"><h2>Sub-categories</h2><div className="scroll"><table><thead><tr>{tickHead(subs.map((x) => x.key))}<th>Sub-category</th><th>Category</th><th>Zoho account</th></tr></thead>
+          <tbody>{show(m.sub_categories).map((s) => <tr key={s.ref}>{tickCell('subcat|' + s.ref)}<td className="id">{s.name}</td><td>{s.group}</td><td><AccountSelect value={s.account_id} accounts={lists.accounts} types={EXP} disabled={!m.can_edit} onChange={(v) => save('subcat', s.ref, v)} />
             {s.account_id && !s.account_active && <Pill tone="bad">Inactive in Zoho</Pill>}{createLink(s.name, 'subcat', s.ref, s.account_id)}</td></tr>)}</tbody></table></div></section>
         <div className="stack">
-          <section className="card flush"><h2>Utility and AMC bill types</h2><div className="scroll"><table><thead><tr><th>Bill type</th><th>Zoho account</th></tr></thead>
-            <tbody>{show(m.bill_types).map((s) => <tr key={s.ref}><td className="id">{s.name}</td><td><AccountSelect value={s.account_id} accounts={lists.accounts} types={EXP} disabled={!m.can_edit} onChange={(v) => save('billtype', s.ref, v)} />{createLink(s.name, 'billtype', s.ref, s.account_id)}</td></tr>)}</tbody></table></div></section>
+          <section className="card flush"><h2>Utility and AMC bill types</h2><div className="scroll"><table><thead><tr>{tickHead(bills.map((x) => x.key))}<th>Bill type</th><th>Zoho account</th></tr></thead>
+            <tbody>{show(m.bill_types).map((s) => <tr key={s.ref}>{tickCell('billtype|' + s.ref)}<td className="id">{s.name}</td><td><AccountSelect value={s.account_id} accounts={lists.accounts} types={EXP} disabled={!m.can_edit} onChange={(v) => save('billtype', s.ref, v)} />{createLink(s.name, 'billtype', s.ref, s.account_id)}</td></tr>)}</tbody></table></div></section>
           <section className="card"><h2>Special cases</h2>{show(m.special).map((s) => <label key={s.ref} className="field"><span>{s.name}</span>
             <AccountSelect value={s.account_id} accounts={lists.accounts} types={s.ref === 'loss' ? EXP : undefined} disabled={!m.can_edit} onChange={(v) => save('special', s.ref, v)} />
             {s.ref === 'warehouse' && <span className="hint">Stock is an asset until issued, so warehouse purchases post to a stock account.</span>}</label>)}</section>
         </div>
       </div>
+      <BulkMapBar count={ticked.length} busy={a.busy} onApply={setAll} onClear={() => setAll('')} onCancel={() => t.setSel(new Set())}
+        picker={(v, set) => <AccountSelect value={v} accounts={lists.accounts} types={EXP} disabled={false} onChange={set} />}
+        extra={ticked.some((x) => !x.account_id) && <button className="btn ghost" disabled={a.busy} title="An expense account named after each row; one already in Zoho with that name is selected instead"
+          onClick={createAll}>Create in Zoho for {ticked.filter((x) => !x.account_id).length} unmapped</button>} />
       {create && <CreateAccount start={create} onClose={() => setCreate(null)} onDone={() => { setCreate(null); onDone() }} />}
     </>
   )
@@ -238,11 +308,11 @@ function Taxes({ m, lists, onDone }: { m: Maps; lists: Lists; onDone: () => void
   const save = useMap(onDone)
   const [gap, setGap] = useState(false)
   const tax = (r: number, k: string) => m.taxes[`${r}.00|${k}`] || m.taxes[`${r}|${k}`] || ''
-  const rates = [5, 12, 18, 28].filter((r) => !gap || !tax(r, 'intra') || !tax(r, 'inter'))
+  const rates = GST_RATES.filter((r) => !gap || !tax(r, 'intra') || !tax(r, 'inter'))
   return (
     <>
       <div className="tools"><label className="ck"><input type="checkbox" checked={gap} onChange={(e) => setGap(e.target.checked)} />Only not mapped</label></div>
-      <p className="note">Zoho needs a tax code on every taxable line. <b>Within the state</b> (vendor and property in the same state) uses a CGST + SGST group. <b>From another state</b> uses IGST. An unregistered vendor and a 0% item are sent with no tax.</p>
+      <p className="note">Zoho needs a tax code on every taxable line. <b>Within the state</b> (vendor and property in the same state) uses a CGST + SGST group. <b>From another state</b> uses IGST. <b>0%</b> lines use GST0 / IGST0 when mapped, and go with no tax when not. An unregistered vendor is sent with no tax.</p>
       <section className="card flush"><div className="scroll"><table><thead><tr><th>GST rate</th><th>Vendor within the state</th><th>Vendor from another state</th></tr></thead>
         <tbody>{rates.map((r) => <tr key={r}><td className="id">{r}%</td>{(['intra', 'inter'] as const).map((k) => <td key={k}>
           <select disabled={!m.can_edit} value={tax(r, k)} onChange={(e) => save('tax', `${r}|${k}`, e.target.value)}><option value="">Not mapped</option>
@@ -359,19 +429,39 @@ function ZohoItems({ m, onDone }: { m: Maps; onDone: () => void }) {
     hint: [z.hsn_or_sac && 'HSN ' + z.hsn_or_sac, z.purchase_account].filter(Boolean).join(' · ') }))
   const rows = m.items.filter((x) => (!gap || !x.item_id) && (!q || (x.code + ' ' + x.name + ' ' + x.sub_category).toLowerCase().includes(q.toLowerCase())))
   const linked = m.items.filter((x) => x.item_id).length
+  const t = useTicks()
+  const keys = rows.map((x) => String(x.sku_id))
+  const setAll = (value: string) => a.run(() => put('/zoho/mappings', { kind: 'item', keys: [...t.sel], value }),
+    () => { const n = t.sel.size; t.setSel(new Set()); onDone(); return `${n} item${n === 1 ? '' : 's'} ${value ? 'linked' : 'cleared'}` })
+  // Creates each item in Zoho (or links one already there with the same SKU code or name). Needs the sub-category's
+  // account and the GST rate's taxes mapped.
+  const createOne = (id: number) => a.run(() => post(`/zoho/items/${id}/create`), (r: any) => { onDone(); return r.message })
+  const unlinked = m.items.filter((x) => t.sel.has(String(x.sku_id)) && !x.item_id)
+  const createAll = () => a.run(async () => {
+    const failed: string[] = []
+    for (const x of unlinked) {
+      try { await post(`/zoho/items/${x.sku_id}/create`) } catch (e: any) { failed.push(x.name + ': ' + e.message) }
+    }
+    if (failed.length) throw new ApiError(400, failed.length + ' not created', failed)
+    return { message: `${unlinked.length} item${unlinked.length === 1 ? '' : 's'} created or linked in Zoho` }
+  }, (r: any) => { t.setSel(new Set()); onDone(); return r.message })
   return (
     <>
-      <p className="note">Link each Purchase Desk item to its item in Zoho Books. Names that match exactly are linked on every sync and by Match by name; pick the rest. {linked} of {m.items.length} linked.</p>
+      <p className="note">Link each Purchase Desk item to its item in Zoho Books. Names that match exactly are linked on every sync and by Match by name; pick the rest, one by one or by ticking several and setting them together. {linked} of {m.items.length} linked.</p>
       <div className="tools"><input type="search" placeholder="Search item, code or sub-category" value={q} onChange={(e) => setQ(e.target.value)} />
         <label className="ck"><input type="checkbox" checked={gap} onChange={(e) => setGap(e.target.checked)} />Only not mapped</label>
         {m.can_edit && <button className="btn ghost" onClick={() => a.run(() => post('/zoho/items/match'), (r: any) => { onDone(); return r.message })}>Match by name</button>}</div>
       <Errors list={a.errors} />
-      <section className="card flush"><div className="scroll"><table><thead><tr><th>Purchase Desk item</th><th>Sub-category</th><th>HSN / SAC</th><th>Zoho item</th></tr></thead>
-        <tbody>{rows.map((x) => <tr key={x.sku_id}><td className="id">{x.name}<br /><span className="hint">{x.code}</span></td><td>{x.sub_category}</td><td>{x.hsn || '—'}</td>
+      <section className="card flush"><div className="scroll"><table><thead><tr>{m.can_edit && <th><input type="checkbox" checked={t.all(keys)} onChange={() => t.flipAll(keys)} aria-label="Select all" /></th>}<th>Purchase Desk item</th><th>Sub-category</th><th>HSN / SAC</th><th>Zoho item</th></tr></thead>
+        <tbody>{rows.map((x) => <tr key={x.sku_id}>{m.can_edit && <td><input type="checkbox" checked={t.sel.has(String(x.sku_id))} onChange={() => t.flip(String(x.sku_id))} aria-label={'Select ' + x.name} /></td>}<td className="id">{x.name}<br /><span className="hint">{x.code}</span></td><td>{x.sub_category}</td><td>{x.hsn || '—'}</td>
           <td><SearchSelect value={x.item_id} disabled={!m.can_edit} emptyLabel="Not mapped" placeholder="Search Zoho item" ariaLabel={'Zoho item for ' + x.name}
             items={x.item_id && !options.some((o) => o.value === x.item_id) ? [{ value: x.item_id, label: x.item_name || x.item_id, hint: 'Inactive in Zoho' }, ...options] : options}
             onChange={(v) => save('item', String(x.sku_id), v)} />
+            {!x.item_id && m.can_edit && <> <button className="link" disabled={a.busy} title="Creates this item in Zoho Books and links it; one with the same SKU code or name is linked instead" onClick={() => createOne(x.sku_id)}>Create in Zoho</button></>}
             {x.how === 'name' && <Pill tone="ok">Matched by name</Pill>}{x.item_id && !x.item_active && <Pill tone="bad">Inactive in Zoho</Pill>}</td></tr>)}</tbody></table></div></section>
+      <BulkMapBar count={t.sel.size} busy={a.busy} onApply={setAll} onClear={() => setAll('')} onCancel={() => t.setSel(new Set())}
+        picker={(v, set) => <SearchSelect value={v} disabled={false} emptyLabel="Choose a Zoho item" placeholder="Search Zoho item" items={options} onChange={set} />}
+        extra={unlinked.length > 0 && <button className="btn ghost" disabled={a.busy} onClick={createAll}>Create in Zoho for {unlinked.length} unlinked</button>} />
     </>
   )
 }

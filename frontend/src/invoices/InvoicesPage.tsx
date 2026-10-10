@@ -1,5 +1,11 @@
-// Vendor invoices against goods receipts, for Accounts Payable's three-way match.
+// Vendor invoices against goods receipts, for Accounts Payable's three-way match. Several in-tolerance invoices can be matched at once.
+import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
+import { post } from '../api/client'
+import { useSession } from '../auth/session'
+import { BulkResults, type BulkResult } from '../ui/BulkResults'
+import { Errors } from '../ui/Errors'
+import { useAction } from '../ui/useAction'
 import type { Invoice } from '../api/types'
 import { useApi } from '../api/useApi'
 import { day, inr } from '../format/format'
@@ -8,12 +14,22 @@ import { Pill } from '../ui/Pill'
 
 export function InvoicesPage() {
   const nav = useNavigate()
-  const { data } = useApi<Invoice[]>('/invoices')
+  const { hasStep } = useSession()
+  const ap = hasStep('ap')
+  const { data, reload } = useApi<Invoice[]>('/invoices')
   const rows = (data || []).filter((i) => i.kind === 'purchase' || i.kind === 'corp_purchase')
+  const [sel, setSel] = useState<Set<string | number>>(new Set())
+  const [results, setResults] = useState<BulkResult[] | null>(null)
+  const a = useAction()
   return (
     <>
-      <div className="head"><div><h1>Invoices</h1><p className="sub">Three-way match of the PO, the goods receipt and the vendor invoice. Each delivery has its own invoice and match.</p></div></div>
-      <DataTable screen="invoices" rows={rows} rowKey={(r) => r.id} onOpen={(r) => nav('/invoices/' + r.id)}
+      <div className="head"><div><h1>Invoices</h1><p className="sub">Three-way match of the PO, the goods receipt and the vendor invoice. Each delivery has its own invoice and match. Tick invoices that match within the tolerance to confirm them together; a mismatch needs its own remark.</p></div>
+        {ap && <div className="acts"><button className="btn" disabled={!sel.size || a.busy} onClick={() => a.run(() => post<{ done: number; failed: number; results: BulkResult[] }>('/invoices/bulk', { action: 'match', ids: [...sel] }),
+          (r) => { setResults(r.results); setSel(new Set()); reload(); return `${r.done} matched and sent to Finance${r.failed ? `, ${r.failed} not matched` : ''}` })}>Match selected ({sel.size})</button></div>}</div>
+      <Errors list={a.errors} />
+      {results && <BulkResults title="Last bulk match" results={results} label={(id) => rows.find((r) => r.id === id)?.invoice_number || String(id)} onClose={() => setResults(null)} />}
+      <DataTable screen="invoices" rows={rows} rowKey={(r) => r.id} date={{ label: 'Invoice date', value: (r) => r.invoice_date }} onOpen={(r) => nav('/invoices/' + r.id)}
+        selectable={ap ? (r) => r.status === 'RECEIVED' && r.within_tolerance : undefined} selected={sel} onSelect={setSel}
         search={(r) => [r.invoice_number, r.vendor, r.po_number, r.document_number, r.property].join(' ')}
         filters={[{ id: 'st', label: 'Match', options: [['', 'All'], ['RECEIVED', 'To match'], ['DONE', 'Matched']], test: (r, v) => v === 'RECEIVED' ? r.status === 'RECEIVED' : r.status !== 'RECEIVED' }]}
         columns={[

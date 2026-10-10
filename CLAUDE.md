@@ -64,7 +64,7 @@ Wiring lives in `router/router.go`. Startup, migrations and background jobs live
 - **auditlog**: `Write(...)` for the activity log and `Doc(...)` for the document history. `GET /activity`.
 - **billtypes**: `GET|POST /bill-types`, `PUT /bill-types/{id}`.
 - **budgets**: month budget, week and day split, F&B sales, spend ledger, pace and flags. `GET /budgets/overview|property|export`, `PUT /budgets`, `GET /fb-sales`, `/fb-sales/export`.
-- **bulkupload**: CSV check then import, with kinds registered through `Register(...)`. `GET /uploads/{kind}/sample`, `POST /uploads/{kind}/check|import`.
+- **bulkupload**: CSV check then import, with kinds registered through `Register(...)`. `GET /uploads/{kind}/sample`, `POST /uploads/{kind}/check|import`. Edit round trip (`roundtrip.go`, `workbook.go`): `GET /uploads/{kind}/workbook` gives an .xlsx with a Read me sheet, the page's list plus the masters it depends on as editable sheets (named after each kind's title, applied in order: Vendor Mapping = Vendors then Vendor mapping; Rates = Vendors, Items, Vendor rates), and read-only "Ref - ..." sheets. Check and import take `{text}` (CSV, one list) or `{xlsx}` (base64 workbook). A workbook check is a dry run in a rolled-back transaction, sheet by sheet with savepoints, so a later sheet sees earlier sheets' changes. `GET /uploads/{kind}/export` still gives one list as CSV. A row with its key updates, one without adds, an unchanged row is skipped (`keyOf`); users also use `onSame` and `after` so a deleted role row removes that role. Vendor bank details, GSTIN and PAN are locked on update. A mapping's vendor, level and item may change in place. Updates go through `items.Update`, `geography.UpdateProperty`, `vendors.Update`, `vendormapping.CheckMapping` and `SaveMapping`.
 - **clock**: IST helpers `Now`, `Today`, `ParseDate`, `ParseMonth`, `MonthStart`, `DaysInMonth`.
 - **config**: env vars, see `.env.example`.
 - **corporate**: departments, expense heads, corporate purchases and bills. `GET|POST /corporate/departments`, `PUT .../{id}`, `GET|POST /corporate/expense-heads`, `GET /corporate/form`, `POST /corporate/requests`.
@@ -81,20 +81,20 @@ Wiring lives in `router/router.go`. Startup, migrations and background jobs live
 - **goodsreceipts**: receipts with part deliveries, invoice and photos, as multipart with a `data` JSON field. `POST /documents/{id}/receipts`.
 - **httpjson**: `Wrap(handler returning error)`, `OK`, `JSON`, `Decode`, `ID(r,"id")`, `QInt`. Errors: `Bad`, `Invalid([]string)`, `Forbidden`, `NotFound`, `Conflict`, `Unauthorized`. Bad, Forbidden and Conflict take a format string.
 - **indiantax**: GSTIN, PAN, IFSC, Udyam and HSN checks; GST state codes.
-- **invoices**: three-way match, send back, payment approval (MSME 45-day limit), mark paid. `Held` and `ZohoConnected` are injected from zohopush and zohosync. `GET /invoices`, `GET /invoices/{id}`, `POST /invoices/{id}/match|send-back|approve-payment|mark-paid`.
+- **invoices**: three-way match, send back, payment approval (MSME 45-day limit), mark paid. `Held` and `ZohoConnected` are injected from zohopush and zohosync. `GET /invoices`, `GET /invoices/{id}`, `POST /invoices/{id}/match|send-back|approve-payment|mark-paid`, `POST /invoices/bulk` (action `match`, in-tolerance only, or `approve-payment`; one transaction each, results per invoice).
 - **items**: categories, sub-categories, brands, pack sizes, SKUs. `GET|POST /categories|/sub-categories|/brands|/pack-sizes|/skus`, `PUT /sub-categories/{id}`, `PUT /skus/{id}`.
 - **login**: password and one-time code sign-in (12 h session; throttled after 8 failures in 15 min), plus per-screen prefs. `POST /auth/login|/auth/otp/request|/auth/otp/verify`, `GET /me`, `POST /me/password`, `GET|PUT /prefs/{screen}`.
 - **messaging**: SMTP email, MSG91 WhatsApp and SMS, all recorded in `message_log`. Without credentials it logs with status `logged`. `msg91Result` reads MSG91's reply body, because MSG91 can answer HTTP 200 with `{"type":"error"}` or `{"hasError":true}`.
 - **money**: `Round2`, `LineValue(qty,rate,gst)`, `INR`, `TermsDays`, `PaymentTerms`.
 - **passwords**: bcrypt and one-time code hashes.
-- **purchaseorders**: `POST /documents/{id}/po` issues the PO and emails the vendor.
-- **purchaserequests**: raise (split per vendor), list, detail with allowed actions, resubmit, cancel, search, and `MyTurn`. `GET|POST /requests`, `GET /requests/form`, `GET /documents/{id}`, `POST /documents/{id}/resubmit|cancel|preop-approver`, `GET /search`.
+- **purchaseorders**: `POST /documents/{id}/po` issues the PO and emails the vendor. `POST /purchase-orders/bulk` issues several at their current rates with one delivery date (terms "" = each vendor's own); a request with an estimated rate is refused.
+- **purchaserequests**: raise (split per vendor), list, detail with allowed actions, resubmit, cancel, search, and `MyTurn`. `GET|POST /requests`, `GET /requests/form`, `GET /documents/{id}`, `POST /documents/{id}/resubmit|cancel|preop-approver`, `GET /search`. The detail returns `raised_with`: the other PRs split off the same submission (same requester, property and `created_at`).
 - **releasephase**: the switched-on phase (`Set`, `Current`, `On(phase)`), the phase constants (`Zoho`, `Bills`, `Budgets`, `Corporate`, `Warehouse`, `Sheets`, `Dashboard`, `Reports`), and `RoleOn`, `VendorTypeOn`, `PropertyKindOn`, `NotYet`.
 - **reports**: 14 reports and the Excel pack. `GET /reports`, `GET /reports/{key}` (`?format=xlsx`), `GET /reports/pack`.
 - **router**: mounts everything, CORS for dev, `GET /health`.
 - **scheduler**: background jobs.
 - **sessiontoken**: JWT sign and verify.
-- **spreadsheet**: writes .xlsx through excelize.
+- **spreadsheet**: writes .xlsx through excelize; `Send` writes it as a download.
 - **textclean**: `Clean`, `Key` (duplicate-name key; SQL `norm_key()` is the same idea), `Upper`, `Contains`, `Uniq`, `Default`.
 - **uploadedfiles**: `Save` and serve files. Bank proofs are visible only to Finance and Admin. `GET /files/{id}`.
 - **users**: users, roles and grants (`ValidateUser`, `SaveUser`). `GET /people`, `GET|POST /users`, `PUT /users/{id}`, `GET|POST /roles`, `PUT /roles/{id}`.
@@ -106,8 +106,9 @@ Wiring lives in `router/router.go`. Startup, migrations and background jobs live
 - **warehousejournal**: the monthly Zoho journal per property, at ex-GST value. `GET /zoho/journals`, `GET /zoho/journals/preview`, `POST /zoho/journals`.
 - **worklist**: menu badge counts. `GET /worklist`.
 - **zohoapi**: the Zoho HTTP client with token refresh, 429 handling and pagination. Calls are listed in `docs/ZOHO_API.md`.
+- **zohoexport**: the "Download from Zoho (Excel)" button on Settings → Zoho Books only. On each click it reads the tab's list live from Zoho (every page) and writes every field Zoho returns; nothing is saved. `GET /zoho/export/{all|properties|accounts|taxes|vendors|items|bills|journals}` (Push queue tab = bills, Warehouse journal tab = journals).
 - **zohopush**: builds the bill, pushes it in 3 steps, reads payments back, `Held` reasons. `GET /zoho/queue`, `GET /invoices/{id}/zoho-preview`, `POST /zoho/push`, `POST /zoho/read-payments`.
-- **zohosync**: the connection (encrypted, tested before save), list sync (accounts, taxes, tags, locations, vendors, and items into `zoho_item`, read only, shown on the Items tab via `GET /zoho/items`), the four mappings, vendor link and create. `GET|PUT /zoho/connection`, `POST /zoho/test|connected|sync`, `GET /zoho/lists`, `GET|PUT /zoho/mappings`, `POST /zoho/properties/match`, `POST /zoho/properties/{id}/create-option`, `POST /zoho/accounts`, `POST /zoho/vendors/{id}/link|unlink|create`.
+- **zohosync**: the connection (encrypted, tested before save), list sync (accounts, taxes, tags, locations, vendors, and items into `zoho_item`, read only, shown on the Items tab via `GET /zoho/items`), the four mappings, vendor link and create. `GET|PUT /zoho/connection`, `POST /zoho/test|connected|sync`, `GET /zoho/lists`, `GET|PUT /zoho/mappings` (PUT takes `key` or `keys[]`), `POST /zoho/properties/match`, `POST /zoho/properties/{id}/create-option`, `POST /zoho/accounts`, `POST /zoho/vendors/{id}/link|unlink|create`.
 
 ## Frontend: `frontend/src/<folder>`
 
@@ -121,9 +122,9 @@ Routes are in `app/App.tsx`. The left menu, top bar, badges and search are in `l
   - `auth/` holds the sign-in page and `session.tsx` (the current user).
   - `format/format.ts` has `inr`, `qty`, `day`, `dateTime`, `month`, `today`, `thisMonth`, `addDays` and `plural`.
 - **ui/:**
-  - `DataTable` gives search, filters, paging, the column chooser saved to `/prefs` and CSV export.
+  - `DataTable` gives search, filters, a date range (`date={{label, value, onFrom?}}`; `onFrom` lets `/requests` lists widen `days` with `daysBack`), paging, the column chooser saved to `/prefs` and CSV export.
   - Widgets: `Modal`, `Field`, `Select`, `Checks`, `Seg`, `Pill` and `statusTone`, `Tabs`, `Errors`, `ActiveToggle`.
-  - `Toast` provides `useToast`, and `useAction` provides `{busy,errors,run}`.
+  - `Toast` provides `useToast`, and `useAction` provides `{busy,errors,run}`. `BulkResults` lists the per-item outcome of a bulk action.
 - **Screens:**
 
 | Folder | Routes |
@@ -240,6 +241,8 @@ Routes are in `app/App.tsx`. The left menu, top bar, badges and search are in `l
   - `/settings/tags` is retired; use `/reportingtags` with the key `tags`. Options come from `GET /reportingtags/options?tag_id=` (key `options`, fields `option_id`/`option_name`, nested `children`); `GET /reportingtags/{id}` has no options any more. `TagOption` decodes both field shapes.
   - Properties are not under one "Property" tag: Saltstayz has one tag per region with hotels as options (43). A property maps to an option of any tag; push and the warehouse journal send that option's own `tag_id`. `zoho_connection.property_tag_id` now only says which tag a new option is created under.
   - `/zoho/lists` gives each location the `tag_id` of its region: the tag with the location's name, or its state's name (`indiantax.StateName`; Bangalore KA gives Karnataka, Head Office HR gives Haryana). On the Properties tab a chosen location narrows the option list to that tag; with no location, or no matching tag, every tag is offered.
+  - "Create in Zoho" on the Items tab (`POST /zoho/items/{id}/create`, one or many ticked) creates the SKU in Zoho and links it; an active Zoho item with the same SKU code or name is linked instead. It needs the sub-category account and both GST taxes mapped first.
+  - "Create in Zoho" on the Properties tab adds the property's name as an option under its location's region tag; if Zoho has no such tag it first creates one named after the location (`CreateReportingTag`), then links the option. Without a location it falls back to `property_tag_id`.
   - Contacts: send `contact_type=vendor` alone. Adding `filter_by=Status.All` makes Zoho return customers too (10,382 contacts instead of 962 vendors). `Vendors()` also skips any non-vendor contact.
   - Taxes come as `tax_group` (intra) and `tax` igst (inter).
   - Name matching, on every sync and from "Match by name": `autoLinkAccounts` fills unmapped sub-categories, bill types and expense heads with the one active expense account of the same name; `autoLinkItems` links unmapped SKUs to the one active Zoho item named like the item (or brand + item) via `zoho_map_item`. A name shared by two Zoho records is never guessed. Bill lines send `item_id` for a linked active item. "Create in Zoho" for an account selects an existing account of that name instead of creating it.

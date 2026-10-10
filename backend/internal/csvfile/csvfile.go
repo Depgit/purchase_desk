@@ -15,6 +15,9 @@ type Row struct {
 
 func (r Row) Get(col string) string { return r.Values[col] }
 
+// Has reports whether the file has the column at all (a blank cell still counts).
+func (r Row) Has(col string) bool { _, ok := r.Values[col]; return ok }
+
 func Parse(text string) ([]string, []Row, error) {
 	rd := csv.NewReader(strings.NewReader(strings.TrimPrefix(text, "\uFEFF")))
 	rd.FieldsPerRecord = -1
@@ -23,6 +26,12 @@ func Parse(text string) ([]string, []Row, error) {
 	if err != nil {
 		return nil, nil, fmt.Errorf("the file could not be read as CSV: %v", err)
 	}
+	return FromTable(recs)
+}
+
+// FromTable reads rows already split into cells (a CSV file, or one sheet of an Excel workbook): the first row
+// is the header, and blank rows are left out. Line numbers count from 1 for the header.
+func FromTable(recs [][]string) ([]string, []Row, error) {
 	if len(recs) < 2 {
 		return nil, nil, fmt.Errorf("the file needs a header row and at least one data row")
 	}

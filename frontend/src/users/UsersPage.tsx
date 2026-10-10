@@ -39,7 +39,7 @@ export function UsersPage() {
   return (
     <>
       <div className="head"><div><h1>Users &amp; Rights</h1><p className="sub">Users sign in with email or mobile. A user can hold several roles, each with its own property and category scope. Nobody is deleted; inactive users cannot sign in.</p></div>
-        <div className="acts">{admin && <><button className="btn ghost" onClick={() => setUpload(true)}>Bulk upload users</button><button className="btn" onClick={() => setEdit('new')}>+ Add user</button></>}</div></div>
+        <div className="acts">{admin && <><button className="btn ghost" onClick={() => setUpload(true)}>Bulk upload / edit users</button><button className="btn" onClick={() => setEdit('new')}>+ Add user</button></>}</div></div>
       <DataTable screen="users" rows={data || []} rowKey={(u) => u.id} dim={(u) => !u.active} search={(u) => [u.name, u.email, u.mobile, u.department, ...u.roles.map((r) => r.role_name || '')].join(' ')}
         filters={[{ id: 'role', label: 'Role', options: [['', 'All roles'], ...(l?.roles || []).map((r) => [String(r.id), r.name] as [string, string])], test: (u, v) => u.roles.some((g) => String(g.role_id) === v) }]}
         columns={[
@@ -61,7 +61,7 @@ export function UsersPage() {
             <td className="r">{r.users}</td><td>{r.is_custom && <ActiveToggle kind="role" id={r.id} name={r.name} active={r.active} onDone={refreshLookups} />}</td></tr>)}</tbody></table></div></section>
       {edit && <UserModal u={edit === 'new' ? null : edit} onClose={() => setEdit(null)} onDone={() => { setEdit(null); reload(); refreshLookups() }} />}
       {newRole && <RoleModal onClose={() => setNewRole(false)} />}
-      {upload && <UploadModal kind="users" title="Bulk upload users" onClose={() => setUpload(false)} onDone={() => { reload(); refreshLookups() }} />}
+      {upload && <UploadModal kind="users" title="Bulk upload or edit users" onClose={() => setUpload(false)} onDone={() => { reload(); refreshLookups() }} />}
     </>
   )
 }

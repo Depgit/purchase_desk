@@ -30,8 +30,8 @@ export function PropertiesPage() {
   return (
     <>
       <div className="head"><div><h1>Properties</h1><p className="sub">{bud ? <>Locations with eZee code, cluster, approvers and the F&amp;B cost % used to turn sales into the F&amp;B budget.</> : 'Locations with eZee code, cluster and approvers.'}</p></div>
-        <div className="acts">{ed && <>{hasRight('upload') && <><button className="btn ghost" onClick={() => setUpload('properties')}>Bulk upload properties</button>
-          {bud && <button className="btn ghost" onClick={() => setUpload('property_pct')}>Bulk upload F&amp;B cost %</button>}</>}
+        <div className="acts">{ed && <>{hasRight('upload') && <><button className="btn ghost" onClick={() => setUpload('properties')}>Bulk upload / edit properties</button>
+          {bud && <button className="btn ghost" onClick={() => setUpload('property_pct')}>Bulk upload / edit F&amp;B cost %</button>}</>}
           <button className="btn" onClick={() => setEdit('new')}>+ Add property</button></>}</div></div>
       <DataTable screen="properties" rows={data || []} rowKey={(p) => p.id} dim={(p) => !p.active} search={(p) => [p.code, p.name, p.ezee_code, p.l1_name, p.cluster].join(' ')}
         filters={[{ id: 'cl', label: 'Cluster', options: [['', 'All clusters'], ...(l?.clusters || []).map((c) => [String(c.id), c.name] as [string, string])], test: (p, v) => String(p.cluster_id) === v },

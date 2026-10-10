@@ -44,6 +44,7 @@ import (
 	"purchasedesk/internal/warehouse"
 	"purchasedesk/internal/warehousejournal"
 	"purchasedesk/internal/worklist"
+	"purchasedesk/internal/zohoexport"
 	"purchasedesk/internal/zohopush"
 	"purchasedesk/internal/zohosync"
 )
@@ -122,6 +123,7 @@ func New(d Deps) *Built {
 			if releasephase.On(releasephase.Zoho) {
 				zsync.Routes(r)
 				zpush.Routes(r)
+				(&zohoexport.Service{Sync: zsync}).Routes(r)
 			}
 			if releasephase.On(releasephase.Bills) {
 				(&billtypes.Service{DB: d.DB}).Routes(r)

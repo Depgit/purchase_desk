@@ -75,7 +75,7 @@ export function WarehousePage() {
         ]} csvName="warehouse-stock" />}
       {tab === 'dispatch' && <>
         <p className="sub">Orders the properties are waiting for. Schedule each delivery with a partner, date and slot, then dispatch from the order. Tick several to put them on one trip.</p>
-        <DataTable screen="wh-dispatch" rows={toDispatch} rowKey={(d) => d.id} onOpen={(d) => nav('/documents/' + d.id)} selectable={wh ? () => true : undefined} selected={sel} onSelect={setSel}
+        <DataTable screen="wh-dispatch" rows={toDispatch} rowKey={(d) => d.id} date={{ label: 'Raised', value: (d) => d.created_at }} onOpen={(d) => nav('/documents/' + d.id)} selectable={wh ? () => true : undefined} selected={sel} onSelect={setSel}
           actions={wh ? <button className="btn" disabled={!sel.size} onClick={() => setTrip(true)}>Schedule {sel.size || ''} selected on one trip</button> : null}
           search={(d) => [d.po_number, d.number, d.property].join(' ')}
           columns={[
@@ -88,7 +88,7 @@ export function WarehousePage() {
               sort: (d) => d.delivery?.date || '9', csv: (d) => d.delivery?.date || '' },
             { key: 'age', label: 'Waiting', right: true, render: (d) => `${Math.floor(d.age_hours / 24)} d`, sort: (d) => d.age_hours },
           ]} csvName="warehouse-dispatch" /></>}
-      {tab === 'schedule' && <DataTable screen="wh-schedule" rows={scheduled} rowKey={(d) => d.id} onOpen={(d) => nav('/documents/' + d.id)} search={(d) => [d.po_number, d.property, d.delivery?.partner].join(' ')}
+      {tab === 'schedule' && <DataTable screen="wh-schedule" rows={scheduled} rowKey={(d) => d.id} date={{ label: 'Delivery date', value: (d) => d.delivery?.date }} onOpen={(d) => nav('/documents/' + d.id)} search={(d) => [d.po_number, d.property, d.delivery?.partner].join(' ')}
         columns={[
           { key: 'date', label: 'Date', render: (d) => day(d.delivery!.date), sort: (d) => d.delivery!.date + d.delivery!.slot, csv: (d) => d.delivery!.date },
           { key: 'slot', label: 'Time slot', render: (d) => d.delivery!.slot, csv: (d) => d.delivery!.slot },
@@ -98,7 +98,7 @@ export function WarehousePage() {
           { key: 'veh', label: 'Vehicle', render: (d) => d.delivery!.vehicle || '—', csv: (d) => d.delivery!.vehicle },
           { key: 'st', label: 'Status', render: (d) => d.status === 'WH_SENT' ? <Pill tone="ok">On the way</Pill> : <Pill>{d.delivery!.version > 1 ? 'Rescheduled' : 'Scheduled'}</Pill> },
         ]} csvName="delivery-schedule" />}
-      {(tab === 'transit' || tab === 'incoming') && <DataTable screen={'wh-' + tab} rows={tab === 'transit' ? transit : incoming} rowKey={(d) => d.id} onOpen={(d) => nav('/documents/' + d.id)}
+      {(tab === 'transit' || tab === 'incoming') && <DataTable screen={'wh-' + tab} rows={tab === 'transit' ? transit : incoming} rowKey={(d) => d.id} date={{ label: tab === 'transit' ? 'Dispatched' : 'Raised', value: (d) => tab === 'transit' ? d.dispatched_at : d.created_at }} onOpen={(d) => nav('/documents/' + d.id)}
         search={(d) => [d.po_number, d.property, d.vendor].join(' ')} empty={tab === 'transit' ? 'Nothing is in transit.' : 'No delivery is due at the warehouse or a pre-opening property.'}
         columns={[
           { key: 'po', label: 'Order', render: (d) => d.po_number, csv: (d) => d.po_number },
@@ -126,7 +126,7 @@ function MinLevel({ s, onDone }: { s: Stock; onDone: () => void }) {
 function Movements() {
   const nav = useNavigate()
   const { data } = useApi<Move[]>('/warehouse/movements')
-  return <DataTable screen="wh-moves" rows={data || []} rowKey={(m) => m.kind + m.ref + m.sku_code + m.at} onOpen={(m) => nav('/documents/' + m.document_id)} search={(m) => [m.kind, m.ref, m.party, m.sku_code, m.item].join(' ')}
+  return <DataTable screen="wh-moves" rows={data || []} rowKey={(m) => m.kind + m.ref + m.sku_code + m.at} date={{ label: 'Date', value: (m) => m.at }} onOpen={(m) => nav('/documents/' + m.document_id)} search={(m) => [m.kind, m.ref, m.party, m.sku_code, m.item].join(' ')}
     filters={[{ id: 'k', label: 'Movement', options: [['', 'All movements'], ['Purchase received', 'Purchase received'], ['Dispatched to property', 'Dispatched to property'], ['Pilferage', 'Pilferage']], test: (m, v) => m.kind === v }]}
     columns={[
       { key: 'at', label: 'Date', render: (m) => dateTime(m.at), sort: (m) => m.at, csv: (m) => m.at },

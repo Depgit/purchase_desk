@@ -356,43 +356,8 @@ func (s *Service) save(w http.ResponseWriter, r *http.Request) error {
 				return err
 			}
 		} else {
-			var oldGST bool
-			var oldGSTIN, oldPAN string
-			if err := tx.QueryRow(r.Context(), `SELECT code, gst_registered, coalesce(gstin,''), coalesce(pan,'') FROM vendor WHERE id=$1 FOR UPDATE`, id).Scan(&code, &oldGST, &oldGSTIN, &oldPAN); err != nil {
-				return err
-			}
-			// A change to the bank account, GST details or PAN sends the vendor back to Finance.
-			resent = in.BankAccount != "" || oldGST != in.GSTRegistered || oldGSTIN != in.GSTIN || oldPAN != in.PAN
-			if _, err := tx.Exec(r.Context(), `UPDATE vendor SET vendor_type=$2, legal_name=$3, address=coalesce(nullif($4,''),address), city=coalesce(nullif($5,''),city), pin=coalesce(nullif($6,''),pin),
-				contact_person=coalesce(nullif($7,''),contact_person), mobile=$8, email=$9, gst_registered=$10, gstin=$11, pan=$12, state_code=$13, msme=$14, udyam=$15,
-				bank_holder=coalesce(nullif($16,''),bank_holder), payment_terms=$17,
-				bank_account_enc=CASE WHEN $18<>'' THEN $18 ELSE bank_account_enc END, bank_account_last4=CASE WHEN $19<>'' THEN $19 ELSE bank_account_last4 END,
-				ifsc=CASE WHEN $20<>'' THEN $20 ELSE ifsc END, bank_proof_file_id=coalesce($21,bank_proof_file_id), msme_file_id=coalesce($23,msme_file_id),
-				bank_verified=CASE WHEN $22 THEN FALSE ELSE bank_verified END WHERE id=$1`,
-				id, in.Type, in.Name, in.Address, in.City, in.PIN, in.Contact, in.Mobile, in.Email, in.GSTRegistered, nullIfEmpty(in.GSTIN), nullIfEmpty(in.PAN), in.StateCode, in.MSME, in.Udyam,
-				in.BankHolder, in.Terms, acctEnc, last4, in.IFSC, proofID, resent, in.msmeFileID); err != nil {
-				return err
-			}
-			act := "Vendor edited"
-			if resent {
-				act = "Vendor edited, sent for re-verification"
-			}
-			if err := auditlog.Write(r.Context(), tx, u, "Vendors", act, code, in.Name); err != nil {
-				return err
-			}
-			if _, err := tx.Exec(r.Context(), `DELETE FROM vendor_sub_category WHERE vendor_id=$1`, id); err != nil {
-				return err
-			}
-			if _, err := tx.Exec(r.Context(), `DELETE FROM vendor_bill_type WHERE vendor_id=$1`, id); err != nil {
-				return err
-			}
-		}
-		if in.Type == "goods" && chi.URLParam(r, "id") != "" {
-			if _, err := tx.Exec(r.Context(), `INSERT INTO vendor_sub_category(vendor_id,sub_category_id) SELECT $1, unnest($2::bigint[]) ON CONFLICT DO NOTHING`, id, in.SubCategoryIDs); err != nil {
-				return err
-			}
-		} else if chi.URLParam(r, "id") != "" {
-			if _, err := tx.Exec(r.Context(), `INSERT INTO vendor_bill_type(vendor_id,bill_type_id) SELECT $1, unnest($2::bigint[]) ON CONFLICT DO NOTHING`, id, in.BillTypeIDs); err != nil {
+			var err error
+			if code, resent, err = s.Update(r.Context(), tx, u, id, &in, proofID, acctEnc, last4); err != nil {
 				return err
 			}
 		}
@@ -402,6 +367,58 @@ func (s *Service) save(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 	return httpjson.OK(w, map[string]any{"id": id, "code": code, "sent_for_verification": resent})
+}
+
+// Update saves a validated edit of vendor id and replaces what it supplies. Blank address, contact, bank holder,
+// account and IFSC keep what is on file. A change to the bank account, GST details or PAN sends it back to Finance.
+func (s *Service) Update(ctx context.Context, tx pgx.Tx, u *access.User, id int64, in *Input, proofID *int64, acctEnc, last4 string) (string, bool, error) {
+	var code, oldGSTIN, oldPAN string
+	var oldGST bool
+	if err := tx.QueryRow(ctx, `SELECT code, gst_registered, coalesce(gstin,''), coalesce(pan,'') FROM vendor WHERE id=$1 FOR UPDATE`, id).Scan(&code, &oldGST, &oldGSTIN, &oldPAN); err != nil {
+		return "", false, err
+	}
+	resent := in.BankAccount != "" || oldGST != in.GSTRegistered || oldGSTIN != in.GSTIN || oldPAN != in.PAN
+	if _, err := tx.Exec(ctx, `UPDATE vendor SET vendor_type=$2, legal_name=$3, address=coalesce(nullif($4,''),address), city=coalesce(nullif($5,''),city), pin=coalesce(nullif($6,''),pin),
+		contact_person=coalesce(nullif($7,''),contact_person), mobile=$8, email=$9, gst_registered=$10, gstin=$11, pan=$12, state_code=$13, msme=$14, udyam=$15,
+		bank_holder=coalesce(nullif($16,''),bank_holder), payment_terms=$17,
+		bank_account_enc=CASE WHEN $18<>'' THEN $18 ELSE bank_account_enc END, bank_account_last4=CASE WHEN $19<>'' THEN $19 ELSE bank_account_last4 END,
+		ifsc=CASE WHEN $20<>'' THEN $20 ELSE ifsc END, bank_proof_file_id=coalesce($21,bank_proof_file_id), msme_file_id=coalesce($23,msme_file_id),
+		bank_verified=CASE WHEN $22 THEN FALSE ELSE bank_verified END WHERE id=$1`,
+		id, in.Type, in.Name, in.Address, in.City, in.PIN, in.Contact, in.Mobile, in.Email, in.GSTRegistered, nullIfEmpty(in.GSTIN), nullIfEmpty(in.PAN), in.StateCode, in.MSME, in.Udyam,
+		in.BankHolder, in.Terms, acctEnc, last4, in.IFSC, proofID, resent, in.msmeFileID); err != nil {
+		return "", false, err
+	}
+	act := "Vendor edited"
+	if resent {
+		act = "Vendor edited, sent for re-verification"
+	}
+	if err := auditlog.Write(ctx, tx, u, "Vendors", act, code, in.Name); err != nil {
+		return "", false, err
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM vendor_sub_category WHERE vendor_id=$1`, id); err != nil {
+		return "", false, err
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM vendor_bill_type WHERE vendor_id=$1`, id); err != nil {
+		return "", false, err
+	}
+	if in.Type == "goods" {
+		_, err := tx.Exec(ctx, `INSERT INTO vendor_sub_category(vendor_id,sub_category_id) SELECT $1, unnest($2::bigint[]) ON CONFLICT DO NOTHING`, id, in.SubCategoryIDs)
+		return code, resent, err
+	}
+	_, err := tx.Exec(ctx, `INSERT INTO vendor_bill_type(vendor_id,bill_type_id) SELECT $1, unnest($2::bigint[]) ON CONFLICT DO NOTHING`, id, in.BillTypeIDs)
+	return code, resent, err
+}
+
+// Seal encrypts a bank account number for storage and gives its last four digits ("" for none).
+func (s *Service) Seal(acct string) (string, string, error) {
+	if acct == "" {
+		return "", "", nil
+	}
+	enc, err := s.Box.Seal(acct)
+	if err != nil {
+		return "", "", err
+	}
+	return enc, acct[len(acct)-4:], nil
 }
 
 func (s *Service) verify(w http.ResponseWriter, r *http.Request) error {

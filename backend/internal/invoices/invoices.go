@@ -38,6 +38,7 @@ type Service struct {
 func (s *Service) Routes(r chi.Router) {
 	r.Get("/invoices", httpjson.Wrap(s.list))
 	r.Get("/invoices/{id}", httpjson.Wrap(s.get))
+	r.Post("/invoices/bulk", httpjson.Wrap(s.bulk))
 	r.Post("/invoices/{id}/match", httpjson.Wrap(s.match))
 	r.Post("/invoices/{id}/send-back", httpjson.Wrap(s.sendBack))
 	r.Post("/invoices/{id}/approve-payment", httpjson.Wrap(s.approvePayment))
@@ -320,28 +321,31 @@ func (s *Service) match(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 	in.Remark = strings.TrimSpace(in.Remark)
-	err = pgx.BeginFunc(r.Context(), s.DB, func(tx pgx.Tx) error {
-		x, g, err := lockInvoice(r.Context(), tx, u, id, documents.InvReceived, "ap", access.Match)
-		if err != nil {
-			return err
-		}
-		act := "Three-way match confirmed"
-		if !x.WithinTol {
-			if len(in.Remark) < 5 {
-				return httpjson.Bad("The invoice is %s %s than the goods received. Write a remark to accept the difference, or send it back.",
-					money.INR(abs(x.Difference)), map[bool]string{true: "more", false: "less"}[x.Difference > 0])
-			}
-			act = "Difference accepted"
-		}
-		if _, err := tx.Exec(r.Context(), `UPDATE invoice SET status='MATCHED', match_remark=$2, matched_by=$3, matched_at=now() WHERE id=$1`, id, in.Remark, u.ID); err != nil {
-			return err
-		}
-		return auditlog.Doc(r.Context(), tx, u, g.Name, x.DocumentID, x.DocNumber, "Invoices", act+" · invoice "+x.Number, in.Remark)
-	})
+	err = pgx.BeginFunc(r.Context(), s.DB, func(tx pgx.Tx) error { return matchOne(r.Context(), tx, u, id, in.Remark) })
 	if err != nil {
 		return err
 	}
 	return httpjson.OK(w, map[string]string{"message": "Matched and sent to Finance"})
+}
+
+// matchOne confirms the three-way match of one invoice. A difference beyond the tolerance needs a remark.
+func matchOne(ctx context.Context, tx pgx.Tx, u *access.User, id int64, remark string) error {
+	x, g, err := lockInvoice(ctx, tx, u, id, documents.InvReceived, "ap", access.Match)
+	if err != nil {
+		return err
+	}
+	act := "Three-way match confirmed"
+	if !x.WithinTol {
+		if len(remark) < 5 {
+			return httpjson.Bad("Invoice %s is %s %s than the goods received. Open it and write a remark to accept the difference, or send it back.",
+				x.Number, money.INR(abs(x.Difference)), map[bool]string{true: "more", false: "less"}[x.Difference > 0])
+		}
+		act = "Difference accepted"
+	}
+	if _, err := tx.Exec(ctx, `UPDATE invoice SET status='MATCHED', match_remark=$2, matched_by=$3, matched_at=now() WHERE id=$1`, id, remark, u.ID); err != nil {
+		return err
+	}
+	return auditlog.Doc(ctx, tx, u, g.Name, x.DocumentID, x.DocNumber, "Invoices", act+" · invoice "+x.Number, remark)
 }
 
 // sendBack voids the goods receipt and its invoice, and reopens the PO for the store to receive again.
@@ -399,24 +403,7 @@ func (s *Service) approvePayment(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
-	err = pgx.BeginFunc(r.Context(), s.DB, func(tx pgx.Tx) error {
-		x, g, err := lockInvoice(r.Context(), tx, u, id, documents.InvMatched, "finance", access.Pay)
-		if err != nil {
-			return err
-		}
-		due, _ := payBy(*x, st)
-		if _, err := tx.Exec(r.Context(), `UPDATE invoice SET status='PAY_APPROVED', pay_approved_by=$2, pay_approved_at=now(), due_date=$3 WHERE id=$1`, id, u.ID, due); err != nil {
-			return err
-		}
-		note := "Pay by " + due
-		if x.VendorMSME {
-			note += " (MSME vendor)"
-		}
-		if !x.VendorGST {
-			note += " · unregistered vendor"
-		}
-		return auditlog.Doc(r.Context(), tx, u, g.Name, x.DocumentID, x.DocNumber, "Payments", "Payment approved · invoice "+x.Number, note)
-	})
+	err = pgx.BeginFunc(r.Context(), s.DB, func(tx pgx.Tx) error { return approveOne(r.Context(), tx, u, st, id, false) })
 	if err != nil {
 		return err
 	}
@@ -425,6 +412,75 @@ func (s *Service) approvePayment(w http.ResponseWriter, r *http.Request) error {
 		msg = "Payment approved."
 	}
 	return httpjson.OK(w, map[string]string{"message": msg})
+}
+
+// approveOne approves one matched invoice for payment and sets its pay-by date.
+func approveOne(ctx context.Context, tx pgx.Tx, u *access.User, st flowsettings.Settings, id int64, bulk bool) error {
+	x, g, err := lockInvoice(ctx, tx, u, id, documents.InvMatched, "finance", access.Pay)
+	if err != nil {
+		return err
+	}
+	due, _ := payBy(*x, st)
+	if _, err := tx.Exec(ctx, `UPDATE invoice SET status='PAY_APPROVED', pay_approved_by=$2, pay_approved_at=now(), due_date=$3 WHERE id=$1`, id, u.ID, due); err != nil {
+		return err
+	}
+	note := "Pay by " + due
+	if x.VendorMSME {
+		note += " (MSME vendor)"
+	}
+	if !x.VendorGST {
+		note += " · unregistered vendor"
+	}
+	if bulk {
+		note += " · approved in bulk"
+	}
+	return auditlog.Doc(ctx, tx, u, g.Name, x.DocumentID, x.DocNumber, "Payments", "Payment approved · invoice "+x.Number, note)
+}
+
+type bulkResult struct {
+	ID      int64  `json:"id"`
+	OK      bool   `json:"ok"`
+	Message string `json:"message"`
+}
+
+// bulk matches (Accounts Payable) or approves for payment (Finance) several invoices, one transaction each.
+// A bulk match accepts only invoices within the tolerance; a difference still needs its own remark.
+func (s *Service) bulk(w http.ResponseWriter, r *http.Request) error {
+	u := access.From(r)
+	var in struct {
+		Action string  `json:"action"`
+		IDs    []int64 `json:"ids"`
+	}
+	if err := httpjson.Decode(r, &in); err != nil {
+		return err
+	}
+	if in.Action != "match" && in.Action != "approve-payment" {
+		return httpjson.Bad("Choose match or approve payment.")
+	}
+	if len(in.IDs) == 0 {
+		return httpjson.Bad("Select at least one invoice.")
+	}
+	st, err := flowsettings.Load(r.Context(), s.DB)
+	if err != nil {
+		return err
+	}
+	res := []bulkResult{}
+	done := 0
+	for _, id := range in.IDs {
+		err := pgx.BeginFunc(r.Context(), s.DB, func(tx pgx.Tx) error {
+			if in.Action == "match" {
+				return matchOne(r.Context(), tx, u, id, "")
+			}
+			return approveOne(r.Context(), tx, u, st, id, true)
+		})
+		if err != nil {
+			res = append(res, bulkResult{ID: id, Message: err.Error()})
+			continue
+		}
+		done++
+		res = append(res, bulkResult{ID: id, OK: true, Message: map[string]string{"match": "Matched", "approve-payment": "Payment approved"}[in.Action]})
+	}
+	return httpjson.OK(w, map[string]any{"done": done, "failed": len(in.IDs) - done, "results": res})
 }
 
 // markPaid is the Admin's fallback, for example while Zoho is disconnected. Normally payment is read back from Zoho.

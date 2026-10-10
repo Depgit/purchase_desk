@@ -481,6 +481,29 @@ func (s *Service) list(w http.ResponseWriter, r *http.Request) error {
 	return httpjson.OK(w, out)
 }
 
+// stepRight is the right each flow step needs to act. Steps not listed (requester, corporate approvers fixed on the
+// request) are not looked up.
+var stepRight = map[string]string{"l1": access.Approve, "l2": access.Approve, "cc": access.Approve, "preop": access.Approve,
+	"purchase": access.IssuePO, "store": access.Receive, "wh": ""}
+
+// ownerPeople names the active users who can take the document's next step at its property. nil means the step is not
+// looked up; an empty list means nobody holds that role there, so the document is stuck until the Admin gives someone access.
+func (s *Service) ownerPeople(ctx context.Context, d *documents.Doc) ([]string, error) {
+	step := d.Owner()
+	right, ok := stepRight[step]
+	if !ok {
+		return nil, nil
+	}
+	rows, err := s.DB.Query(ctx, `SELECT DISTINCT u.name FROM app_user u JOIN user_role ur ON ur.user_id=u.id JOIN role r ON r.id=ur.role_id
+		WHERE u.active AND r.active AND r.step=$1 AND ($2='' OR $2=ANY(r.rights))
+		AND (ur.scope='all' OR (ur.scope='clusters' AND $3::bigint=ANY(ur.cluster_ids)) OR (ur.scope='properties' AND $4::bigint=ANY(ur.property_ids)))
+		ORDER BY 1`, step, right, d.ClusterID, d.PropertyID)
+	if err != nil {
+		return nil, err
+	}
+	return pgx.CollectRows(rows, pgx.RowTo[string])
+}
+
 type receiptOut struct {
 	ID         int64     `json:"id"`
 	Number     string    `json:"number"`
@@ -602,7 +625,38 @@ func (s *Service) detail(w http.ResponseWriter, r *http.Request) error {
 			actions = append(actions, "receive_transfer")
 		}
 	}
-	return httpjson.OK(w, map[string]any{"document": rows[0], "log": logs, "receipts": receipts, "actions": actions})
+	// A request is split into one PR per vendor when it is raised. The others from the same submission share its requester,
+	// property and created_at (one transaction), so each PR can show where the rest of the order went.
+	type sibling struct {
+		ID       int64  `json:"id"`
+		Number   string `json:"number"`
+		PONumber string `json:"po_number"`
+		Vendor   string `json:"vendor"`
+		Items    int    `json:"items"`
+		Status   string `json:"status"`
+	}
+	siblings := []sibling{}
+	if d.Kind == "purchase" {
+		docs, err := documents.LoadMany(r.Context(), s.DB, `WHERE d.kind='purchase' AND d.id<>$1 AND d.parent_id IS NULL AND d.requester_id=$2 AND d.property_id=$3 AND d.created_at=$4 ORDER BY d.id`,
+			d.ID, d.RequesterID, d.PropertyID, d.CreatedAt)
+		if err != nil {
+			return err
+		}
+		for _, x := range docs {
+			n := 0
+			for _, l := range x.Lines {
+				if l.Qty > 0 {
+					n++
+				}
+			}
+			siblings = append(siblings, sibling{x.ID, x.Number, x.PONumber, x.Vendor, n, x.StatusLabel()})
+		}
+	}
+	owners, err := s.ownerPeople(r.Context(), d)
+	if err != nil {
+		return err
+	}
+	return httpjson.OK(w, map[string]any{"document": rows[0], "log": logs, "receipts": receipts, "actions": actions, "raised_with": siblings, "owner_people": owners})
 }
 
 func (s *Service) resubmit(w http.ResponseWriter, r *http.Request) error {

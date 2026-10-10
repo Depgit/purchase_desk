@@ -23,6 +23,8 @@ interface Detail {
   log: { at: string; user: string; role: string; action: string; note: string }[]
   receipts: { id: number; number: string; delivery_no: number; received_by: string; received_at: string; photo_file_ids: number[]; voided: boolean; void_reason: string; invoice_id: number | null; lines: { line_id: number; qty: number }[] }[]
   actions: string[]
+  raised_with: { id: number; number: string; po_number: string; vendor: string; items: number; status: string }[]
+  owner_people: string[] | null
 }
 
 function stepper(d: Doc, invoices: Invoice[]) {
@@ -71,6 +73,8 @@ export function DocumentPage() {
       {d.status === 'RETURNED' && <p className="note warn"><b>Returned:</b> {d.return_reason}{d.return_note ? ' · ' + d.return_note : ''}</p>}
       {d.status === 'REJECTED' && <p className="note bad"><b>Rejected:</b> {d.return_reason}{d.return_note ? ' · ' + d.return_note : ''}</p>}
       {d.bill_flags?.map((f) => <p key={f} className="note warn">{f}</p>)}
+      {data.raised_with?.length > 0 && <div className="note"><b>This order was split by vendor.</b> The request had {live.length + data.raised_with.reduce((t, x) => t + x.items, 0)} items; {d.vendor} supplies the {live.length} below. The rest are on {data.raised_with.length === 1 ? 'this order' : 'these orders'}:
+        <ul>{data.raised_with.map((x) => <li key={x.id}><Link to={'/documents/' + x.id}>{x.po_number || x.number}</Link> · {x.vendor} · {x.items} item{x.items === 1 ? '' : 's'} · {x.status}</li>)}</ul></div>}
       {d.is_transfer && ['PO_ISSUED', 'WH_SENT'].includes(d.status) && (d.delivery
         ? <p className={'note ' + (d.status === 'WH_SENT' ? 'ok' : '')}><b>{d.status === 'WH_SENT' ? 'On the way' : 'Delivery scheduled'}{d.delivery.version > 1 ? ' (rescheduled)' : ''}:</b> {day(d.delivery.date)}, {d.delivery.slot} · {d.delivery.partner}{d.delivery.vehicle ? ' · vehicle ' + d.delivery.vehicle : ''} · {d.delivery.driver}, {d.delivery.phone}{d.delivery.note ? ' · ' + d.delivery.note : ''}</p>
         : d.wait_until ? <p className="note warn"><b>The warehouse is waiting for stock.</b> Expected by {day(d.wait_until)}{d.wait_note ? ' · ' + d.wait_note : ''}.</p>
@@ -168,7 +172,10 @@ function ActionPanel({ detail, onDone }: { detail: Detail; onDone: () => void })
   if (acts.includes('receive_transfer')) return <ReceiveTransferPanel doc={d} onDone={onDone} />
   const owner = d.owner_name
   if (!owner) return null
-  return <p className="note">Next step is with the <b>{owner}</b>.</p>
+  const people = detail.owner_people
+  // Nobody holding the step's role at this property means the document cannot move until the Admin gives someone access.
+  if (people && !people.length) return <p className="note bad"><b>No one can take the next step.</b> It is with the {owner}, but no active user has that role with access to {d.property}. The System Admin should give a user the {owner} role for this property (Settings → Users &amp; Rights).</p>
+  return <p className="note">Next step is with the <b>{owner}</b>{people?.length ? <>: {people.slice(0, 5).join(', ')}{people.length > 5 ? ` and ${people.length - 5} more` : ''}</> : ''}.</p>
 }
 
 function ApprovePanel({ doc, canRoute, canPreop, onDone }: { doc: Doc; canRoute: boolean; canPreop: boolean; onDone: () => void }) {

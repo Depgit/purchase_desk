@@ -518,6 +518,22 @@ func Create(ctx context.Context, tx pgx.Tx, u *access.User, in *SKUInput) (strin
 	return code, auditlog.Write(ctx, tx, u, "Items", "SKU added", code, strings.TrimSpace(in.BrandName+" "+in.ItemName))
 }
 
+// Update saves a validated edit of SKU id. The sub-category, and so the SKU code, stays as it is.
+func Update(ctx context.Context, tx pgx.Tx, u *access.User, id int64, in *SKUInput) (string, error) {
+	if err := ensureBrand(ctx, tx, u, in); err != nil {
+		return "", err
+	}
+	var old, code string
+	if err := tx.QueryRow(ctx, `SELECT k.code||' · '||concat_ws(' ', b.name, k.item_name)||' · '||k.gst_pct||'%' FROM sku k LEFT JOIN brand b ON b.id=k.brand_id WHERE k.id=$1`, id).Scan(&old); err != nil {
+		return "", err
+	}
+	if err := tx.QueryRow(ctx, `UPDATE sku SET brand_id=$2, item_name=$3, pack_size_id=$4, gst_pct=$5, hsn=$6, scope=$7, cluster_ids=$8, property_ids=$9, tds_section=$10, tds_pct=$11 WHERE id=$1 RETURNING code`,
+		id, in.brandRef(), in.ItemName, in.PackSizeID, in.GST, in.HSN, in.Scope, in.ClusterIDs, in.PropertyIDs, in.TDSSection, in.tdsPct).Scan(&code); err != nil {
+		return "", err
+	}
+	return code, auditlog.Write(ctx, tx, u, "Items", "SKU edited", code, fmt.Sprintf("%s → %s · %v%%", old, strings.TrimSpace(in.BrandName+" "+in.ItemName), in.GST))
+}
+
 func (s *Service) saveSKU(w http.ResponseWriter, r *http.Request) error {
 	u := access.From(r)
 	if err := access.NeedRight(u, access.Masters, "edit masters"); err != nil {
@@ -548,18 +564,9 @@ func (s *Service) saveSKU(w http.ResponseWriter, r *http.Request) error {
 			code, err = Create(r.Context(), tx, u, &in)
 			return err
 		}
-		if err := ensureBrand(r.Context(), tx, u, &in); err != nil {
-			return err
-		}
-		var old string
-		if err := tx.QueryRow(r.Context(), `SELECT k.code||' · '||concat_ws(' ', b.name, k.item_name)||' · '||k.gst_pct||'%' FROM sku k LEFT JOIN brand b ON b.id=k.brand_id WHERE k.id=$1`, id).Scan(&old); err != nil {
-			return err
-		}
-		if err := tx.QueryRow(r.Context(), `UPDATE sku SET brand_id=$2, item_name=$3, pack_size_id=$4, gst_pct=$5, hsn=$6, scope=$7, cluster_ids=$8, property_ids=$9, tds_section=$10, tds_pct=$11 WHERE id=$1 RETURNING code`,
-			id, in.brandRef(), in.ItemName, in.PackSizeID, in.GST, in.HSN, in.Scope, in.ClusterIDs, in.PropertyIDs, in.TDSSection, in.tdsPct).Scan(&code); err != nil {
-			return err
-		}
-		return auditlog.Write(r.Context(), tx, u, "Items", "SKU edited", code, fmt.Sprintf("%s → %s · %v%%", old, strings.TrimSpace(in.BrandName+" "+in.ItemName), in.GST))
+		var err error
+		code, err = Update(r.Context(), tx, u, id, &in)
+		return err
 	})
 	if err != nil {
 		return err

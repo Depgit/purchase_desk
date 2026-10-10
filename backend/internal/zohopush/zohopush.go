@@ -297,8 +297,9 @@ func payload(b *bill, taxes map[float64]string) (map[string]any, []string) {
 	tags := []map[string]string{{"tag_id": b.TagID, "tag_option_id": b.TagOptionID}}
 	items := []map[string]any{}
 	computed := 0.0
+	// A 0% line carries the mapped GST0 / IGST0 when there is one; without that mapping it goes with no tax.
 	addTax := func(it map[string]any, g float64) {
-		if reg && g > 0 {
+		if reg && (g > 0 || taxes[g] != "") {
 			it["tax_id"] = taxes[g]
 		}
 	}

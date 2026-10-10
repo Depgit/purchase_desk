@@ -439,7 +439,9 @@ func (s *Service) listMappings(w http.ResponseWriter, r *http.Request) error {
 	return httpjson.OK(w, out)
 }
 
-type mappingIn struct {
+// MappingInput is one "who supplies what where": a vendor for one SKU or a whole sub-category, at all properties or
+// at the listed clusters and properties.
+type MappingInput struct {
 	VendorID      int64   `json:"vendor_id"`
 	Level         string  `json:"level"`
 	SKUID         int64   `json:"sku_id"`
@@ -448,73 +450,70 @@ type mappingIn struct {
 	ClusterIDs    []int64 `json:"cluster_ids"`
 	PropertyIDs   []int64 `json:"property_ids"`
 	Estimate      bool    `json:"estimate_allowed"`
+
+	props []int64 // the properties it covers, set by CheckMapping
+	vType string
 }
 
-func (s *Service) saveMapping(w http.ResponseWriter, r *http.Request) error {
-	u := access.From(r)
-	if err := access.NeedRight(u, access.Masters, "edit masters"); err != nil {
-		return err
-	}
-	var in mappingIn
-	if err := httpjson.Decode(r, &in); err != nil {
-		return err
-	}
-	ctx := r.Context()
-	id := int64(0)
-	if chi.URLParam(r, "id") != "" {
-		var err error
-		if id, err = httpjson.ID(r, "id"); err != nil {
-			return err
-		}
+// CheckMapping checks a new mapping (id 0) or an edit of mapping id. An edit may also move the mapping to another
+// vendor or item; anything left empty keeps what the mapping has. One item has one vendor at a property, so a clash
+// with another active mapping is refused.
+func CheckMapping(ctx context.Context, q database.Q, id int64, in *MappingInput) error {
+	if id != 0 {
+		var vendorID int64
+		var level string
 		var sku, sc *int64
-		if err := s.DB.QueryRow(ctx, `SELECT vendor_id, level, sku_id, sub_category_id FROM vendor_mapping WHERE id=$1 AND active`, id).Scan(&in.VendorID, &in.Level, &sku, &sc); err != nil {
+		if err := q.QueryRow(ctx, `SELECT vendor_id, level, sku_id, sub_category_id FROM vendor_mapping WHERE id=$1 AND active`, id).Scan(&vendorID, &level, &sku, &sc); err != nil {
 			return httpjson.Bad("This mapping is inactive. Mark it active first.")
 		}
-		if sku != nil {
+		if in.VendorID == 0 {
+			in.VendorID = vendorID
+		}
+		if in.Level == "" {
+			in.Level = level
+		}
+		if in.Level == level && in.SKUID == 0 && sku != nil {
 			in.SKUID = *sku
 		}
-		if sc != nil {
+		if in.Level == level && in.SubCategoryID == 0 && sc != nil {
 			in.SubCategoryID = *sc
 		}
 	}
 	if in.Level != "sku" && in.Level != "sc" {
 		return httpjson.Bad("Map by whole sub-category or by one SKU.")
 	}
-	var vType string
-	if err := s.DB.QueryRow(ctx, `SELECT vendor_type FROM vendor WHERE id=$1 AND active`, in.VendorID).Scan(&vType); err != nil || (vType != "goods" && vType != "warehouse") || !releasephase.VendorTypeOn(vType) {
+	if err := q.QueryRow(ctx, `SELECT vendor_type FROM vendor WHERE id=$1 AND active`, in.VendorID).Scan(&in.vType); err != nil || (in.vType != "goods" && in.vType != "warehouse") || !releasephase.VendorTypeOn(in.vType) {
 		return httpjson.Bad("Choose an active goods vendor.")
 	}
 	if in.Level == "sku" {
-		if err := s.DB.QueryRow(ctx, `SELECT sub_category_id FROM sku WHERE id=$1`, in.SKUID).Scan(&in.SubCategoryID); err != nil {
+		if err := q.QueryRow(ctx, `SELECT sub_category_id FROM sku WHERE id=$1`, in.SKUID).Scan(&in.SubCategoryID); err != nil {
 			return httpjson.Bad("Choose the SKU.")
 		}
 	} else if in.SubCategoryID == 0 {
 		return httpjson.Bad("Choose the sub-category.")
 	}
-	props := []int64{}
+	in.props = []int64{}
 	if !in.All {
-		rows, err := s.DB.Query(ctx, `SELECT id FROM property WHERE (active AND kind='live' AND cluster_id = ANY($1)) OR id = ANY($2)`, in.ClusterIDs, in.PropertyIDs)
+		rows, err := q.Query(ctx, `SELECT id FROM property WHERE (active AND kind='live' AND cluster_id = ANY($1)) OR id = ANY($2)`, in.ClusterIDs, in.PropertyIDs)
 		if err != nil {
 			return err
 		}
-		props, err = pgx.CollectRows(rows, pgx.RowTo[int64])
-		if err != nil {
+		if in.props, err = pgx.CollectRows(rows, pgx.RowTo[int64]); err != nil {
 			return err
 		}
-		if len(props) == 0 {
+		if len(in.props) == 0 {
 			return httpjson.Bad("Tick at least one cluster or property.")
 		}
 	}
-	// Block a second vendor for the same SKU or sub-category at the same property.
 	var clashVendor string
 	var clashProps []string
-	err := s.DB.QueryRow(ctx, `SELECT v.legal_name, coalesce(array_agg(DISTINCT p.name) FILTER (WHERE p.id IS NOT NULL),'{}')
+	err := q.QueryRow(ctx, `SELECT v.legal_name, coalesce(array_agg(DISTINCT p.name) FILTER (WHERE p.id IS NOT NULL),'{}')
 		FROM vendor_mapping m JOIN vendor v ON v.id=m.vendor_id
 		LEFT JOIN vendor_mapping_property mp ON mp.mapping_id=m.id AND ($5 OR mp.property_id = ANY($6))
 		LEFT JOIN property p ON p.id=mp.property_id
 		WHERE m.active AND m.id<>$1 AND m.level=$2 AND (($2='sku' AND m.sku_id=$3) OR ($2='sc' AND m.sub_category_id=$4))
 		  AND (m.all_properties OR $5 OR EXISTS (SELECT 1 FROM vendor_mapping_property x WHERE x.mapping_id=m.id AND x.property_id = ANY($6)))
-		GROUP BY v.legal_name LIMIT 1`, id, in.Level, in.SKUID, in.SubCategoryID, in.All, props).Scan(&clashVendor, &clashProps)
+		GROUP BY v.legal_name LIMIT 1`, id, in.Level, in.SKUID, in.SubCategoryID, in.All, in.props).Scan(&clashVendor, &clashProps)
 	if err == nil {
 		where := "these properties"
 		if len(clashProps) > 0 && len(clashProps) <= 3 {
@@ -526,46 +525,85 @@ func (s *Service) saveMapping(w http.ResponseWriter, r *http.Request) error {
 	} else if err != pgx.ErrNoRows {
 		return err
 	}
+	return nil
+}
+
+// SaveMapping saves a mapping that passed CheckMapping: a new one when id is 0, else an edit of its properties and rate rule.
+func SaveMapping(ctx context.Context, tx pgx.Tx, u *access.User, id int64, in *MappingInput) (int64, error) {
 	est := in.Estimate && in.Level == "sc"
-	err = pgx.BeginFunc(ctx, s.DB, func(tx pgx.Tx) error {
-		if id == 0 {
-			var sku, sc any
-			if in.Level == "sku" {
-				sku = in.SKUID
-			} else {
-				sc = in.SubCategoryID
-			}
-			if err := tx.QueryRow(ctx, `INSERT INTO vendor_mapping(vendor_id,level,sku_id,sub_category_id,all_properties,estimate_allowed,created_by) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id`,
-				in.VendorID, in.Level, sku, sc, in.All, est, u.ID).Scan(&id); err != nil {
-				return err
-			}
-			if vType == "goods" {
-				if _, err := tx.Exec(ctx, `INSERT INTO vendor_sub_category(vendor_id,sub_category_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`, in.VendorID, in.SubCategoryID); err != nil {
-					return err
-				}
-			}
+	act := "Mapping changed"
+	if id == 0 {
+		act = "Vendor mapped"
+		var sku, sc any
+		if in.Level == "sku" {
+			sku = in.SKUID
 		} else {
-			if _, err := tx.Exec(ctx, `UPDATE vendor_mapping SET all_properties=$2, estimate_allowed=$3 WHERE id=$1`, id, in.All, est); err != nil {
-				return err
+			sc = in.SubCategoryID
+		}
+		if err := tx.QueryRow(ctx, `INSERT INTO vendor_mapping(vendor_id,level,sku_id,sub_category_id,all_properties,estimate_allowed,created_by) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id`,
+			in.VendorID, in.Level, sku, sc, in.All, est, u.ID).Scan(&id); err != nil {
+			return 0, err
+		}
+		if in.vType == "goods" {
+			if _, err := tx.Exec(ctx, `INSERT INTO vendor_sub_category(vendor_id,sub_category_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`, in.VendorID, in.SubCategoryID); err != nil {
+				return 0, err
 			}
-			if _, err := tx.Exec(ctx, `DELETE FROM vendor_mapping_property WHERE mapping_id=$1`, id); err != nil {
-				return err
+		}
+	} else {
+		var sku, sc any
+		if in.Level == "sku" {
+			sku = in.SKUID
+		} else {
+			sc = in.SubCategoryID
+		}
+		if _, err := tx.Exec(ctx, `UPDATE vendor_mapping SET vendor_id=$2, level=$3, sku_id=$4, sub_category_id=$5, all_properties=$6, estimate_allowed=$7 WHERE id=$1`,
+			id, in.VendorID, in.Level, sku, sc, in.All, est); err != nil {
+			return 0, err
+		}
+		if in.vType == "goods" {
+			if _, err := tx.Exec(ctx, `INSERT INTO vendor_sub_category(vendor_id,sub_category_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`, in.VendorID, in.SubCategoryID); err != nil {
+				return 0, err
 			}
 		}
-		if !in.All {
-			if _, err := tx.Exec(ctx, `INSERT INTO vendor_mapping_property(mapping_id,property_id) SELECT $1, unnest($2::bigint[])`, id, props); err != nil {
-				return err
-			}
+		if _, err := tx.Exec(ctx, `DELETE FROM vendor_mapping_property WHERE mapping_id=$1`, id); err != nil {
+			return 0, err
 		}
-		where := "all properties"
-		if !in.All {
-			where = fmt.Sprintf("%d properties", len(props))
+	}
+	if !in.All {
+		if _, err := tx.Exec(ctx, `INSERT INTO vendor_mapping_property(mapping_id,property_id) SELECT $1, unnest($2::bigint[])`, id, in.props); err != nil {
+			return 0, err
 		}
-		act := "Vendor mapped"
-		if chi.URLParam(r, "id") != "" {
-			act = "Mapping changed"
+	}
+	where := "all properties"
+	if !in.All {
+		where = fmt.Sprintf("%d properties", len(in.props))
+	}
+	return id, auditlog.Write(ctx, tx, u, "Vendor Mapping", act, fmt.Sprintf("M%03d", id), fmt.Sprintf("vendor %d · %s · %s", in.VendorID, in.Level, where))
+}
+
+func (s *Service) saveMapping(w http.ResponseWriter, r *http.Request) error {
+	u := access.From(r)
+	if err := access.NeedRight(u, access.Masters, "edit masters"); err != nil {
+		return err
+	}
+	var in MappingInput
+	if err := httpjson.Decode(r, &in); err != nil {
+		return err
+	}
+	id := int64(0)
+	if chi.URLParam(r, "id") != "" {
+		var err error
+		if id, err = httpjson.ID(r, "id"); err != nil {
+			return err
 		}
-		return auditlog.Write(ctx, tx, u, "Vendor Mapping", act, fmt.Sprintf("M%03d", id), fmt.Sprintf("vendor %d · %s · %s", in.VendorID, in.Level, where))
+	}
+	if err := CheckMapping(r.Context(), s.DB, id, &in); err != nil {
+		return err
+	}
+	err := pgx.BeginFunc(r.Context(), s.DB, func(tx pgx.Tx) error {
+		var err error
+		id, err = SaveMapping(r.Context(), tx, u, id, &in)
+		return err
 	})
 	if err != nil {
 		return err

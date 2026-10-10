@@ -45,6 +45,8 @@ H="Authorization: Zoho-oauthtoken $AT"
 | 12 | Options of a reporting tag (one call per tag) | `GET /reportingtags/options?tag_id={tag_id}` (list under key `options`) | `ReportingTags` |
 | 13b | Items, every page (active and inactive), for the Items tab | `GET /items?page=N&per_page=200` | `Items` |
 | 13 | Look for an existing bill before creating one (used when the custom field is missing) | `GET /bills?vendor_id=&bill_number=` | `FindBill` |
+| 13c | Download from Zoho (Excel), Settings → Zoho Books: every bill, every page | `GET /bills?page=N&per_page=200` | `zohoexport` (`ListAll`) |
+| 13d | Download from Zoho (Excel): every journal, every page | `GET /journals?page=N&per_page=200` | `zohoexport` (`ListAll`) |
 
 ```bash
 curl -s "$B/organizations?$O" -H "$H"
@@ -83,7 +85,10 @@ Nothing below runs while `ZOHO_PUSH_ENABLED=false`, including the "Create in Zoh
 | 17 | Mark the bill open (only if Zoho left it as draft) | `POST /bills/{bill_id}/status/open` | `MarkBillOpen` | Not yet |
 | 18 | Create a vendor from verified details | `POST /contacts` | `CreateVendor` | Not yet |
 | 19 | Create an expense account | `POST /chartofaccounts` | `CreateAccount` | Not yet |
-| 20 | Add a property as a reporting tag option, under the tag chosen on the Connection tab | `PUT /reportingtags/{tag_id}/options` | `AddTagOption` | Not yet; check the body against the current option field names (`option_name`) before use |
+| 20 | Add a property as a reporting tag option, under the tag chosen on the Connection tab | `PUT /reportingtags/{tag_id}/options` (body `options[]` with `option_id`, `option_name`, `is_active`, `children`; the full list is sent back) | `AddTagOption` | Fixed 10 Oct 2026 to the documented body; first live use pending |
+| 20b | Activate a reporting tag (one created through the API starts as a draft) | `POST /reportingtags/{tag_id}/active` | `ActivateReportingTag` | First live use pending |
+| 20c | Create a Purchase Desk item in Zoho (Items tab, Create in Zoho): name = brand + item (pack), sku = SKU code, item_type purchases, goods or service, purchase account from the sub-category mapping, GST via item_tax_preferences (intra and inter) from the tax mapping, rate from the current rate card | `POST /items` | `CreateItem` | First live use pending |
+| 16b | Create a region reporting tag (named after the property's Zoho location) when Zoho has none, enabled on purchases and journals at line level; the property is then added as its option | `POST /reportingtags` | `CreateReportingTag` |
 | 21 | Monthly warehouse journal per property | `POST /journals` | `CreateJournal` | Not yet |
 
 Example bill as the app builds it. Open any invoice in Payments and click "Preview what is sent" to see the exact body.
