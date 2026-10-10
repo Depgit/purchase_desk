@@ -76,6 +76,7 @@ type bill struct {
 	Department    string
 
 	TagID, TagOptionID, LocationID string
+	TagName                        string
 	TagOK                          bool
 	TDS                            float64 // TDS on service lines, rounded to the rupee
 	TDSSections                    string
@@ -103,7 +104,7 @@ func load(ctx context.Context, q database.Q, invoiceID int64) (*bill, error) {
 		i.file_id, coalesce(i.zoho_bill_id,''), i.zoho_step, i.zoho_voids, i.match_remark,
 		p.id, p.name, p.kind, c.state_code, v.id, v.gst_registered, coalesce(v.gstin,''), v.state_code, coalesce(nullif(d.payment_terms,''), v.payment_terms),
 		d.bill_type_id, coalesce(bt.name, eh.name, ''), coalesce(to_char(d.period_start,'Mon YYYY'), cd.name, ''), coalesce(d.months,0),
-		coalesce(o.tag_id,''), coalesce(mp.tag_option_id,''), coalesce(mp.location_id,''), coalesce(o.active AND zt.active,false),
+		coalesce(o.tag_id,''), coalesce(mp.tag_option_id,''), coalesce(mp.location_id,''), coalesce(o.active AND zt.active,false), coalesce(zt.name,''),
 		coalesce(mv.contact_id,''), coalesce(zc.active,false), coalesce(ma.account_id,''), coalesce(za.active,false),
 		coalesce(z.connected,false), coalesce(z.bill_key_field,''), coalesce(cd.name,'')
 		FROM invoice i JOIN document d ON d.id=i.document_id JOIN property p ON p.id=i.property_id JOIN cluster k ON k.id=p.cluster_id JOIN city c ON c.id=k.city_id
@@ -117,7 +118,7 @@ func load(ctx context.Context, q database.Q, invoiceID int64) (*bill, error) {
 		&b.FileID, &b.ZohoBillID, &b.ZohoStep, &b.Voids, &b.MatchRemark,
 		&b.PropertyID, &b.Property, &b.PropertyKind, &b.PropertyState, &b.VendorID, &b.VendorGST, &b.VendorGSTIN, &b.VendorState, &b.Terms,
 		&b.BillTypeID, &b.BillType, &b.Period, &b.Months,
-		&b.TagID, &b.TagOptionID, &b.LocationID, &b.TagOK, &b.ContactID, &b.ContactOK, &b.BillAccount, &b.BillAccountOK, &b.Connected, &b.KeyField, &b.Department)
+		&b.TagID, &b.TagOptionID, &b.LocationID, &b.TagOK, &b.TagName, &b.ContactID, &b.ContactOK, &b.BillAccount, &b.BillAccountOK, &b.Connected, &b.KeyField, &b.Department)
 	if err == pgx.ErrNoRows {
 		return nil, httpjson.NotFound("Invoice")
 	}
@@ -521,6 +522,37 @@ func (s *Service) push(w http.ResponseWriter, r *http.Request) error {
 	return httpjson.OK(w, map[string]any{"pushed": ok, "failed": len(in.IDs) - ok, "results": res})
 }
 
+// tagLevelRefused reports Zoho's refusal of a reporting tag at the level it was sent (bill or line).
+func tagLevelRefused(err error) bool {
+	m := strings.ToLower(err.Error())
+	return strings.Contains(m, "reporting tag") && strings.Contains(m, "access to be associated")
+}
+
+// tagsAt copies a bill keeping the reporting tags only on its lines ("line") or only on the bill ("bill").
+func tagsAt(p map[string]any, level string) map[string]any {
+	out := map[string]any{}
+	for k, v := range p {
+		out[k] = v
+	}
+	lines, _ := p["line_items"].([]map[string]any)
+	copied := make([]map[string]any, len(lines))
+	for i, l := range lines {
+		c := map[string]any{}
+		for k, v := range l {
+			c[k] = v
+		}
+		if level == "bill" {
+			delete(c, "tags")
+		}
+		copied[i] = c
+	}
+	out["line_items"] = copied
+	if level == "line" {
+		delete(out, "tags")
+	}
+	return out
+}
+
 func (s *Service) pushOne(ctx context.Context, u *access.User, c *zohoapi.Client, id int64, useKey bool) (string, error) {
 	var status string
 	if err := s.DB.QueryRow(ctx, `SELECT status FROM invoice WHERE id=$1`, id).Scan(&status); err != nil {
@@ -550,9 +582,12 @@ func (s *Service) pushOne(ctx context.Context, u *access.User, c *zohoapi.Client
 	billID := b.ZohoBillID
 	if b.ZohoStep < 1 {
 		var zb zohoapi.Bill
-		if useKey {
-			zb, err = c.UpsertBill(ctx, b.KeyField, key(b), p)
-		} else {
+		save := func(p map[string]any) error {
+			var err error
+			if useKey {
+				zb, err = c.UpsertBill(ctx, b.KeyField, key(b), p)
+				return err
+			}
 			delete(p, "custom_fields")
 			// Without the unique custom field, look for the bill first so a retry after a lost reply does not create a second one.
 			var found *zohoapi.Bill
@@ -563,8 +598,22 @@ func (s *Service) pushOne(ctx context.Context, u *access.User, c *zohoapi.Client
 					zb, err = c.CreateBill(ctx, p)
 				}
 			}
+			return err
+		}
+		// A reporting tag set in Zoho for line items only (or for the whole transaction only) refuses the tag at the
+		// other level. Zoho's tag list does not say which, so on that refusal the bill is sent again with the tag on the
+		// lines only, then on the bill only. A refused save creates nothing, so trying again is safe.
+		err = save(p)
+		for _, level := range []string{"line", "bill"} {
+			if err == nil || !tagLevelRefused(err) {
+				break
+			}
+			err = save(tagsAt(p, level))
 		}
 		if err != nil {
+			if tagLevelRefused(err) {
+				err = fmt.Errorf("%w. In Zoho, open Settings, Reporting Tags, %s, and switch it on for Purchases (bills), then push again", err, b.TagName)
+			}
 			return fail("saving the bill", err)
 		}
 		billID = zb.ID

@@ -235,6 +235,7 @@ Routes are in `app/App.tsx`. The left menu, top bar, badges and search are in `l
   2. `POST /bills/{id}/attachment`.
   3. `POST /bills/{id}/status/open`.
 - A bill voided in Zoho reopens the invoice, and `zoho_voids` changes the next unique key.
+- A reporting tag set in Zoho for line items only (or the whole transaction only) refuses the tag at the other level ("do not have the access to be associated with a transaction or line item"). Zoho's tag list does not show the preference, so push sends the tag on bill and lines, and on that refusal retries with lines only, then bill only (`tagLevelRefused`, `tagsAt`). Tags created by "Create in Zoho" are line-level for purchases and journals.
 - `zohopush.Held` lists the reasons an invoice can't push yet: a missing property tag, account, tax or vendor mapping. The UI shows them.
 - Learned live:
   - `has_more_page` on the chart of accounts is wrong, so the client reads pages until one is empty.
