@@ -23,6 +23,7 @@ import (
 	"purchasedesk/internal/documents"
 	"purchasedesk/internal/httpjson"
 	"purchasedesk/internal/money"
+	"purchasedesk/internal/photoshrink"
 	"purchasedesk/internal/uploadedfiles"
 	"purchasedesk/internal/zohoapi"
 	"purchasedesk/internal/zohosync"
@@ -522,6 +523,9 @@ func (s *Service) push(w http.ResponseWriter, r *http.Request) error {
 	return httpjson.OK(w, map[string]any{"pushed": ok, "failed": len(in.IDs) - ok, "results": res})
 }
 
+// zohoAttachLimit is the size a bill attachment is kept under (Zoho's limit is about 10 MB).
+const zohoAttachLimit = 5 << 20
+
 // tagLevelRefused reports Zoho's refusal of a reporting tag at the level it was sent (bill or line).
 func tagLevelRefused(err error) bool {
 	m := strings.ToLower(err.Error())
@@ -628,7 +632,13 @@ func (s *Service) pushOne(ctx context.Context, u *access.User, c *zohoapi.Client
 			if err != nil {
 				return fail("reading the invoice file", err)
 			}
-			if err := c.AttachToBill(ctx, billID, f.Name, f.ContentType, f.Data); err != nil {
+			// Zoho takes attachments up to about 10 MB. A bigger photo (phone cameras make 10 MB+) is sent smaller; the
+			// original stays in Purchase Desk.
+			data, name, ctype, err := photoshrink.Fit(f.Data, f.Name, f.ContentType, zohoAttachLimit)
+			if err != nil {
+				return fail("attaching the invoice", fmt.Errorf("%v. Zoho accepts attachments up to 10 MB: upload a smaller scan of the invoice on the goods receipt", err))
+			}
+			if err := c.AttachToBill(ctx, billID, name, ctype, data); err != nil {
 				return fail("attaching the invoice", err)
 			}
 		}

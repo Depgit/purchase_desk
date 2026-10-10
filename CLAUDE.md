@@ -25,7 +25,7 @@ docker compose exec -T db psql -U purchasedesk -d purchasedesk -c "..."
 
 - After a backend change, rebuild with `docker compose up -d --build api`. After a frontend change, use `--build web`.
 - Dev without Docker: Vite on :5173 proxies `/api` to :8080. See README.
-- The only automated test is `go test ./internal/messaging/` (the MSG91 reply check). Otherwise verify with the commands above and with API calls (sign in, then call with `Authorization: Bearer <token>`).
+- The automated tests are `go test ./internal/messaging/` (the MSG91 reply check) and `go test ./internal/photoshrink/`. Otherwise verify with the commands above and with API calls (sign in, then call with `Authorization: Bearer <token>`).
 - To switch phase: edit `RELEASE_PHASE` in `.env`, then `docker compose up -d api`. The frontend reads the phase from `/me`, so it needs no rebuild.
 - `backups/` holds `pg_dump` files (not in git). Restore with `docker compose exec -T db pg_restore -U purchasedesk -d purchasedesk --clean < backups/<file>.dump`.
 - `.env` holds real secrets (chmod 600). Never print it or copy values into files. `.env.example` is the template.
@@ -87,6 +87,7 @@ Wiring lives in `router/router.go`. Startup, migrations and background jobs live
 - **messaging**: SMTP email, MSG91 WhatsApp and SMS, all recorded in `message_log`. Without credentials it logs with status `logged`. `msg91Result` reads MSG91's reply body, because MSG91 can answer HTTP 200 with `{"type":"error"}` or `{"hasError":true}`.
 - **money**: `Round2`, `LineValue(qty,rate,gst)`, `INR`, `TermsDays`, `PaymentTerms`.
 - **passwords**: bcrypt and one-time code hashes.
+- **photoshrink**: `Fit(data,name,type,max)` makes a JPEG or PNG fit a size limit (turned upright from EXIF, scaled down, saved as JPEG). Used before attaching an invoice to a Zoho bill (kept under 5 MB; Zoho's limit is about 10 MB). Tested in `go test ./internal/photoshrink/`.
 - **purchaseorders**: `POST /documents/{id}/po` issues the PO and emails the vendor. `POST /purchase-orders/bulk` issues several at their current rates with one delivery date (terms "" = each vendor's own); a request with an estimated rate is refused.
 - **purchaserequests**: raise (split per vendor), list, detail with allowed actions, resubmit, cancel, search, and `MyTurn`. `GET|POST /requests`, `GET /requests/form`, `GET /documents/{id}`, `POST /documents/{id}/resubmit|cancel|preop-approver`, `GET /search`. The detail returns `raised_with`: the other PRs split off the same submission (same requester, property and `created_at`).
 - **releasephase**: the switched-on phase (`Set`, `Current`, `On(phase)`), the phase constants (`Zoho`, `Bills`, `Budgets`, `Corporate`, `Warehouse`, `Sheets`, `Dashboard`, `Reports`), and `RoleOn`, `VendorTypeOn`, `PropertyKindOn`, `NotYet`.
