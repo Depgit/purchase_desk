@@ -56,7 +56,7 @@ Demo properties: P01 to P05 live, WH Central Warehouse, X01 pre-opening, CO1 cor
 
 ## Backend: `backend/internal/<package>` with its routes (all under `/api`)
 
-Wiring lives in `router/router.go`. Startup, migrations and background jobs live in `cmd/server/main.go`. The jobs are zoho-sync (hourly), zoho-payments (every 2 h) and vendor-sheets (every minute, sends at the set time).
+Wiring lives in `router/router.go`. Startup, migrations and background jobs live in `cmd/server/main.go`. The jobs are zoho-sync (hourly), zoho-payments (every 2 h), warehouse-journals (hourly; posts the rest of each month once it is over) and vendor-sheets (every minute, sends at the set time).
 
 - **access**: the signed-in user, rights, steps, scope. Exports `From(r)`, `Guard.Middleware`, `Guard.Visible`, `Guard.SeesProperty`, `User.HasRight`, `User.HasStep`, `User.Can`, `NeedRight`, `NeedAdmin`.
 - **activestatus**: mark masters active or inactive, with an impact preview. `POST /masters/{kind}/{id}/active`, `GET /masters/{kind}/{id}/impact`.
@@ -104,7 +104,7 @@ Wiring lives in `router/router.go`. Startup, migrations and background jobs live
 - **vendors**: onboarding (`Input`, `Validate`, `Insert`), bank verification, sending preferences. `GET|POST /vendors`, `GET|PUT /vendors/{id}`, `POST /vendors/{id}/verify`, `PUT /vendors/{id}/sending`.
 - **vendorsheets**: `Build`, `Send`, `RunAuto`, with sends logged in `vendor_sheet_log`. `GET /vendor-sheets`, `GET /vendor-sheets/{id}`, `GET /vendor-sheets/{id}/xlsx`, `POST /vendor-sheets/{id}/send`.
 - **warehouse**: stock ledger (`Ledger`), transfers, delivery scheduling, dispatch, cannot-supply, receive with pilferage, and the opening-stock upload (`UploadCheck`, `UploadCommit`). `GET /warehouse/stock|transfers|movements`, `PUT /warehouse/stock/{sku}`, `GET|POST /delivery-partners`, `PUT /delivery-partners/{id}`, `POST /warehouse/schedule`, `POST /documents/{id}/wait|dispatch|cannot-supply|receive-transfer`.
-- **warehousejournal**: the monthly Zoho journal per property, at ex-GST value. `GET /zoho/journals`, `GET /zoho/journals/preview`, `POST /zoho/journals`.
+- **warehousejournal**: Zoho journals per property for warehouse issues, at ex-GST value. A journal covers a period (`zoho_journal.period_start/end`, migration 008): "Post now" posts what was received since the last journal up to that moment; after the month ends the hourly `warehouse-journals` job (`PostMonthEnds`) posts the rest of the month, dated its last day. `GET /zoho/journals`, `GET /zoho/journals/preview`, `POST /zoho/journals`.
 - **worklist**: menu badge counts. `GET /worklist`.
 - **zohoapi**: the Zoho HTTP client with token refresh, 429 handling and pagination. Calls are listed in `docs/ZOHO_API.md`.
 - **zohoexport**: the "Download from Zoho (Excel)" button on Settings → Zoho Books only. On each click it reads the tab's list live from Zoho (every page) and writes every field Zoho returns; nothing is saved. `GET /zoho/export/{all|properties|accounts|taxes|vendors|items|bills|journals}` (Push queue tab = bills, Warehouse journal tab = journals).
@@ -292,7 +292,7 @@ func (s *Service) thing(w http.ResponseWriter, r *http.Request) error {
 - `gofmt` aligns struct fields, so an exact-match edit of a struct can miss. Re-read before editing.
 - Don't use `omitempty` on JSON fields the UI expects, even when the value is zero or empty.
 - Convert `pgtype.Numeric` to float64 before returning JSON.
-- Migrations run once each, recorded in `schema_migrations`. Add `004_*.sql` for schema changes; never edit 001 to 003 once deployed. Demo data changes go in `demodata.go` and need a DB reset.
+- Migrations run once each, recorded in `schema_migrations`. Add the next numbered file (`009_*.sql`) for schema changes; never edit one that is deployed. Demo data changes go in `demodata.go` and need a DB reset.
 - A property's role scope matters. A user can only act on properties inside their grant, so demo scopes were widened where flows cross properties (vikas is `all`).
 - A phase 1 screen must never call a later-phase endpoint: the 404 shows as an error. The shared lookups once did this with `/bill-types`. Check with the headless sweep in phase 1.
 - The `NewRequestPage` property list follows the user's roles (server: `purchaserequests.raiseGrant`). Live: staff, l1 and purchase. Pre-opening: wh, or staff, l1 and purchase assigned to it. Warehouse: wh only. Corporate is never listed. All of it is limited to the raise scope.

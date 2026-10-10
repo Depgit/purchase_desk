@@ -99,6 +99,10 @@ func main() {
 				return err
 			}})
 	}
+	if app.Journals != nil {
+		// After a month ends, each property's warehouse journal for the rest of that month is posted to Zoho.
+		jobs = append(jobs, scheduler.Job{Name: "warehouse-journals", Every: time.Hour, Run: app.Journals.PostMonthEnds})
+	}
 	if releasephase.On(releasephase.Sheets) {
 		jobs = append(jobs, scheduler.Job{Name: "vendor-sheets", Every: time.Minute, Run: app.Sheets.RunAuto})
 	}

@@ -69,6 +69,7 @@ type Built struct {
 	Files    *uploadedfiles.Service
 	Guard    *access.Guard
 	Sheets   *vendorsheets.Service
+	Journals *warehousejournal.Service // nil until the Zoho and Warehouse phases are on
 }
 
 func New(d Deps) *Built {
@@ -78,6 +79,7 @@ func New(d Deps) *Built {
 	zpush := &zohopush.Service{DB: d.DB, Sync: zsync, Files: files, PushEnabled: d.PushEnabled}
 	vendorSvc := &vendors.Service{DB: d.DB, Box: d.Box, Files: files}
 	uploads := &bulkupload.Service{DB: d.DB, Vendors: vendorSvc}
+	var journals *warehousejournal.Service
 	inv := &invoices.Service{DB: d.DB, Guard: guard}
 	if releasephase.On(releasephase.Zoho) {
 		inv.Held, inv.ZohoConnected = zpush.Held, zsync.Connected
@@ -140,7 +142,8 @@ func New(d Deps) *Built {
 				sheets.Routes(r)
 			}
 			if releasephase.On(releasephase.Zoho) && releasephase.On(releasephase.Warehouse) {
-				(&warehousejournal.Service{DB: d.DB, Sync: zsync, PushEnabled: d.PushEnabled}).Routes(r)
+				journals = &warehousejournal.Service{DB: d.DB, Sync: zsync, PushEnabled: d.PushEnabled}
+				journals.Routes(r)
 			}
 			if releasephase.On(releasephase.Reports) {
 				(&reports.Service{DB: d.DB, Guard: guard}).Routes(r)
@@ -148,7 +151,7 @@ func New(d Deps) *Built {
 			}
 		})
 	})
-	return &Built{Handler: r, ZohoSync: zsync, ZohoPush: zpush, Uploads: uploads, Files: files, Guard: guard, Sheets: sheets}
+	return &Built{Handler: r, ZohoSync: zsync, ZohoPush: zpush, Uploads: uploads, Files: files, Guard: guard, Sheets: sheets, Journals: journals}
 }
 
 // cors allows the Vite dev server in development. In Docker the frontend is served from the same origin.

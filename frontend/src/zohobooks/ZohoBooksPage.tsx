@@ -370,7 +370,9 @@ function Queue() {
   )
 }
 
-interface Journal { property_id: number; property: string; month: string; transfers: number; expense: number; pilferage: number; total: number; lines: { account: string; note: string; debit: number; credit: number }[]; problems: string[]; posted_number: string; posted_amount: number }
+interface JournalPart { number: string; amount: number; from: string; to: string; posted_at: string; automatic: boolean }
+interface Journal { property_id: number; property: string; month: string; transfers: number; expense: number; pilferage: number; total: number; lines: { account: string; note: string; debit: number; credit: number }[]; problems: string[]
+  from: string; to: string; month_over: boolean; parts: JournalPart[] }
 
 function Journals() {
   const [month, setMonth] = useState(new Date().toISOString().slice(0, 7))
@@ -378,20 +380,27 @@ function Journals() {
   const [show, setShow] = useState<Journal | null>(null)
   const a = useAction()
   const { hasStep } = useSession()
+  const when = (t: string) => dateTime(t)
   return (
     <>
-      <p className="note">Goods issued from the Central Warehouse have no vendor bill, so each property's expense reaches Zoho through one journal a month: expense debited by sub-category for what the property received, pilferage debited to the loss account, and warehouse stock credited. Post after the month ends.</p>
+      <p className="note">Goods issued from the Central Warehouse have no vendor bill, so each property's expense reaches Zoho through a journal: expense debited by sub-category for what the property received, pilferage debited to the loss account, and warehouse stock credited.
+        After a month ends, the rest of that month is <b>posted automatically</b>. Finance can also <b>post now</b> during the month: that journal covers everything received up to that moment, and the month-end journal then starts from there.</p>
       <div className="tools"><input type="month" value={month} onChange={(e) => setMonth(e.target.value)} aria-label="Month" style={{ width: 'auto' }} /></div>
       <Errors list={a.errors} />
-      <section className="card flush"><div className="scroll"><table><thead><tr><th>Property</th><th className="r">Transfers received</th><th className="r">Expense</th><th className="r">Pilferage</th><th className="r">Journal total</th><th>Status</th><th></th></tr></thead>
-        <tbody>{(data || []).map((j) => <tr key={j.property_id}><td className="id">{j.property}</td><td className="r">{j.transfers}</td><td className="r">{inr(j.expense)}</td><td className="r">{j.pilferage ? inr(j.pilferage) : '—'}</td><td className="r">{inr(j.total)}</td>
-          <td>{j.posted_number ? <><Pill tone="ok">Posted</Pill> {j.posted_number}{j.posted_amount !== j.total && <><br /><span className="hint">{inr(j.total - j.posted_amount)} received since</span></>}</> : j.problems.length ? <><Pill tone="bad">Held</Pill><br /><span className="hint">{j.problems.join('; ')}</span></> : <Pill tone="ok">Ready</Pill>}</td>
-          <td className="r"><button className="link" onClick={() => setShow(j)}>Preview</button>{hasStep('finance') && !j.posted_number && !j.problems.length && <> · <button className="link" onClick={() => a.run(() => post('/zoho/journals', { property_id: j.property_id, month }), (r: any) => { reload(); return r.message })}>Post</button></>}</td></tr>)}</tbody></table></div>
+      <section className="card flush"><div className="scroll"><table><thead><tr><th>Property</th><th>Already posted</th><th className="r">Transfers waiting</th><th className="r">Expense</th><th className="r">Pilferage</th><th className="r">To post</th><th>Status</th><th></th></tr></thead>
+        <tbody>{(data || []).map((j) => <tr key={j.property_id}><td className="id">{j.property}</td>
+          <td>{j.parts.length ? j.parts.map((p) => <div key={p.number}><Pill tone="ok">{p.number}</Pill> {inr(p.amount)}<br /><span className="hint">{when(p.from)} to {when(p.to)}{p.automatic ? ' · posted at month end' : ''}</span></div>) : '—'}</td>
+          <td className="r">{j.transfers}</td><td className="r">{inr(j.expense)}</td><td className="r">{j.pilferage ? inr(j.pilferage) : '—'}</td><td className="r">{inr(j.total)}<br /><span className="hint">since {when(j.from)}</span></td>
+          <td>{!j.total ? <Pill tone="ok">{j.parts.length ? 'Up to date' : 'Nothing yet'}</Pill> : j.problems.length ? <><Pill tone="bad">Held</Pill><br /><span className="hint">{j.problems.join('; ')}</span></> : <Pill tone={j.month_over ? 'warn' : ''}>{j.month_over ? 'Posts automatically' : 'Waiting for month end'}</Pill>}</td>
+          <td className="r"><button className="link" onClick={() => setShow(j)}>Preview</button>{hasStep('finance') && j.total > 0 && !j.problems.length && <> · <button className="link" disabled={a.busy}
+            onClick={() => a.run(() => post('/zoho/journals', { property_id: j.property_id, month }), (r: any) => { reload(); return r.message })}>{j.month_over ? 'Post' : 'Post now'}</button></>}</td></tr>)}</tbody></table></div>
         {data && !data.length && <p className="empty">No warehouse transfers received this month.</p>}</section>
       {show && <Modal title={`Warehouse journal for ${show.property} · ${show.month}`} onClose={() => setShow(null)} wide>
+        <p className="sub">What would be posted now: received from {when(show.from)} to {show.month_over ? 'the end of the month' : when(show.to)}.</p>
         {show.problems.length > 0 && <p className="note bad"><b>Cannot be posted yet:</b> {show.problems.join('; ')}.</p>}
         <div className="scroll"><table><thead><tr><th>Account</th><th>Note</th><th className="r">Debit</th><th className="r">Credit</th></tr></thead>
           <tbody>{show.lines.map((l, i) => <tr key={i}><td className="id">{l.account || '(not mapped)'}</td><td>{l.note}</td><td className="r">{l.debit ? inr(l.debit) : ''}</td><td className="r">{l.credit ? inr(l.credit) : ''}</td></tr>)}</tbody></table></div>
+        {!show.lines.length && <p className="empty">Nothing new to post.</p>}
         <div className="btns"><button className="btn ghost" onClick={() => setShow(null)}>Close</button></div></Modal>}
     </>
   )
