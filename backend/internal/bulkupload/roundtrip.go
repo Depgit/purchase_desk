@@ -185,7 +185,7 @@ func (s *Service) mappingsKind() *kind {
 	return &kind{
 		title: "Vendor mapping", module: "Vendor Mapping", allowed: func(u *access.User) bool { return hasUpload(u) && u.HasRight(access.Masters) },
 		required: []string{"vendor_code", "level", "properties"},
-		sample:   "mapping_id,vendor_code,vendor_name,level,sku_code,sub_category,item,properties,estimate_allowed\n,V001,Shree Balaji Hotel Supplies,sub_category,,Guest Amenities,,ALL,no\n,V004,Gupta Linen House,sku,LN-0001,,Bath towel,P01;cluster:Delhi South,no\n",
+		sample:   "mapping_id,vendor_code,vendor_name,level,category,sub_category,sku_code,item,properties,estimate_allowed\n,V001,Shree Balaji Hotel Supplies,sub_category,Housekeeping,Guest Amenities,,,ALL,no\n,V004,Gupta Linen House,sku,Housekeeping,,LN-0001,Bath towel,P01;cluster:Delhi South,no\n",
 		keyOf:    key("mapping_id"),
 		check: func(ctx context.Context, x *run, row csvfile.Row) result {
 			level := strings.ToLower(strings.TrimSpace(row.Get("level")))
@@ -225,6 +225,19 @@ func (s *Service) mappingsKind() *kind {
 			} else if err := x.q.QueryRow(ctx, `SELECT id FROM sub_category WHERE norm_key(name)=norm_key($1)`, row.Get("sub_category")).Scan(&in.SubCategoryID); err != nil {
 				return bad("Unknown sub-category %q", row.Get("sub_category"))
 			}
+			// The category comes from the sub-category (or the SKU's sub-category). If the row names one, it must match.
+			if cat := strings.TrimSpace(row.Get("category")); cat != "" {
+				var real, sub string
+				_ = x.q.QueryRow(ctx, `SELECT c.name, sc.name FROM sub_category sc JOIN category c ON c.id=sc.category_id
+					WHERE sc.id = CASE WHEN $1='sku' THEN (SELECT sub_category_id FROM sku WHERE id=$2) ELSE $3 END`, level, in.SKUID, in.SubCategoryID).Scan(&real, &sub)
+				if real != "" && textclean.Key(real) != textclean.Key(cat) {
+					what := "Sub-category " + sub
+					if level == "sku" {
+						what = "SKU " + strings.ToUpper(strings.TrimSpace(row.Get("sku_code"))) + " (" + sub + ")"
+					}
+					return bad("%s is in category %s, not %s. To map %s, pick one of its sub-categories (see the Ref - Sub-categories sheet)", what, real, cat, cat)
+				}
+			}
 			if err := vendormapping.CheckMapping(ctx, x.q, id, &in); err != nil {
 				return bad("%s", strings.TrimSuffix(err.Error(), "."))
 			}
@@ -251,13 +264,15 @@ func (s *Service) mappingsKind() *kind {
 			return nil
 		},
 		export: func(ctx context.Context, q database.Q, r *http.Request) ([]string, [][]string, error) {
-			heads := []string{"mapping_id", "vendor_code", "vendor_name", "level", "sku_code", "sub_category", "item", "properties", "estimate_allowed"}
+			heads := []string{"mapping_id", "vendor_code", "vendor_name", "level", "category", "sub_category", "sku_code", "item", "properties", "estimate_allowed"}
 			rows, err := rowsOf(ctx, q, `SELECT 'M'||lpad(m.id::text,3,'0'), v.code, v.legal_name, CASE m.level WHEN 'sku' THEN 'sku' ELSE 'sub_category' END,
-				coalesce(k.code,''), CASE WHEN m.level='sc' THEN sc.name ELSE '' END, coalesce(concat_ws(' ', b.name, k.item_name)||' · '||ps.name,''),
+				cat.name, CASE WHEN m.level='sc' THEN sc.name ELSE '' END, coalesce(k.code,''), coalesce(concat_ws(' ', b.name, k.item_name)||' · '||ps.name,''),
 				`+fmt.Sprintf(scopeSQL, "m.all_properties", "'{}'::bigint[]", "coalesce((SELECT array_agg(property_id) FROM vendor_mapping_property WHERE mapping_id=m.id),'{}')")+`,
 				CASE WHEN m.estimate_allowed THEN 'yes' ELSE 'no' END
 				FROM vendor_mapping m JOIN vendor v ON v.id=m.vendor_id LEFT JOIN sku k ON k.id=m.sku_id LEFT JOIN brand b ON b.id=k.brand_id LEFT JOIN pack_size ps ON ps.id=k.pack_size_id
-				LEFT JOIN sub_category sc ON sc.id=m.sub_category_id WHERE m.active ORDER BY m.id`)
+				LEFT JOIN sub_category sc ON sc.id=m.sub_category_id
+				JOIN sub_category msc ON msc.id=coalesce(m.sub_category_id, k.sub_category_id) JOIN category cat ON cat.id=msc.category_id
+				WHERE m.active ORDER BY m.id`)
 			return heads, rows, err
 		},
 	}

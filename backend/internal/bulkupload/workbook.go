@@ -67,7 +67,7 @@ var bundles = map[string]bundle{
 
 // keys says, per list, which column ties a row to its record.
 var keys = map[string]string{"items": "sku_code", "properties": "property_code", "vendors": "vendor_code", "users": "email (or mobile), one row per role",
-	"mappings": "mapping_id", "rates": "vendor_code + sku_code", "budgets": "property_code + month + sub_category", "property_pct": "property_code", "zoho_tags": "property_code"}
+	"mappings": "mapping_id (category must match the sub-category or SKU; to move a mapping to another category, pick one of that category's sub-categories)", "rates": "vendor_code + sku_code", "budgets": "property_code + month + sub_category", "property_pct": "property_code", "zoho_tags": "property_code"}
 
 func (s *Service) workbook(w http.ResponseWriter, r *http.Request) error {
 	name := chi.URLParam(r, "kind")
