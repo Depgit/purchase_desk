@@ -1,8 +1,9 @@
 // One purchase request or bill: where it stands, what was asked and changed, and the next action for the signed-in user.
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
-import { fileUrl, post } from '../api/client'
+import { fileUrl, get, post } from '../api/client'
 import { useApi } from '../api/useApi'
+import { AdvancesCard } from '../advances/AdvancesCard'
 import type { Doc, Invoice } from '../api/types'
 import { ReasonModal, type ReasonKind } from '../approvals/ReasonModal'
 import { useSession } from '../auth/session'
@@ -44,6 +45,7 @@ function stepper(d: Doc, invoices: Invoice[]) {
 
 export function DocumentPage() {
   const { id } = useParams()
+  const { me } = useSession()
   const phase = usePhase()
   const zoho = phase.on(PHASE.zoho)
   const nav = useNavigate()
@@ -55,21 +57,27 @@ export function DocumentPage() {
   const d = data.document
   const bill = d.kind === 'bill' || d.kind === 'corp_bill'
   const corp = d.kind === 'corp_purchase' || d.kind === 'corp_bill'
-  const live = d.lines.filter((l) => l.qty > 0 || l.original_qty)
+  const live = d.lines.filter((l) => l.qty > 0 || l.original_qty || l.rejected_qty > 0)
   const hasRcv = d.lines.some((l) => l.received_qty > 0)
+  const rejected = d.lines.filter((l) => l.rejected_qty > 0)
+  const mine = d.kind === 'purchase' && d.requester_id === me?.id
   return (
     <>
       <div className="head">
         <div><button className="link" onClick={() => nav(-1)}>‹ Back</button>
           <h1>{d.po_number || d.number}</h1>
           <p className="sub">{d.po_number ? d.number + ' · ' : ''}raised {day(d.created_at)} by {d.requester}</p></div>
-        <Pill tone={statusTone(d.status)}>{d.status_label}</Pill>
+        <div className="acts">
+          {data.actions.includes('edit') && <button className="btn ghost" onClick={() => nav(`/requests/${d.id}/edit`)}>Edit</button>}
+          {mine && <button className="btn ghost" onClick={() => nav(`/requests/new?clone=${d.id}`)} title="Start a new request with the same property and items">Clone</button>}
+          <Pill tone={statusTone(d.status)}>{d.status_label}</Pill></div>
       </div>
       {stepper(d, inv.data || [])}
       {d.modified_note && <p className="note warn"><b>Quantity changed by {d.modified_by}{d.modified_at ? ' on ' + day(d.modified_at) : ''}.</b> {d.modified_note}</p>}
       {d.event_reason && <p className="note"><b>Extra quantity for an event:</b> {d.event_reason} · {d.event_note}{d.cm_approved_at ? ' · approved by the Cluster Manager on ' + day(d.cm_approved_at) : ''}</p>}
       {d.routed_reason && <p className="note"><b>Sent to the Cluster Manager by the Cost Controller:</b> {d.routed_reason}{d.routed_note ? ' · ' + d.routed_note : ''}</p>}
       {d.property_kind !== 'live' && d.status === 'PENDING' && <p className="note"><b>{d.property_kind === 'preopening' ? 'Pre-opening property order' : 'Warehouse stock order'}.</b> Waiting for {d.preop_user || 'the Pre-opening Team'}.</p>}
+      {rejected.length > 0 && <p className="note warn"><b>Undelivered balance rejected:</b> {rejected.map((l) => `${l.item_name} ${qty(l.rejected_qty)}`).join(', ')}. It will not be supplied on this PO; the reason is in the history. Raise a new request if it is still needed.</p>}
       {d.status === 'RETURNED' && <p className="note warn"><b>Returned:</b> {d.return_reason}{d.return_note ? ' · ' + d.return_note : ''}</p>}
       {d.status === 'REJECTED' && <p className="note bad"><b>Rejected:</b> {d.return_reason}{d.return_note ? ' · ' + d.return_note : ''}</p>}
       {d.bill_flags?.map((f) => <p key={f} className="note warn">{f}</p>)}
@@ -83,6 +91,7 @@ export function DocumentPage() {
       <div className="cols">
         <div className="stack">
           <ActionPanel detail={data} onDone={refresh} />
+          {data.actions.includes('reject_balance') && <RejectBalancePanel doc={d} onDone={refresh} />}
           {d.kind === 'corp_bill' ? (
             <section className="card"><h2>Corporate bill</h2>
               <dl className="kv"><dt>Department</dt><dd>{d.department}</dd><dt>Expense head</dt><dd>{d.expense_head}</dd><dt>Amount incl. GST</dt><dd>{inr(d.total)}</dd>{d.remark && <><dt>Why</dt><dd>{d.remark}</dd></>}</dl>
@@ -100,24 +109,26 @@ export function DocumentPage() {
           ) : (
             <section className="card flush"><h2>Items</h2>
               <div className="scroll"><table>
-                <thead><tr><th>Item</th><th>Sub-category</th><th className="r">Qty</th>{hasRcv && <th className="r">Received</th>}<th className="r">Rate</th><th className="r">GST</th><th className="r">Amount</th></tr></thead>
+                <thead><tr><th>Item</th><th>Sub-category</th><th className="r">{rejected.length ? 'Ordered' : 'Qty'}</th>{hasRcv && <th className="r">Received</th>}{rejected.length > 0 && <th className="r">Rejected</th>}<th className="r">Rate</th><th className="r">GST</th><th className="r">Amount</th></tr></thead>
                 <tbody>{live.map((l) => (
-                  <tr key={l.id} className={l.qty === 0 ? 'dim' : ''}>
+                  <tr key={l.id} className={l.qty === 0 && !l.received_qty ? 'dim' : ''}>
                     <td>{l.brand} {l.item_name}<br /><span className="hint">{l.sku_code ? l.sku_code + ' · ' : ''}{l.pack_size}</span></td><td>{l.sub_category}</td>
-                    <td className="r">{qty(l.qty)}{l.original_qty != null && l.original_qty !== l.qty && <> <s className="sub">{qty(l.original_qty)}</s></>}</td>
+                    <td className="r">{qty(l.qty + l.rejected_qty)}{l.original_qty != null && l.original_qty !== l.qty + l.rejected_qty && <> <s className="sub">{qty(l.original_qty)}</s></>}</td>
                     {hasRcv && <td className="r">{qty(l.received_qty)}</td>}
+                    {rejected.length > 0 && <td className="r">{l.rejected_qty ? qty(l.rejected_qty) : '—'}</td>}
                     <td className="r">{inr(l.rate)}{l.estimated && !d.po_number ? <> <Pill tone="warn">est.</Pill></> : null}</td><td className="r">{l.gst_pct}%</td><td className="r">{inr(l.value)}</td></tr>))}
-                  <tr className="sum"><td colSpan={hasRcv ? 6 : 5}>Total incl. GST</td><td className="r">{inr(d.total)}</td></tr>
+                  <tr className="sum"><td colSpan={5 + (hasRcv ? 1 : 0) + (rejected.length ? 1 : 0)}>Total incl. GST{rejected.length ? ', without the rejected balance' : ''}</td><td className="r">{inr(d.total)}</td></tr>
                 </tbody>
               </table></div>
             </section>
           )}
+          {(d.kind === 'purchase' || d.kind === 'corp_purchase') && !d.is_transfer && d.po_number && <AdvancesCard docId={d.id} poNumber={d.po_number} onDone={refresh} />}
           {(inv.data || []).length > 0 && (
             <section className="card flush"><h2>Invoices</h2>
               <div className="scroll"><table>
-                <thead><tr><th>Invoice</th><th>Delivery</th><th className="r">Amount</th><th>Status</th>{zoho && <th>Zoho</th>}<th></th></tr></thead>
+                <thead><tr><th>Voucher</th><th>Invoice</th><th>Delivery</th><th className="r">Amount</th><th>Status</th>{zoho && <th>Zoho</th>}<th></th></tr></thead>
                 <tbody>{inv.data!.map((i) => (
-                  <tr key={i.id}><td className="id">{i.invoice_number}</td><td>{i.grn_number ? `${i.grn_number} · delivery ${i.delivery_no}` : '—'}</td>
+                  <tr key={i.id}><td className="id">{i.voucher_number}</td><td>{i.invoice_number}</td><td>{i.grn_number ? `${i.grn_number} · delivery ${i.delivery_no}` : '—'}</td>
                     <td className="r">{inr(i.amount)}</td><td><Pill tone={statusTone(i.status)}>{i.status.replace('_', ' ').toLowerCase()}</Pill></td>
                     {zoho && <td>{i.zoho_bill_id || '—'}</td>}
                     <td className="r">{i.file_id && <a className="link" href={fileUrl(i.file_id)} target="_blank" rel="noreferrer">File</a>} <Link className="link" to={'/invoices/' + i.id}>Open ›</Link></td></tr>))}
@@ -165,9 +176,10 @@ function ActionPanel({ detail, onDone }: { detail: Detail; onDone: () => void })
   const d = detail.document
   const acts = detail.actions
   if (acts.includes('approve')) return <ApprovePanel doc={d} canRoute={acts.includes('route')} canPreop={acts.includes('preop_approver')} onDone={onDone} />
-  if (acts.includes('resubmit')) return <ResubmitPanel doc={d} onDone={onDone} />
+  if (acts.includes('resubmit')) return <ResubmitPanel doc={d} canEdit={acts.includes('edit')} onDone={onDone} />
   if (acts.includes('issue_po')) return <IssuePOPanel doc={d} onDone={onDone} />
   if (acts.includes('receive')) return <ReceivePanel doc={d} onDone={onDone} />
+  if (acts.includes('edit') && d.status === 'PENDING') return <p className="note"><b>Nobody has approved this yet.</b> You can still change anything on it with Edit; once the {d.owner_name} acts, it is locked.</p>
   if (acts.includes('dispatch')) return <DispatchPanel doc={d} onDone={onDone} />
   if (acts.includes('receive_transfer')) return <ReceiveTransferPanel doc={d} onDone={onDone} />
   const owner = d.owner_name
@@ -227,7 +239,8 @@ function PreopModal({ doc, onClose, onDone }: { doc: Doc; onClose: () => void; o
   )
 }
 
-function ResubmitPanel({ doc, onDone }: { doc: Doc; onDone: () => void }) {
+function ResubmitPanel({ doc, canEdit, onDone }: { doc: Doc; canEdit: boolean; onDone: () => void }) {
+  const nav = useNavigate()
   const [q, setQ] = useState<Record<number, string>>(Object.fromEntries(doc.lines.map((l) => [l.id, String(l.qty)])))
   const [invNo, setInvNo] = useState('')
   const [amt, setAmt] = useState(String(doc.total || ''))
@@ -248,10 +261,63 @@ function ResubmitPanel({ doc, onDone }: { doc: Doc; onDone: () => void }) {
       <Errors list={a.errors} />
       <div className="btns">
         <button className="btn no" disabled={a.busy} onClick={() => a.run(() => post(`/documents/${doc.id}/cancel`), (r: any) => { onDone(); return r.message })}>Cancel request</button>
+        {canEdit && <button className="btn ghost" onClick={() => nav(`/requests/${doc.id}/edit`)}>Change items or property</button>}
         <button className="btn" disabled={a.busy} onClick={() => a.run(() => post(`/documents/${doc.id}/resubmit`, {
           quantities: Object.fromEntries(Object.entries(q).map(([k, v]) => [k, +v || 0])), invoice_number: invNo, invoice_amount: +amt,
         }), (r: any) => { onDone(); return r.message })}>Resubmit</button>
       </div>
     </section>
+  )
+}
+
+// After a part delivery the balance stays open on the PO. When the vendor will not deliver it, Purchase, the store or
+// the Admin rejects it: per item, all of it by default. The PO closes once nothing is left due.
+function RejectBalancePanel({ doc, onDone }: { doc: Doc; onDone: () => void }) {
+  const due = doc.lines.filter((l) => l.qty - l.received_qty > 0)
+  const [open, setOpen] = useState(false)
+  if (!due.length) return null
+  return (
+    <section className="card">
+      <div className="head"><div><h2>Balance still due</h2>
+        <p className="sub">{due.map((l) => `${l.item_name} ${qty(l.qty - l.received_qty)}`).join(', ')}. If the vendor will not deliver it, reject the balance so it does not stay open.</p></div>
+        <button className="btn no" onClick={() => setOpen(true)}>Reject balance</button></div>
+      {open && <RejectBalanceModal doc={doc} onClose={() => setOpen(false)} onDone={() => { setOpen(false); onDone() }} />}
+    </section>
+  )
+}
+
+function RejectBalanceModal({ doc, onClose, onDone }: { doc: Doc; onClose: () => void; onDone: () => void }) {
+  const due = doc.lines.filter((l) => l.qty - l.received_qty > 0)
+  const [q, setQ] = useState<Record<number, string>>(Object.fromEntries(due.map((l) => [l.id, String(l.qty - l.received_qty)])))
+  const [reasons, setReasons] = useState<string[]>([])
+  const [reason, setReason] = useState('')
+  const [note, setNote] = useState('')
+  const a = useAction()
+  useEffect(() => { get<Record<string, string[]>>('/pick-lists').then((l) => setReasons(l.balance_reasons || [])).catch(() => {}) }, [])
+  const other = reason.startsWith('Other')
+  const all = due.every((l) => +q[l.id] === l.qty - l.received_qty)
+  const none = !doc.lines.some((l) => l.received_qty > 0)
+  return (
+    <Modal title={`Reject the balance on ${doc.po_number || doc.number}`} onClose={onClose}>
+      <p className="sub">The vendor is told not to supply these, the requester is told, and the value is released from the budget. To get the items, raise a new request.</p>
+      <div className="scroll"><table>
+        <thead><tr><th>Item</th><th className="r">Still due</th><th className="r">Reject</th></tr></thead>
+        <tbody>{due.map((l) => (
+          <tr key={l.id}><td>{l.item_name}<br /><span className="hint">{l.sku_code} · {l.pack_size}</span></td><td className="r">{qty(l.qty - l.received_qty)}</td>
+            <td className="r"><input className="qty" type="number" min="0" max={l.qty - l.received_qty} inputMode="decimal" aria-label={'Reject ' + l.item_name}
+              value={q[l.id]} onChange={(e) => setQ({ ...q, [l.id]: e.target.value })} /></td></tr>))}
+        </tbody></table></div>
+      <label className="field"><span>Reason</span>
+        <select value={reason} onChange={(e) => setReason(e.target.value)}><option value="">Choose a reason</option>{reasons.map((r) => <option key={r}>{r}</option>)}</select></label>
+      <label className="field"><span>Remark{other ? '' : ' (optional)'}</span><textarea value={note} onChange={(e) => setNote(e.target.value)} /></label>
+      <p className="hint">{all ? (none ? 'Nothing was delivered, so the PO will be cancelled.' : 'Nothing will be left due, so the PO will close.') : 'The rest stays open for delivery.'}</p>
+      <Errors list={a.errors} />
+      <div className="btns">
+        <button className="btn ghost" onClick={onClose}>Cancel</button>
+        <button className="btn no" disabled={a.busy || !reason || (other && note.trim().length < 3)} onClick={() => a.run(() => post(`/documents/${doc.id}/reject-balance`, {
+          quantities: Object.fromEntries(Object.entries(q).map(([k, v]) => [k, +v || 0])), reason, note,
+        }), (r: any) => { onDone(); return r.message })}>Reject balance</button>
+      </div>
+    </Modal>
   )
 }

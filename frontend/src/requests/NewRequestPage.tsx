@@ -1,10 +1,13 @@
 // Raise a purchase request: pick a property and items. The vendor and rate for each item come from the vendor mapping;
 // items from several vendors become one request per vendor. The approval route and budget position show before submit.
-import { useEffect, useMemo, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
-import { post } from '../api/client'
+// The same form clones one of the user's own requests (?clone=<id>: a new request, prefilled) and edits a request
+// (/requests/<id>/edit) before anyone approves it or after it is returned.
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
+import { post, put } from '../api/client'
 import { useLookups } from '../api/lookups'
 import { useApi } from '../api/useApi'
+import type { Doc } from '../api/types'
 import { useSession } from '../auth/session'
 import { UploadModal } from '../bulkupload/UploadModal'
 import { inr, lineValue } from '../format/format'
@@ -19,7 +22,7 @@ interface Item {
   estimate_allowed: boolean; orderable: boolean; problem: string
 }
 interface Form {
-  property: string; property_kind: string; items: Item[]
+  property_id: number; property: string; property_kind: string; items: Item[]
   budget: { sub_category_id: number; sub_category: string; category: string; month_budget: number; month_spent: number; week_budget: number; week_spent: number }[]
   preop_members: { id: number; name: string }[]; event_reasons: string[]
   settings: { evt_l2: boolean; l2_above: number; cc_all: boolean; wh_approval: boolean }
@@ -30,6 +33,13 @@ const KIND: Record<string, string> = { warehouse: 'Warehouse', preopening: 'Pre-
 
 export function NewRequestPage() {
   const nav = useNavigate()
+  const { id: editId } = useParams()
+  const [sp] = useSearchParams()
+  const cloneId = sp.get('clone')
+  const src = useApi<{ document: Doc; actions: string[] }>(editId || cloneId ? `/documents/${editId || cloneId}` : null)
+  const srcDoc = src.data?.document
+  const pending = useRef<Doc | null>(null)
+  const [skipped, setSkipped] = useState<string[]>([])
   const l = useLookups()
   const { me, hasStep } = useSession()
   // Live properties: property staff, managers and Purchase. Pre-opening: the Warehouse Manager or anyone assigned to it.
@@ -56,6 +66,25 @@ export function NewRequestPage() {
   const a = useAction()
   useEffect(() => { setLines([]); setSku(0) }, [pid])
   useEffect(() => { if (form?.preop_members.length && !preop) setPreop(form.preop_members[0].id) }, [form, preop])
+  // Prefill from the request being cloned or edited: switch to its property, then copy its items once that property's
+  // item list has loaded. Items no longer orderable there are left out and named.
+  useEffect(() => { if (srcDoc) { pending.current = srcDoc; setPid(srcDoc.property_id) } }, [srcDoc])
+  useEffect(() => {
+    const d = pending.current
+    if (!d || !form || form.property_id !== d.property_id) return
+    pending.current = null
+    const avail = new Map(form.items.map((i) => [i.sku_id, i]))
+    const keep: Draft[] = []
+    const miss: string[] = []
+    for (const x of d.lines.filter((x) => x.qty > 0)) {
+      const i = avail.get(x.sku_id)
+      if (i?.orderable) keep.push({ sku_id: x.sku_id, qty: x.qty, est_rate: i.rate == null ? x.rate : 0 })
+      else miss.push(x.item_name + (i ? ` (${i.problem.toLowerCase()})` : ''))
+    }
+    setLines(keep); setSkipped(miss)
+    setEvt(!!d.event_reason); setEvtWhy(d.event_reason); setEvtNote(d.event_note)
+    if (d.preop_user_id) setPreop(d.preop_user_id)
+  }, [form, srcDoc])
 
   const items = form?.items || []
   const byId = useMemo(() => new Map(items.map((i) => [i.sku_id, i])), [items])
@@ -97,10 +126,18 @@ export function NewRequestPage() {
     setSku(0); setQ('1'); setEst(''); a.setErrors([])
   }
   const cats = [...new Set(items.map((i) => i.category))]
+  if (src.error) return <p className="note bad">{src.error.message}</p>
+  if (srcDoc && editId && !src.data!.actions.includes('edit')) return <><h1>Edit {srcDoc.number}</h1>
+    <p className="note warn">{srcDoc.number} can no longer be edited: only the person who raised it can, and only until an approver acts on it. <Link to={'/documents/' + srcDoc.id}>Open {srcDoc.number}</Link></p></>
+  if (srcDoc && cloneId && srcDoc.requester_id !== me?.id) return <><h1>Clone {srcDoc.number}</h1><p className="note warn">You can clone only requests you raised yourself.</p></>
   if (l && !props.length) return <><h1>New purchase request</h1><p className="note">You cannot raise purchase requests for any property.{hasStep('creq', 'dh') ? ' Corporate purchases are raised under Corporate.' : ' Ask the System Admin for the Raise right on your role and property access.'}</p></>
   return (
     <>
-      <div className="head"><div><button className="link" onClick={() => nav('/requests')}>‹ Purchase Requests</button><h1>New purchase request</h1></div></div>
+      <div className="head"><div><button className="link" onClick={() => nav(editId ? '/documents/' + editId : '/requests')}>‹ {editId && srcDoc ? srcDoc.number : 'Purchase Requests'}</button>
+        <h1>{editId ? `Edit ${srcDoc?.number || 'request'}` : 'New purchase request'}</h1>
+        {cloneId && srcDoc && <p className="sub">A copy of {srcDoc.number}. Change what you need and submit; {srcDoc.number} itself is not changed.</p>}
+        {editId && srcDoc && <p className="sub">Change anything, then save. It goes back to the start of its approval route.</p>}</div></div>
+      {skipped.length > 0 && <p className="note warn"><b>Not copied, {skipped.length === 1 ? 'this item cannot' : 'these items cannot'} be ordered here now:</b> {skipped.join(', ')}.</p>}
       <div className="cols">
         <div className="stack">
           <section className="card"><div className="grid2">
@@ -111,7 +148,8 @@ export function NewRequestPage() {
               <select value={preop} onChange={(e) => setPreop(+e.target.value)}>{form!.preop_members.map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}</select>
               <span className="hint">The request goes to this member of the Pre-opening Team.</span></label>}
             <div className="field"><span>Raised by</span><p style={{ paddingTop: 8 }}>{me?.name} · {me?.department}</p></div>
-          </div>{error && <p className="note bad">{error.message}</p>}</section>
+          </div>{error && <p className="note bad">{error.message}</p>}
+            {props.some((p) => p.id === pid && !p.doc_code) && <p className="note warn">This property has no document code yet, so a request cannot be numbered. Ask the System Admin to set its 2-letter code under Settings → Properties.</p>}</section>
           <section className="card">
             <div className="head"><h2>Add items</h2><div className="acts"><button className="btn ghost" onClick={() => setUpload(true)}>Upload item list</button></div></div>
               <label className="field"><span>Item</span>
@@ -151,9 +189,10 @@ export function NewRequestPage() {
           <section className="card"><h2>Approval route</h2>
             {groups.length ? groups.map((g) => <div key={g.vendor}><b>{g.vendor}</b> · {inr(g.lines.reduce((t, d) => t + lineValue(d.qty, rateOf(d), gstOf(d)), 0))}<p className="sub">{route(g)}</p></div>) : <p className="sub">Add items to see who will approve.</p>}
             {groups.length > 1 && <p className="hint">One request is created per vendor.</p>}
-            <button className="btn" disabled={!lines.length || a.busy} onClick={() => a.run(() => post('/requests', {
-              property_id: pid, lines, event_reason: evt ? evtWhy : '', event_note: evt ? evtNote : '', preop_user_id: kindProp ? preop : 0,
-            }), (r: any) => { nav('/requests'); return r.message })}>Submit request</button>
+            <button className="btn" disabled={!lines.length || a.busy} onClick={() => {
+              const body = { property_id: pid, lines, event_reason: evt ? evtWhy : '', event_note: evt ? evtNote : '', preop_user_id: kindProp ? preop : 0 }
+              a.run(() => editId ? put(`/requests/${editId}`, body) : post('/requests', body), (r: any) => { nav(editId ? '/documents/' + editId : '/requests'); return r.message })
+            }}>{editId ? 'Save and send for approval' : 'Submit request'}</button>
           </section>
           {form && form.budget.length > 0 && <section className="card"><h2>Budget left at {form.property}</h2>
             {form.budget.filter((b) => lines.some((d) => byId.get(d.sku_id)?.sub_category_id === b.sub_category_id) || lines.length === 0).slice(0, 12).map((b) => {

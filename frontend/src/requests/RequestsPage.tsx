@@ -12,7 +12,7 @@ import { col, placeFilters, search } from './columns'
 export function RequestsPage() {
   const nav = useNavigate()
   const l = useLookups()
-  const { hasRight } = useSession()
+  const { me, hasRight } = useSession()
   const [days, setDays] = useState(90)
   const fromChanged = useCallback((f: string) => setDays(daysBack(f)), [])
   const { data } = useApi<ListRow[]>(`/requests?kind=purchase&days=${days}`)
@@ -23,7 +23,10 @@ export function RequestsPage() {
       <div className="head"><div><h1>Purchase Requests</h1><p className="sub">Every request raised by the properties you can see. Open ones, and closed ones from the last 90 days.</p></div>
         <div className="acts">{hasRight('raise') && <button className="btn" onClick={() => nav('/requests/new')}>+ New request</button>}</div></div>
       <DataTable screen="requests" rows={data || []} rowKey={(r) => r.id} date={{ label: 'Raised', value: (r) => r.created_at, onFrom: fromChanged }} search={search} filters={[statusFilter, ...placeFilters(l)]} onOpen={(r) => nav('/documents/' + r.id)}
-        columns={[col.number, col.date, col.property, col.category, col.items, col.vendor, col.requester, col.amount, col.status]} csvName="purchase-requests" />
+        columns={[col.number, col.date, col.property, col.category, col.items, col.vendor, col.requester, col.amount, col.status,
+          { key: 'acts', label: '', render: (r) => r.requester_id === me?.id ? <span className="tools">
+            {r.editable && <button className="link" onClick={() => nav(`/requests/${r.id}/edit`)}>Edit</button>}
+            <button className="link" onClick={() => nav(`/requests/new?clone=${r.id}`)}>Clone</button></span> : null }]} csvName="purchase-requests" />
     </>
   )
 }

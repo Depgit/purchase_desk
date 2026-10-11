@@ -17,6 +17,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"purchasedesk/internal/access"
+	"purchasedesk/internal/advances"
 	"purchasedesk/internal/auditlog"
 	"purchasedesk/internal/clock"
 	"purchasedesk/internal/database"
@@ -81,6 +82,8 @@ type bill struct {
 	TagOK                          bool
 	TDS                            float64 // TDS on service lines, rounded to the rupee
 	TDSSections                    string
+	Advance, AdvanceTDS            float64 // advances adjusted at payment approval, and the TDS already held on them
+	AdvanceRefs                    string  // their numbers and payment references
 	ContactID                      string
 	ContactOK                      bool
 	BillAccount                    string
@@ -157,6 +160,11 @@ func load(ctx context.Context, q database.Q, invoiceID int64) (*bill, error) {
 	_ = q.QueryRow(ctx, `SELECT coalesce(sum(gl.qty*l.rate*l.tds_pct/100),0), coalesce(string_agg(DISTINCT l.tds_section, ', ') FILTER (WHERE l.tds_pct>0),'')
 		FROM invoice i JOIN goods_receipt_line gl ON gl.goods_receipt_id=i.goods_receipt_id JOIN document_line l ON l.id=gl.line_id WHERE i.id=$1`, invoiceID).Scan(&b.TDS, &b.TDSSections)
 	b.TDS = math.Round(b.TDS)
+	// Advances paid before delivery are adjusted at payment approval. Like TDS, they are noted on the bill, which
+	// stays at its full value, until applying a vendor advance to a bill is tested in a Zoho test organisation.
+	_ = q.QueryRow(ctx, `SELECT coalesce(sum(x.amount),0)::float8, coalesce(sum(x.tds_amount),0)::float8,
+		coalesce(string_agg(a.number || ' (paid ' || coalesce(a.paid_on::text,'') || ', ref ' || a.payment_ref || ')', ', ' ORDER BY a.id),'')
+		FROM advance_use x JOIN advance a ON a.id=x.advance_id WHERE x.invoice_id=$1`, invoiceID).Scan(&b.Advance, &b.AdvanceTDS, &b.AdvanceRefs)
 	return b, nil
 }
 
@@ -295,6 +303,11 @@ func payload(b *bill, taxes map[float64]string) (map[string]any, []string) {
 	if b.TDS > 0 {
 		notes += fmt.Sprintf(" · TDS %s to deduct: %s, pay the vendor %s", b.TDSSections, money.INR(b.TDS), money.INR(b.Amount-b.TDS))
 		warn = append(warn, fmt.Sprintf("TDS of %s (%s) is written in the bill notes but not applied in Zoho; record it in Zoho when paying the vendor.", money.INR(b.TDS), b.TDSSections))
+	}
+	if b.Advance > 0 {
+		paid := b.Advance - b.AdvanceTDS
+		notes += fmt.Sprintf(" · Advance already paid: %s %s, pay the vendor %s", money.INR(paid), b.AdvanceRefs, money.INR(b.Amount-b.TDS-paid))
+		warn = append(warn, fmt.Sprintf("An advance of %s (%s) was paid before this bill. It is written in the bill notes but not applied in Zoho; apply the vendor advance to this bill in Zoho when paying.", money.INR(paid), b.AdvanceRefs))
 	}
 	tags := []map[string]string{{"tag_id": b.TagID, "tag_option_id": b.TagOptionID}}
 	items := []map[string]any{}
@@ -720,6 +733,10 @@ func (s *Service) ReadPayments(ctx context.Context) (int, error) {
 				}
 				return documents.CloseIfPaid(ctx, tx, docID)
 			case "void":
+				// The invoice goes back for correction; its advances are adjusted again at the next payment approval.
+				if err := advances.Release(ctx, tx, id); err != nil {
+					return err
+				}
 				if _, err := tx.Exec(ctx, `UPDATE invoice SET status=CASE WHEN goods_receipt_id IS NULL THEN 'MATCHED' ELSE 'RECEIVED' END, zoho_status='void', zoho_bill_id=NULL, zoho_step=0, zoho_voids=zoho_voids+1, zoho_error='Voided in Zoho' WHERE id=$1`, id); err != nil {
 					return err
 				}

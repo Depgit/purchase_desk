@@ -13,6 +13,7 @@ import (
 	"purchasedesk/internal/auditlog"
 	"purchasedesk/internal/httpjson"
 	"purchasedesk/internal/textclean"
+	"purchasedesk/internal/users"
 )
 
 type Service struct{ DB *pgxpool.Pool }
@@ -47,15 +48,19 @@ func (s *Service) setActive(w http.ResponseWriter, r *http.Request) error {
 	if !ok {
 		return httpjson.NotFound("Kind")
 	}
-	if kind == "role" || kind == "user" {
+	id, err := httpjson.ID(r, "id")
+	if err != nil {
+		return err
+	}
+	if kind == "role" {
 		if err := access.NeedAdmin(p); err != nil {
 			return err
 		}
+	} else if kind == "user" {
+		if err := users.Manages(r.Context(), s.DB, p, id); err != nil { // the Admin, or whoever added this user
+			return err
+		}
 	} else if err := access.NeedRight(p, access.Masters, "edit masters"); err != nil {
-		return err
-	}
-	id, err := httpjson.ID(r, "id")
-	if err != nil {
 		return err
 	}
 	var in struct {

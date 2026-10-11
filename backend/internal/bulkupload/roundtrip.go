@@ -20,6 +20,7 @@ import (
 	"purchasedesk/internal/csvfile"
 	"purchasedesk/internal/database"
 	"purchasedesk/internal/httpjson"
+	"purchasedesk/internal/releasephase"
 	"purchasedesk/internal/textclean"
 	"purchasedesk/internal/vendormapping"
 )
@@ -93,7 +94,13 @@ func (c current) same(k *kind, row csvfile.Row) bool {
 		return false
 	}
 	for h, v := range old {
-		if norm(row.Get(h)) != norm(v) {
+		if textclean.Contains(k.computed, h) {
+			continue
+		}
+		if from, ok := k.derived[h]; ok && strings.TrimSpace(row.Get(from)) != "" {
+			continue
+		}
+		if norm(row.Get(strings.ToLower(strings.TrimSpace(h)))) != norm(v) {
 			return false
 		}
 	}
@@ -184,19 +191,37 @@ func mappingID(v string) (int64, bool) {
 func (s *Service) mappingsKind() *kind {
 	return &kind{
 		title: "Vendor mapping", module: "Vendor Mapping", allowed: func(u *access.User) bool { return hasUpload(u) && u.HasRight(access.Masters) },
-		required: []string{"vendor_code", "level", "properties"},
-		sample:   "mapping_id,vendor_code,vendor_name,level,category,sub_category,sku_code,item,properties,estimate_allowed\n,V001,Shree Balaji Hotel Supplies,sub_category,Housekeeping,Guest Amenities,,,ALL,no\n,V004,Gupta Linen House,sku,Housekeeping,,LN-0001,Bath towel,P01;cluster:Delhi South,no\n",
+		required: []string{"vendor_code"},
+		sample:   "mapping_id,vendor_code,vendor_name,item,category,sub_category,properties,estimate_allowed\n,V001,Shree Balaji Hotel Supplies,,Housekeeping,Guest Amenities,ALL,no\n,V004,Gupta Linen House,LN-0001,Housekeeping,Linen,P01;cluster:Delhi South,no\n",
 		keyOf:    key("mapping_id"),
+		computed: []string{"vendor_name", "item_available_at", "rate_status"},
+		derived:  map[string]string{"category": "item", "sub_category": "item"},
 		check: func(ctx context.Context, x *run, row csvfile.Row) result {
+			// A row with an item maps that one SKU; a row without maps the whole sub-category. Older files carry a level
+			// column and the SKU in sku_code; the edit workbook has the item label ("... · SKU code") in item.
+			code := strings.TrimSpace(row.Get("sku_code"))
+			if code == "" {
+				code = skuOfItem(row.Get("item"))
+			}
 			level := strings.ToLower(strings.TrimSpace(row.Get("level")))
-			if level == "sub_category" || level == "subcategory" || level == "sub-category" {
+			switch level {
+			case "sub_category", "subcategory", "sub-category":
 				level = "sc"
+			case "":
+				level = "sc"
+				if code != "" {
+					level = "sku"
+				}
 			}
 			if level != "sku" && level != "sc" {
 				return bad("Level is sku or sub_category")
 			}
 			var in vendormapping.MappingInput
-			all, clusters, props, problem := scope(ctx, x.q, row.Get("properties"))
+			// The edit workbook has a tick column per property; a CSV may instead have one properties cell.
+			all, clusters, props, problem := tickedProperties(ctx, x.q, row)
+			if problem == "" && all && clusters == nil && props == nil && row.Has("properties") {
+				all, clusters, props, problem = scope(ctx, x.q, row.Get("properties"))
+			}
 			if problem != "" {
 				return bad("%s", problem)
 			}
@@ -219,8 +244,11 @@ func (s *Service) mappingsKind() *kind {
 			}
 			in.Level = level
 			if level == "sku" {
-				if err := x.q.QueryRow(ctx, `SELECT id FROM sku WHERE upper(code)=upper($1)`, row.Get("sku_code")).Scan(&in.SKUID); err != nil {
-					return bad("Unknown SKU code %s", row.Get("sku_code"))
+				if err := x.q.QueryRow(ctx, `SELECT id FROM sku WHERE upper(code)=upper($1)`, code).Scan(&in.SKUID); err != nil {
+					return bad("Unknown item %s. Pick it from the item list", textclean.Default(strings.TrimSpace(row.Get("item")), code))
+				}
+				if problem := outsideItem(ctx, x.q, in); problem != "" {
+					return bad("%s", problem)
 				}
 			} else if err := x.q.QueryRow(ctx, `SELECT id FROM sub_category WHERE norm_key(name)=norm_key($1)`, row.Get("sub_category")).Scan(&in.SubCategoryID); err != nil {
 				return bad("Unknown sub-category %q", row.Get("sub_category"))
@@ -233,9 +261,9 @@ func (s *Service) mappingsKind() *kind {
 				if real != "" && textclean.Key(real) != textclean.Key(cat) {
 					what := "Sub-category " + sub
 					if level == "sku" {
-						what = "SKU " + strings.ToUpper(strings.TrimSpace(row.Get("sku_code"))) + " (" + sub + ")"
+						what = "Item " + strings.ToUpper(code) + " (" + sub + ")"
 					}
-					return bad("%s is in category %s, not %s. To map %s, pick one of its sub-categories (see the Ref - Sub-categories sheet)", what, real, cat, cat)
+					return bad("%s is in category %s, not %s. To map %s, pick one of its sub-categories from the sub_category list", what, real, cat, cat)
 				}
 			}
 			if err := vendormapping.CheckMapping(ctx, x.q, id, &in); err != nil {
@@ -264,16 +292,142 @@ func (s *Service) mappingsKind() *kind {
 			return nil
 		},
 		export: func(ctx context.Context, q database.Q, r *http.Request) ([]string, [][]string, error) {
-			heads := []string{"mapping_id", "vendor_code", "vendor_name", "level", "category", "sub_category", "sku_code", "item", "properties", "estimate_allowed"}
-			rows, err := rowsOf(ctx, q, `SELECT 'M'||lpad(m.id::text,3,'0'), v.code, v.legal_name, CASE m.level WHEN 'sku' THEN 'sku' ELSE 'sub_category' END,
-				cat.name, CASE WHEN m.level='sc' THEN sc.name ELSE '' END, coalesce(k.code,''), coalesce(concat_ws(' ', b.name, k.item_name)||' · '||ps.name,''),
-				`+fmt.Sprintf(scopeSQL, "m.all_properties", "'{}'::bigint[]", "coalesce((SELECT array_agg(property_id) FROM vendor_mapping_property WHERE mapping_id=m.id),'{}')")+`,
-				CASE WHEN m.estimate_allowed THEN 'yes' ELSE 'no' END
+			props, err := mappingProperties(ctx, q)
+			if err != nil {
+				return nil, nil, err
+			}
+			heads := []string{"mapping_id", "vendor_code", "vendor_name", "item", "category", "sub_category", "estimate_allowed", "rate_status", "item_available_at"}
+			for _, p := range props {
+				heads = append(heads, p.head)
+			}
+			rows, err := rowsOf(ctx, q, `SELECT 'M'||lpad(m.id::text,3,'0'), v.code, v.legal_name, CASE WHEN m.level='sku' THEN `+itemLabelSQL+` ELSE '' END,
+				cat.name, msc.name, CASE WHEN m.estimate_allowed THEN 'yes' ELSE 'no' END,
+				CASE WHEN m.level='sku' THEN CASE WHEN EXISTS (SELECT 1 FROM rate_card rc WHERE rc.vendor_id=m.vendor_id AND rc.sku_id=m.sku_id AND NOT rc.superseded AND current_date BETWEEN rc.valid_from AND rc.valid_to)
+					THEN 'Valid rate' ELSE 'No valid rate, estimate used' END
+				ELSE (SELECT count(*) FILTER (WHERE EXISTS (SELECT 1 FROM rate_card rc WHERE rc.vendor_id=m.vendor_id AND rc.sku_id=x.id AND NOT rc.superseded AND current_date BETWEEN rc.valid_from AND rc.valid_to))
+					||' of '||count(*)||' items with a valid rate' FROM sku x WHERE x.sub_category_id=msc.id AND x.active) END,
+				CASE WHEN m.level='sku' THEN `+fmt.Sprintf(scopeSQL, "k.scope='all'", "k.cluster_ids", "k.property_ids")+` ELSE '' END,
+				CASE WHEN m.all_properties THEN 'ALL' ELSE coalesce((SELECT string_agg(property_id::text, ';') FROM vendor_mapping_property WHERE mapping_id=m.id),'') END
 				FROM vendor_mapping m JOIN vendor v ON v.id=m.vendor_id LEFT JOIN sku k ON k.id=m.sku_id LEFT JOIN brand b ON b.id=k.brand_id LEFT JOIN pack_size ps ON ps.id=k.pack_size_id
-				LEFT JOIN sub_category sc ON sc.id=m.sub_category_id
 				JOIN sub_category msc ON msc.id=coalesce(m.sub_category_id, k.sub_category_id) JOIN category cat ON cat.id=msc.category_id
-				WHERE m.active ORDER BY m.id`)
-			return heads, rows, err
+				WHERE m.active ORDER BY v.code, cat.name, msc.name, k.code`)
+			if err != nil {
+				return nil, nil, err
+			}
+			// The last column is the mapping's properties (ALL or ids); it becomes one yes/blank cell per property.
+			for i, row := range rows {
+				where := row[len(row)-1]
+				on := map[string]bool{}
+				for _, id := range strings.Split(where, ";") {
+					on[id] = true
+				}
+				out := row[:len(row)-1]
+				for _, p := range props {
+					tick := ""
+					if where == "ALL" || on[fmt.Sprint(p.id)] {
+						tick = "yes"
+					}
+					out = append(out, tick)
+				}
+				rows[i] = out
+			}
+			return heads, rows, nil
 		},
 	}
+}
+
+// itemLabelSQL is how an item reads in the edit workbook's item dropdown: brand, name and pack size, then " · " and its
+// SKU code, which keeps every label unique. Needs sku k, brand b and pack_size ps.
+const itemLabelSQL = `CASE WHEN b.kind IN ('other','service') THEN k.item_name ELSE concat_ws(' ', b.name, k.item_name) END||' ('||ps.name||') · '||k.code`
+
+// skuOfItem reads the SKU code from an item label, or takes a bare SKU code as it is.
+func skuOfItem(label string) string {
+	label = strings.TrimSpace(label)
+	if i := strings.LastIndex(label, " · "); i >= 0 {
+		return strings.TrimSpace(label[i+len(" · "):])
+	}
+	return label
+}
+
+// outsideItem refuses mapping an item at a property the item is not set up for (its properties in the Items master).
+// ALL is fine: the vendor then supplies the item wherever it is available.
+func outsideItem(ctx context.Context, q database.Q, in vendormapping.MappingInput) string {
+	if in.All {
+		return ""
+	}
+	var outside []string
+	if err := q.QueryRow(ctx, `SELECT coalesce(array_agg(p.code ORDER BY p.code),'{}') FROM property p, sku k
+		WHERE k.id=$1 AND k.scope<>'all' AND (p.id = ANY($3) OR (p.active AND p.kind='live' AND p.cluster_id = ANY($2)))
+		AND NOT (p.id = ANY(k.property_ids) OR p.cluster_id = ANY(k.cluster_ids))`, in.SKUID, in.ClusterIDs, in.PropertyIDs).Scan(&outside); err != nil {
+		return err.Error()
+	}
+	if len(outside) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("The item is not available at %s (see item_available_at). Add the property to the item in Items first, or remove it here", strings.Join(outside, ", "))
+}
+
+// mappingProperty is a property with a tick column on the vendor mapping sheet, headed "P01 · Sector 45, Gurugram".
+type mappingProperty struct {
+	id                  int64
+	code, head, cluster string
+}
+
+// mappingProperties lists the properties that order from vendors: live and pre-opening ones, and the warehouse.
+func mappingProperties(ctx context.Context, q database.Q) ([]mappingProperty, error) {
+	rows, err := q.Query(ctx, `SELECT p.id, p.code, p.code||' · '||p.name, k.name FROM property p JOIN cluster k ON k.id=p.cluster_id
+		WHERE p.active AND coalesce(p.code,'')<>'' AND (p.kind IN ('live','preopening') OR (p.kind='warehouse' AND $1)) ORDER BY p.code`, releasephase.PropertyKindOn("warehouse"))
+	if err != nil {
+		return nil, err
+	}
+	return pgx.CollectRows(rows, func(row pgx.CollectableRow) (mappingProperty, error) {
+		var p mappingProperty
+		return p, row.Scan(&p.id, &p.code, &p.head, &p.cluster)
+	})
+}
+
+// tickedProperties reads the tick columns of a mapping row (headed "P01 · name"). Every column ticked means ALL, so
+// the mapping also covers properties added later; otherwise the ticked ones. A row without tick columns gives
+// all=true with no lists, and the caller reads the properties cell instead.
+func tickedProperties(ctx context.Context, q database.Q, row csvfile.Row) (all bool, clusters, props []int64, problem string) {
+	rows, err := q.Query(ctx, `SELECT upper(code), id FROM property WHERE coalesce(code,'')<>''`)
+	if err != nil {
+		return false, nil, nil, err.Error()
+	}
+	ids := map[string]int64{}
+	for rows.Next() {
+		var c string
+		var id int64
+		if err := rows.Scan(&c, &id); err != nil {
+			rows.Close()
+			return false, nil, nil, err.Error()
+		}
+		ids[c] = id
+	}
+	rows.Close()
+	cols, ticked := 0, []int64{}
+	for h, v := range row.Values {
+		i := strings.Index(h, " · ")
+		if i <= 0 {
+			continue
+		}
+		id, ok := ids[strings.ToUpper(strings.TrimSpace(h[:i]))]
+		if !ok {
+			continue
+		}
+		cols++
+		if yes(v) {
+			ticked = append(ticked, id)
+		}
+	}
+	if cols == 0 {
+		return true, nil, nil, ""
+	}
+	if len(ticked) == 0 {
+		return false, nil, nil, "Tick at least one property (yes in its column)"
+	}
+	if len(ticked) == cols {
+		return true, []int64{}, []int64{}, ""
+	}
+	return false, nil, ticked, ""
 }

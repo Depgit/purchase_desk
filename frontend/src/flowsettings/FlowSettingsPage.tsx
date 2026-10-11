@@ -7,7 +7,7 @@ import { useToast } from '../ui/Toast'
 
 type S = Record<string, any>
 const LISTS: [string, string, number][] = [['event_reasons', 'Event reasons on a request', PHASE.core], ['return_reasons', 'Reasons to return a request', PHASE.core], ['reject_reasons', 'Reasons to reject', PHASE.core],
-  ['route_reasons', 'Reasons to send to the Cluster Manager', PHASE.core], ['wh_back_reasons', 'Reasons the warehouse cannot supply', PHASE.warehouse], ['delivery_slots', 'Delivery time slots', PHASE.warehouse]]
+  ['route_reasons', 'Reasons to send to the Cluster Manager', PHASE.core], ['balance_reasons', 'Reasons to reject an undelivered PO balance', PHASE.core], ['advance_reasons', 'Reasons for a vendor advance', PHASE.core], ['wh_back_reasons', 'Reasons the warehouse cannot supply', PHASE.warehouse], ['delivery_slots', 'Delivery time slots', PHASE.warehouse]]
 
 export function FlowSettingsPage() {
   const { me } = useSession()

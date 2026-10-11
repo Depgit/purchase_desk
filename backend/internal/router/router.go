@@ -13,8 +13,10 @@ import (
 
 	"purchasedesk/internal/access"
 	"purchasedesk/internal/activestatus"
+	"purchasedesk/internal/advances"
 	"purchasedesk/internal/approvals"
 	"purchasedesk/internal/auditlog"
+	"purchasedesk/internal/balancereject"
 	"purchasedesk/internal/billtypes"
 	"purchasedesk/internal/budgets"
 	"purchasedesk/internal/bulkupload"
@@ -111,11 +113,13 @@ func New(d Deps) *Built {
 			(&items.Service{DB: d.DB}).Routes(r)
 			vendorSvc.Routes(r)
 			(&vendormapping.Service{DB: d.DB}).Routes(r)
-			(&users.Service{DB: d.DB}).Routes(r)
+			(&users.Service{DB: d.DB, Guard: guard}).Routes(r)
 			(&approvals.Service{DB: d.DB, Guard: guard, Messages: d.Messages}).Routes(r)
-			(&purchaserequests.Service{DB: d.DB, Guard: guard}).Routes(r)
+			(&purchaserequests.Service{DB: d.DB, Guard: guard, Messages: d.Messages}).Routes(r)
 			(&purchaseorders.Service{DB: d.DB, Messages: d.Messages}).Routes(r)
 			(&goodsreceipts.Service{DB: d.DB, Files: files}).Routes(r)
+			(&balancereject.Service{DB: d.DB, Messages: d.Messages}).Routes(r)
+			(&advances.Service{DB: d.DB, Guard: guard, Files: files, Messages: d.Messages}).Routes(r)
 			inv.Routes(r)
 			files.Routes(r)
 			uploads.Routes(r)

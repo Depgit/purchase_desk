@@ -6,6 +6,7 @@ package purchaserequests
 import (
 	"context"
 	"fmt"
+	"log"
 	"net/http"
 	"sort"
 	"strings"
@@ -18,11 +19,13 @@ import (
 	"purchasedesk/internal/access"
 	"purchasedesk/internal/approvals"
 	"purchasedesk/internal/auditlog"
+	"purchasedesk/internal/balancereject"
 	"purchasedesk/internal/budgets"
 	"purchasedesk/internal/clock"
 	"purchasedesk/internal/documents"
 	"purchasedesk/internal/flowsettings"
 	"purchasedesk/internal/httpjson"
+	"purchasedesk/internal/messaging"
 	"purchasedesk/internal/money"
 	"purchasedesk/internal/releasephase"
 	"purchasedesk/internal/textclean"
@@ -30,14 +33,16 @@ import (
 )
 
 type Service struct {
-	DB    *pgxpool.Pool
-	Guard *access.Guard
+	DB       *pgxpool.Pool
+	Guard    *access.Guard
+	Messages *messaging.Sender
 }
 
 func (s *Service) Routes(r chi.Router) {
 	r.Get("/requests", httpjson.Wrap(s.list))
 	r.Get("/requests/form", httpjson.Wrap(s.form))
 	r.Post("/requests", httpjson.Wrap(s.create))
+	r.Put("/requests/{id}", httpjson.Wrap(s.edit))
 	r.Get("/documents/{id}", httpjson.Wrap(s.detail))
 	r.Post("/documents/{id}/resubmit", httpjson.Wrap(s.resubmit))
 	r.Post("/documents/{id}/cancel", httpjson.Wrap(s.cancel))
@@ -165,7 +170,7 @@ func (s *Service) form(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
-	return httpjson.OK(w, map[string]any{"property": p.Name, "property_kind": p.Kind, "items": allowed, "budget": bud,
+	return httpjson.OK(w, map[string]any{"property_id": p.ID, "property": p.Name, "property_kind": p.Kind, "items": allowed, "budget": bud,
 		"preop_members": members, "event_reasons": lists["event_reasons"], "settings": st})
 }
 
@@ -185,6 +190,7 @@ type createIn struct {
 
 type newLine struct {
 	sku               int64
+	name              string
 	qty, rate, gst    float64
 	est               bool
 	categoryID        int64
@@ -192,22 +198,28 @@ type newLine struct {
 	vendorIsWarehouse bool
 }
 
-func (s *Service) create(w http.ResponseWriter, r *http.Request) error {
-	u := access.From(r)
-	ctx := r.Context()
-	var in createIn
-	if err := httpjson.Decode(r, &in); err != nil {
-		return err
-	}
+// prepared is a checked request: its property, the role it is raised with, and its lines grouped by vendor.
+type prepared struct {
+	p        propInfo
+	g        *access.Grant
+	event    bool
+	preop    any
+	vendors  []int64 // in the order the items were added
+	byVendor map[int64][]newLine
+}
+
+// prepare checks a new or edited request the same way: the property, each item's vendor and rate from the mapping,
+// the raise right, the event reason, and the pre-opening approver.
+func (s *Service) prepare(ctx context.Context, u *access.User, in createIn) (*prepared, error) {
 	p, err := s.property(ctx, in.PropertyID)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if !p.Active {
-		return httpjson.Bad("%s is inactive. No new request can be raised for it.", p.Name)
+		return nil, httpjson.Bad("%s is inactive. No new request can be raised for it.", p.Name)
 	}
 	if len(in.Lines) == 0 {
-		return httpjson.Bad("Add at least one item.")
+		return nil, httpjson.Bad("Add at least one item.")
 	}
 	merged := map[int64]*lineIn{}
 	order := []int64{}
@@ -227,7 +239,7 @@ func (s *Service) create(w http.ResponseWriter, r *http.Request) error {
 		l := merged[id]
 		src, ok, err := vendormapping.One(ctx, s.DB, l.SKUID, p.ID)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if !ok {
 			errs = append(errs, fmt.Sprintf("Item %d is not available at %s.", l.SKUID, p.Name))
@@ -241,7 +253,7 @@ func (s *Service) create(w http.ResponseWriter, r *http.Request) error {
 			errs = append(errs, fmt.Sprintf("Enter a quantity for %s.", src.ItemName))
 			continue
 		}
-		nl := newLine{sku: l.SKUID, qty: l.Qty, categoryID: src.CategoryID, vendorID: *src.VendorID, vendorIsWarehouse: src.IsWarehouse}
+		nl := newLine{sku: l.SKUID, name: src.ItemName, qty: l.Qty, categoryID: src.CategoryID, vendorID: *src.VendorID, vendorIsWarehouse: src.IsWarehouse}
 		if src.Rate != nil {
 			nl.rate, nl.gst = *src.Rate, *src.RateGST
 		} else {
@@ -255,91 +267,131 @@ func (s *Service) create(w http.ResponseWriter, r *http.Request) error {
 		cats = append(cats, src.CategoryID)
 	}
 	if len(errs) > 0 {
-		return httpjson.Invalid(errs)
+		return nil, httpjson.Invalid(errs)
 	}
 	g := raiseGrant(u, p.Kind, p.ID, p.ClusterID, textclean.Uniq(cats))
 	if g == nil {
-		return httpjson.Forbidden("You cannot raise requests for these items at %s.", p.Name)
+		return nil, httpjson.Forbidden("You cannot raise requests for these items at %s.", p.Name)
 	}
 	event := textclean.Clean(in.EventReason) != ""
 	if event {
 		if p.Kind != "live" {
-			return httpjson.Bad("Event requests are for live properties.")
+			return nil, httpjson.Bad("Event requests are for live properties.")
 		}
 		if err := flowsettings.CheckReason(ctx, s.DB, "event_reasons", in.EventReason, in.EventNote); err != nil {
-			return err
+			return nil, err
 		}
 		if len(strings.TrimSpace(in.EventNote)) < 5 {
-			return httpjson.Bad("Add the event details so the Cluster Manager can decide.")
+			return nil, httpjson.Bad("Add the event details so the Cluster Manager can decide.")
 		}
 	}
 	var preop any
 	if p.Kind == "warehouse" || p.Kind == "preopening" {
 		members, err := s.preopMembers(ctx)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		ok := false
 		for _, m := range members {
 			ok = ok || m.ID == in.PreopUserID
 		}
 		if !ok {
-			return httpjson.Bad("Choose the Pre-opening Team member who approves this.")
+			return nil, httpjson.Bad("Choose the Pre-opening Team member who approves this.")
 		}
 		preop = in.PreopUserID
+	}
+	out := &prepared{p: p, g: g, event: event, preop: preop, byVendor: map[int64][]newLine{}}
+	for _, l := range lines {
+		if _, ok := out.byVendor[l.vendorID]; !ok {
+			out.vendors = append(out.vendors, l.vendorID)
+		}
+		out.byVendor[l.vendorID] = append(out.byVendor[l.vendorID], l)
+	}
+	return out, nil
+}
+
+// steps is the approval route for one vendor's lines.
+func (pr *prepared) steps(st flowsettings.Settings, ls []newLine) []string {
+	amount := 0.0
+	for _, l := range ls {
+		amount += money.LineValue(l.qty, l.rate, l.gst)
+	}
+	return approvals.Chain(st, pr.p.Kind, ls[0].vendorIsWarehouse, pr.event, amount)
+}
+
+func insertLines(ctx context.Context, tx pgx.Tx, docID int64, ls []newLine) error {
+	for _, l := range ls {
+		if _, err := tx.Exec(ctx, `INSERT INTO document_line(document_id,sku_id,qty,rate,gst_pct,estimated,tds_section,tds_pct)
+			SELECT $1,$2,$3,$4,$5,$6,k.tds_section,k.tds_pct FROM sku k WHERE k.id=$2`, docID, l.sku, l.qty, l.rate, l.gst, l.est); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// insertPR saves one vendor's request as num. createdAt ties requests from one submission together (see raised_with).
+func (s *Service) insertPR(ctx context.Context, tx pgx.Tx, u *access.User, pr *prepared, in createIn, num string, steps []string, ls []newLine, createdAt time.Time, action string) (int64, string, error) {
+	var id int64
+	if err := tx.QueryRow(ctx, `INSERT INTO document(number,kind,property_id,vendor_id,requester_id,requester_step,status,route_steps,step_idx,event_reason,event_note,preop_user_id,created_by,created_at)
+		VALUES ($1,'purchase',$2,$3,$4,$5,'PENDING',$6,0,$7,$8,$9,$4,$10) RETURNING id`,
+		num, pr.p.ID, ls[0].vendorID, u.ID, pr.g.Step, steps, textclean.Clean(in.EventReason), strings.TrimSpace(in.EventNote), pr.preop, createdAt).Scan(&id); err != nil {
+		return 0, "", err
+	}
+	if err := insertLines(ctx, tx, id, ls); err != nil {
+		return 0, "", err
+	}
+	if err := auditlog.Doc(ctx, tx, u, pr.g.Name, id, num, "Purchases", action, ""); err != nil {
+		return 0, "", err
+	}
+	return id, num, finalizeIfNoSteps(ctx, tx, u, id, num, steps)
+}
+
+// finalizeIfNoSteps approves at once a request that needs no approval (an order on the warehouse, by default).
+func finalizeIfNoSteps(ctx context.Context, tx pgx.Tx, u *access.User, id int64, num string, steps []string) error {
+	if len(steps) > 0 {
+		return nil
+	}
+	d, err := documents.Load(ctx, tx, id, true)
+	if err != nil {
+		return err
+	}
+	if err := auditlog.Doc(ctx, tx, u, "System", id, num, "Purchases", "Approved", "No approval needed under the current flow settings"); err != nil {
+		return err
+	}
+	return approvals.Finalize(ctx, tx, u, d)
+}
+
+func (s *Service) create(w http.ResponseWriter, r *http.Request) error {
+	u := access.From(r)
+	ctx := r.Context()
+	var in createIn
+	if err := httpjson.Decode(r, &in); err != nil {
+		return err
+	}
+	pr, err := s.prepare(ctx, u, in)
+	if err != nil {
+		return err
 	}
 	st, err := flowsettings.Load(ctx, s.DB)
 	if err != nil {
 		return err
 	}
-	byVendor := map[int64][]newLine{}
-	vendors := []int64{}
-	for _, l := range lines {
-		if _, ok := byVendor[l.vendorID]; !ok {
-			vendors = append(vendors, l.vendorID)
-		}
-		byVendor[l.vendorID] = append(byVendor[l.vendorID], l)
-	}
 	created := []string{}
 	ids := []int64{}
 	err = pgx.BeginFunc(ctx, s.DB, func(tx pgx.Tx) error {
-		for _, v := range vendors {
-			ls := byVendor[v]
-			amount := 0.0
-			for _, l := range ls {
-				amount += money.LineValue(l.qty, l.rate, l.gst)
-			}
-			steps := approvals.Chain(st, p.Kind, ls[0].vendorIsWarehouse, event, amount)
-			num, err := documents.NextNumber(ctx, tx, "pr_seq", "PR")
+		var now time.Time
+		if err := tx.QueryRow(ctx, `SELECT now()`).Scan(&now); err != nil {
+			return err
+		}
+		nums, err := documents.RequestNumbers(ctx, tx, pr.p.ID, len(pr.vendors))
+		if err != nil {
+			return err
+		}
+		for i, v := range pr.vendors {
+			ls := pr.byVendor[v]
+			id, num, err := s.insertPR(ctx, tx, u, pr, in, nums[i], pr.steps(st, ls), ls, now, "Request raised")
 			if err != nil {
 				return err
-			}
-			var id int64
-			if err := tx.QueryRow(ctx, `INSERT INTO document(number,kind,property_id,vendor_id,requester_id,requester_step,status,route_steps,step_idx,event_reason,event_note,preop_user_id,created_by)
-				VALUES ($1,'purchase',$2,$3,$4,$5,'PENDING',$6,0,$7,$8,$9,$4) RETURNING id`,
-				num, p.ID, v, u.ID, g.Step, steps, textclean.Clean(in.EventReason), strings.TrimSpace(in.EventNote), preop).Scan(&id); err != nil {
-				return err
-			}
-			for _, l := range ls {
-				if _, err := tx.Exec(ctx, `INSERT INTO document_line(document_id,sku_id,qty,rate,gst_pct,estimated,tds_section,tds_pct)
-					SELECT $1,$2,$3,$4,$5,$6,k.tds_section,k.tds_pct FROM sku k WHERE k.id=$2`, id, l.sku, l.qty, l.rate, l.gst, l.est); err != nil {
-					return err
-				}
-			}
-			if err := auditlog.Doc(ctx, tx, u, g.Name, id, num, "Purchases", "Request raised", ""); err != nil {
-				return err
-			}
-			if len(steps) == 0 {
-				d, err := documents.Load(ctx, tx, id, true)
-				if err != nil {
-					return err
-				}
-				if err := auditlog.Doc(ctx, tx, u, "System", id, num, "Purchases", "Approved", "No approval needed under the current flow settings"); err != nil {
-					return err
-				}
-				if err := approvals.Finalize(ctx, tx, u, d); err != nil {
-					return err
-				}
 			}
 			created = append(created, num)
 			ids = append(ids, id)
@@ -354,6 +406,241 @@ func (s *Service) create(w http.ResponseWriter, r *http.Request) error {
 		msg = fmt.Sprintf("%d requests sent, one per vendor: %s", len(created), strings.Join(created, ", "))
 	}
 	return httpjson.OK(w, map[string]any{"numbers": created, "ids": ids, "message": msg})
+}
+
+// Editable reports whether the requester can still change everything on a purchase request: nobody has approved it
+// yet (pending at its first step), or it was returned for changes. Only the person who raised it may.
+func Editable(u *access.User, d *documents.Doc) bool {
+	if d.Kind != "purchase" || d.IsTransfer || u.ID != d.RequesterID {
+		return false
+	}
+	return (d.Status == documents.Pending && d.StepIdx == 0) || d.Status == documents.Returned
+}
+
+// edit replaces a request's property, items, quantities and event details before anyone approves it, or when it is
+// returned. It goes back to the start of its (recalculated) route. If the new items come from several vendors, this
+// request keeps one vendor's items and the rest become new requests from the same submission.
+func (s *Service) edit(w http.ResponseWriter, r *http.Request) error {
+	u := access.From(r)
+	ctx := r.Context()
+	id, err := httpjson.ID(r, "id")
+	if err != nil {
+		return err
+	}
+	var in createIn
+	if err := httpjson.Decode(r, &in); err != nil {
+		return err
+	}
+	pr, err := s.prepare(ctx, u, in)
+	if err != nil {
+		return err
+	}
+	st, err := flowsettings.Load(ctx, s.DB)
+	if err != nil {
+		return err
+	}
+	var msg, changes string
+	var notifyID int64
+	err = pgx.BeginFunc(ctx, s.DB, func(tx pgx.Tx) error {
+		d, err := documents.Load(ctx, tx, id, true)
+		if err != nil {
+			return err
+		}
+		if d.RequesterID != u.ID {
+			return httpjson.Forbidden("Only %s, who raised %s, can edit it.", d.Requester, d.Number)
+		}
+		if !Editable(u, d) {
+			return httpjson.Conflict("%s can no longer be edited: an approver has already acted on it.", d.Number)
+		}
+		keep := pr.vendors[0]
+		for _, v := range pr.vendors {
+			if v == d.VendorID {
+				keep = v
+			}
+		}
+		ls := pr.byVendor[keep]
+		steps := pr.steps(st, ls)
+		changes = describeEdit(d, pr)
+		number, splitNums, err := editNumbers(ctx, tx, d, pr.p.ID, len(pr.vendors)-1)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `DELETE FROM document_line WHERE document_id=$1`, d.ID); err != nil {
+			return err
+		}
+		if err := insertLines(ctx, tx, d.ID, ls); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `UPDATE document SET property_id=$2, vendor_id=$3, requester_step=$4, status='PENDING', route_steps=$5, step_idx=0,
+			event_reason=$6, event_note=$7, preop_user_id=$8, routed_reason='', routed_note='', cm_approved_at=NULL,
+			modified_note='', modified_by='', modified_at=NULL, number=$9, updated_at=now() WHERE id=$1`,
+			d.ID, pr.p.ID, keep, pr.g.Step, steps, textclean.Clean(in.EventReason), strings.TrimSpace(in.EventNote), pr.preop, number); err != nil {
+			return err
+		}
+		if number != d.Number {
+			why := "moved to " + pr.p.Name
+			if pr.p.ID == d.PropertyID {
+				why = "split into one request per vendor"
+			}
+			if err := auditlog.Doc(ctx, tx, u, "Requester", d.ID, number, "Purchases", "Renumbered from "+d.Number+" to "+number, why); err != nil {
+				return err
+			}
+		}
+		action := "Edited before approval"
+		if d.Status == documents.Returned {
+			action = "Changed and resubmitted"
+		}
+		if err := auditlog.Doc(ctx, tx, u, "Requester", d.ID, number, "Purchases", action, changes); err != nil {
+			return err
+		}
+		if err := finalizeIfNoSteps(ctx, tx, u, d.ID, number, steps); err != nil {
+			return err
+		}
+		msg = number + " updated and sent for approval again"
+		if number != d.Number {
+			msg = d.Number + " is now " + number + ", updated and sent for approval again"
+		}
+		if len(steps) > 0 {
+			notifyID = d.ID
+		}
+		split := []string{}
+		for _, v := range pr.vendors {
+			if v == keep {
+				continue
+			}
+			ls := pr.byVendor[v]
+			_, num, err := s.insertPR(ctx, tx, u, pr, in, splitNums[len(split)], pr.steps(st, ls), ls, d.CreatedAt, "Request raised (split from "+number+" when it was edited)")
+			if err != nil {
+				return err
+			}
+			split = append(split, num)
+		}
+		if len(split) > 0 {
+			msg += fmt.Sprintf(". Items from other vendors went on new requests: %s", strings.Join(split, ", "))
+			return auditlog.Doc(ctx, tx, u, "Requester", d.ID, number, "Purchases", "Items from other vendors moved to "+strings.Join(split, ", "), "")
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	if notifyID != 0 {
+		s.notifyApprovers(u, notifyID, changes)
+	}
+	return httpjson.OK(w, map[string]any{"id": id, "message": msg})
+}
+
+// editNumbers gives an edited request its number and the numbers for the extra requests it splits into (one per
+// further vendor). A request keeps its number unless it moves to another property (a fresh number there) or now
+// splits: PR_HZ_0001 becomes PR_HZ_0001_01 with new PR_HZ_0001_02, ..., and PR_HZ_0001_01 keeps its number while the
+// new ones follow the highest suffix already used. An older number (PR-1001) that splits takes a fresh number.
+func editNumbers(ctx context.Context, tx pgx.Tx, d *documents.Doc, propertyID int64, extra int) (string, []string, error) {
+	if propertyID != d.PropertyID || (extra > 0 && !documents.IsRequestNumber(d.Number)) {
+		nums, err := documents.RequestNumbers(ctx, tx, propertyID, extra+1)
+		if err != nil {
+			return "", nil, err
+		}
+		return nums[0], nums[1:], nil
+	}
+	if extra == 0 {
+		return d.Number, nil, nil
+	}
+	if _, err := tx.Exec(ctx, `SELECT 1 FROM property WHERE id=$1 FOR UPDATE`, propertyID); err != nil {
+		return "", nil, err
+	}
+	base, suffix := documents.RequestBase(d.Number)
+	if suffix > 0 {
+		nums, err := documents.NextSplits(ctx, tx, base, extra)
+		return d.Number, nums, err
+	}
+	nums, err := documents.NextSplits(ctx, tx, base, extra+1)
+	if err != nil {
+		return "", nil, err
+	}
+	return nums[0], nums[1:], nil
+}
+
+// describeEdit lists what changed, for the history and the approver: property, items added, removed or changed, event.
+func describeEdit(d *documents.Doc, pr *prepared) string {
+	out := []string{}
+	if pr.p.ID != d.PropertyID {
+		out = append(out, "property "+d.Property+" to "+pr.p.Name)
+	}
+	before := map[int64]documents.Line{}
+	for _, l := range d.Lines {
+		if l.Qty > 0 {
+			before[l.SKUID] = l
+		}
+	}
+	after := map[int64]bool{}
+	for _, v := range pr.vendors {
+		for _, l := range pr.byVendor[v] {
+			after[l.sku] = true
+			old, ok := before[l.sku]
+			switch {
+			case !ok:
+				out = append(out, fmt.Sprintf("%s added (%v)", l.name, l.qty))
+			case old.Qty != l.qty:
+				out = append(out, fmt.Sprintf("%s: %v to %v", l.name, old.Qty, l.qty))
+			}
+		}
+	}
+	for _, l := range d.Lines {
+		if l.Qty > 0 && !after[l.SKUID] {
+			out = append(out, l.ItemName+" removed")
+		}
+	}
+	if (d.EventReason != "") != pr.event {
+		if pr.event {
+			out = append(out, "marked as an event order")
+		} else {
+			out = append(out, "no longer an event order")
+		}
+	}
+	if len(out) == 0 {
+		return "No item changes"
+	}
+	return strings.Join(out, "; ")
+}
+
+// notifyApprovers emails the people who hold the request's first approval step that it changed. It runs after the save.
+func (s *Service) notifyApprovers(u *access.User, docID int64, changes string) {
+	if s.Messages == nil {
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+		defer cancel()
+		d, err := documents.Load(ctx, s.DB, docID, false)
+		if err != nil || d.Status != documents.Pending {
+			return
+		}
+		body, _, err := flowsettings.Template(ctx, s.DB, "edit")
+		if err != nil {
+			return
+		}
+		text := flowsettings.Fill(body, map[string]string{"request": d.Number, "property": d.Property, "by": u.Name, "changes": changes, "value": money.INR(d.Total)})
+		var only int64
+		if d.Owner() == "preop" && d.PreopUserID != nil {
+			only = *d.PreopUserID
+		}
+		rows, err := s.DB.Query(ctx, `SELECT DISTINCT u.email FROM app_user u JOIN user_role ur ON ur.user_id=u.id JOIN role r ON r.id=ur.role_id
+			WHERE u.active AND r.active AND r.step=$1 AND $2=ANY(r.rights) AND coalesce(u.email,'')<>'' AND ($5=0 OR u.id=$5)
+			AND (ur.scope='all' OR (ur.scope='clusters' AND $3::bigint=ANY(ur.cluster_ids)) OR (ur.scope='properties' AND $4::bigint=ANY(ur.property_ids)))`,
+			d.Owner(), access.Approve, d.ClusterID, d.PropertyID, only)
+		if err != nil {
+			return
+		}
+		emails, err := pgx.CollectRows(rows, pgx.RowTo[string])
+		if err != nil {
+			return
+		}
+		for _, to := range emails {
+			if _, err := s.Messages.Email(ctx, to, d.Number+" changed by the requester · "+d.Property, text, nil, d.Number, &u.ID); err != nil {
+				log.Printf("edit notify %s: %v", d.Number, err)
+			}
+		}
+	}()
 }
 
 // ListRow is a document in a list.
@@ -373,6 +660,8 @@ type ListRow struct {
 	Vendor       string    `json:"vendor"`
 	VendorMSME   bool      `json:"vendor_msme"`
 	Requester    string    `json:"requester"`
+	RequesterID  int64     `json:"requester_id"`
+	Editable     bool      `json:"editable"`
 	Amount       float64   `json:"amount"`
 	Status       string    `json:"status"`
 	StatusLabel  string    `json:"status_label"`
@@ -443,7 +732,7 @@ func ToRow(d *documents.Doc) ListRow {
 		rec += money.LineValue(l.ReceivedQty, l.Rate, l.GST)
 	}
 	return ListRow{ID: d.ID, Number: d.Number, Kind: d.Kind, PONumber: d.PONumber, CreatedAt: d.CreatedAt, PropertyID: d.PropertyID, Property: d.Property,
-		ClusterID: d.ClusterID, Cluster: d.Cluster, City: d.City, Category: cat, Items: summarize(d), Vendor: d.Vendor, VendorMSME: d.VendorMSME, Requester: d.Requester,
+		ClusterID: d.ClusterID, Cluster: d.Cluster, City: d.City, Category: cat, Items: summarize(d), Vendor: d.Vendor, VendorMSME: d.VendorMSME, Requester: d.Requester, RequesterID: d.RequesterID,
 		Amount: d.Total, Status: d.Status, StatusLabel: d.StatusLabel(), Owner: d.Owner(), Modified: d.ModifiedNote != "", Event: d.EventReason != "",
 		DeliverBy: d.DeliverBy, Terms: d.PaymentTerms, IsTransfer: d.IsTransfer, BillType: d.BillType, BillSection: d.BillSection, PeriodStart: d.PeriodStart,
 		Months: d.Months, PropertyKind: d.PropertyKind, ClosedShort: d.ClosedShort, Received: money.Round2(rec)}
@@ -475,6 +764,7 @@ func (s *Service) list(w http.ResponseWriter, r *http.Request) error {
 	for _, d := range docs {
 		row := ToRow(d)
 		row.MyTurn = MyTurn(u, d)
+		row.Editable = Editable(u, d)
 		row.Department = d.Department
 		out = append(out, row)
 	}
@@ -620,10 +910,16 @@ func (s *Service) detail(w http.ResponseWriter, r *http.Request) error {
 		} else if documents.CanAct(u, d, owner, access.Receive) != nil {
 			actions = append(actions, "receive")
 		}
+		if balancereject.Who(u, d) != nil {
+			actions = append(actions, "reject_balance")
+		}
 	case documents.WHSent:
 		if documents.CanAct(u, d, "store", access.Receive) != nil {
 			actions = append(actions, "receive_transfer")
 		}
+	}
+	if Editable(u, d) {
+		actions = append(actions, "edit")
 	}
 	// A request is split into one PR per vendor when it is raised. The others from the same submission share its requester,
 	// property and created_at (one transaction), so each PR can show where the rest of the order went.
@@ -854,10 +1150,14 @@ func (s *Service) search(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
+	// Numbers contain _ (PR_HZ_0001), a LIKE wildcard, so the text is escaped. GRN and voucher (PV_0001) numbers find
+	// their request too.
+	like := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(q)
 	rows, err := s.DB.Query(r.Context(), `SELECT DISTINCT d.id, d.kind, d.number, coalesce(d.po_number,''), coalesce(string_agg(DISTINCT i.invoice_number, ', '),'')
-		FROM document d LEFT JOIN invoice i ON i.document_id=d.id
-		WHERE ($2 OR d.property_id = ANY($3)) AND (d.number ILIKE '%'||$1||'%' OR d.po_number ILIKE '%'||$1||'%' OR i.invoice_number ILIKE '%'||$1||'%')
-		GROUP BY d.id ORDER BY d.id DESC LIMIT 20`, q, all, ids)
+		FROM document d LEFT JOIN invoice i ON i.document_id=d.id LEFT JOIN goods_receipt g ON g.document_id=d.id
+		WHERE ($2 OR d.property_id = ANY($3)) AND (d.number ILIKE '%'||$1||'%' OR d.po_number ILIKE '%'||$1||'%' OR i.invoice_number ILIKE '%'||$1||'%'
+			OR i.voucher_number ILIKE '%'||$1||'%' OR g.number ILIKE '%'||$1||'%')
+		GROUP BY d.id ORDER BY d.id DESC LIMIT 20`, like, all, ids)
 	if err != nil {
 		return err
 	}

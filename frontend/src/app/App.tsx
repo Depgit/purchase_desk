@@ -50,6 +50,7 @@ function Screens() {
         <Route path="/approvals" element={<ApprovalsPage />} />
         <Route path="/requests" element={<RequestsPage />} />
         <Route path="/requests/new" element={<NewRequestPage />} />
+        <Route path="/requests/:id/edit" element={<NewRequestPage />} />
         <Route path="/documents/:id" element={<DocumentPage />} />
         <Route path="/purchase-orders" element={<PurchaseOrdersPage />} />
         <Route path="/goods-receipts" element={<GoodsReceiptsPage />} />

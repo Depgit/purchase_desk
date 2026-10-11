@@ -114,9 +114,12 @@ func issueOne(ctx context.Context, tx pgx.Tx, u *access.User, id int64, rates ma
 			return "", err
 		}
 	}
-	po, err := documents.NextNumber(ctx, tx, "po_seq", "PO")
-	if err != nil {
-		return "", err
+	po, ok := documents.Derived(d.Number, "PO")
+	if !ok {
+		var err error
+		if po, err = documents.NextNumber(ctx, tx, "po_seq", "PO"); err != nil {
+			return "", err
+		}
 	}
 	if _, err := tx.Exec(ctx, `UPDATE document SET status='PO_ISSUED', po_number=$2, po_date=now(), deliver_by=$3, payment_terms=$4, updated_at=now() WHERE id=$1`,
 		id, po, due, terms); err != nil {

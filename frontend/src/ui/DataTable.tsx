@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { get, put, saveBlob } from '../api/client'
 import { addDays, thisMonth, today } from '../format/format'
 import { Modal } from './Modal'
+import { MultiSelect } from './MultiSelect'
 
 export interface Column<T> {
   key: string
@@ -18,6 +19,8 @@ export interface Filter<T> {
   label: string
   options: [string, string][]
   test: (r: T, v: string) => boolean
+  /** Tick several values; a row shows when it passes the test for any of them. */
+  multi?: boolean
 }
 
 /** The date a row is filtered on: a label for the picker and the row's date (YYYY-MM-DD or an ISO timestamp). */
@@ -100,7 +103,9 @@ export function DataTable<T>(p: Props<T>) {
     let rows = p.rows
     for (const f of p.filters || []) {
       const v = fv[f.id]
-      if (v) rows = rows.filter((r) => f.test(r, v))
+      if (!v) continue
+      const vs = f.multi ? v.split(',') : [v]
+      rows = rows.filter((r) => vs.some((x) => f.test(r, x)))
     }
     if (p.date && range) {
       const [a, b] = rangeOf(range, from, to)
@@ -146,7 +151,9 @@ export function DataTable<T>(p: Props<T>) {
     <>
       <div className="tools">
         {p.search && <input type="search" placeholder="Search" aria-label="Search" value={q} onChange={(e) => { setQ(e.target.value); setPage(0) }} />}
-        {(p.filters || []).map((f) => (
+        {(p.filters || []).map((f) => f.multi ? (
+          <MultiSelect key={f.id} ariaLabel={f.label} options={f.options} value={fv[f.id] ? fv[f.id].split(',') : []} onChange={(vs) => { setFv({ ...fv, [f.id]: vs.join(',') }); setPage(0) }} />
+        ) : (
           <select key={f.id} aria-label={f.label} value={fv[f.id] || ''} onChange={(e) => { setFv({ ...fv, [f.id]: e.target.value }); setPage(0) }}>
             {f.options.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
           </select>

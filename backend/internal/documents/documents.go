@@ -23,7 +23,7 @@ const (
 	Cancelled = "CANCELLED"
 	Approved  = "APPROVED"
 	POIssued  = "PO_ISSUED"
-	Received  = "RECEIVED" // every line received, or the PO closed short
+	Received  = "RECEIVED" // every line received, or the PO closed short (at receipt, or by rejecting the balance)
 	Closed    = "CLOSED"   // every invoice paid
 	WHSent    = "WH_SENT"
 	WHDone    = "WH_DONE"
@@ -60,6 +60,7 @@ type Line struct {
 	Estimated   bool     `json:"estimated"`
 	Dispatched  *float64 `json:"dispatched_qty"`
 	ReceivedQty float64  `json:"received_qty"`
+	RejectedQty float64  `json:"rejected_qty"` // undelivered balance rejected after the PO; already taken off Qty
 	Value       float64  `json:"value"`
 	Description string   `json:"description"`
 	Unit        string   `json:"unit"`
@@ -206,7 +207,7 @@ type deliveryScan struct {
 // Corporate lines have no SKU: the description stands in for the item and the expense head for the sub-category.
 const selectLines = `SELECT l.id, l.document_id, coalesce(l.sku_id,0), coalesce(k.code,''), coalesce(k.item_name, l.description), coalesce(b.name,''), coalesce(ps.name, l.unit), coalesce(k.hsn,''),
 	coalesce(sc.id,0), coalesce(sc.name, eh.name, ''), coalesce(c.id,0), coalesce(c.name, 'Corporate'),
-	l.qty, l.original_qty, l.rate, l.gst_pct, l.estimated, l.dispatched_qty, l.received_qty, l.description, l.unit, l.expense_head_id
+	l.qty, l.original_qty, l.rate, l.gst_pct, l.estimated, l.dispatched_qty, l.received_qty, l.rejected_qty, l.description, l.unit, l.expense_head_id
 	FROM document_line l LEFT JOIN sku k ON k.id=l.sku_id LEFT JOIN brand b ON b.id=k.brand_id LEFT JOIN pack_size ps ON ps.id=k.pack_size_id
 	LEFT JOIN sub_category sc ON sc.id=k.sub_category_id LEFT JOIN category c ON c.id=sc.category_id LEFT JOIN expense_head eh ON eh.id=l.expense_head_id`
 
@@ -297,7 +298,7 @@ func loadLines(ctx context.Context, q database.Q, m map[int64]*Doc) error {
 		var l Line
 		var docID int64
 		if err := rows.Scan(&l.ID, &docID, &l.SKUID, &l.SKUCode, &l.ItemName, &l.Brand, &l.PackSize, &l.HSN, &l.SubCatID, &l.SubCat, &l.CategoryID, &l.Category,
-			&l.Qty, &l.OriginalQty, &l.Rate, &l.GST, &l.Estimated, &l.Dispatched, &l.ReceivedQty, &l.Description, &l.Unit, &l.HeadID); err != nil {
+			&l.Qty, &l.OriginalQty, &l.Rate, &l.GST, &l.Estimated, &l.Dispatched, &l.ReceivedQty, &l.RejectedQty, &l.Description, &l.Unit, &l.HeadID); err != nil {
 			return err
 		}
 		l.Value = money.Round2(money.LineValue(l.Qty, l.Rate, l.GST))
@@ -395,6 +396,9 @@ func (d *Doc) StatusLabel() string {
 	case Rejected:
 		return "Rejected"
 	case Cancelled:
+		if d.PONumber != "" {
+			return "PO cancelled, nothing delivered"
+		}
 		return "Cancelled"
 	case Approved:
 		if d.IsBill() {

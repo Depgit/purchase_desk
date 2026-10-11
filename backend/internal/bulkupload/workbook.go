@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/xuri/excelize/v2"
 
 	"purchasedesk/internal/access"
 	"purchasedesk/internal/clock"
@@ -21,8 +22,9 @@ import (
 
 // bundle is what a page's workbook holds: the lists it edits, in the order they are applied, and reference sheets.
 type bundle struct {
-	edit []string // upload kinds; a sheet is named after its kind's title
-	ref  []refSheet
+	edit     []string // upload kinds; a sheet is named after its kind's title
+	ref      []refSheet
+	noReadme bool // the cell prompts explain the sheet; no Read me sheet
 }
 
 type refSheet struct {
@@ -54,7 +56,7 @@ var (
 )
 
 var bundles = map[string]bundle{
-	"mappings":     {edit: []string{"vendors", "mappings"}, ref: []refSheet{refItems, refSubcats, refProps, refClusters}},
+	"mappings":     {edit: []string{"mappings"}, noReadme: true},
 	"rates":        {edit: []string{"vendors", "items", "rates"}, ref: []refSheet{refSubcats, refBrands, refPacks, refProps, refClusters}},
 	"items":        {edit: []string{"items"}, ref: []refSheet{refSubcats, refBrands, refPacks, refProps, refClusters}},
 	"vendors":      {edit: []string{"vendors"}, ref: []refSheet{refSubcats, refBillTypes}},
@@ -80,14 +82,26 @@ func (s *Service) workbook(w http.ResponseWriter, r *http.Request) error {
 		{"1. Change what you need on the sheets below, and add new rows. Do not rename the sheets or the column headings."},
 		{"2. Save the file as Excel (.xlsx) and upload it on the same page. Every row is checked before anything is saved."},
 		{"3. A row with its key filled updates that record; a row with the key left blank is added as new; unchanged rows are skipped."},
-		{"4. Sheets named \"Ref - ...\" are lists to copy exact names from. They are read-only and are not uploaded."},
-		{"5. Many cells have a dropdown (click the cell, then the arrow). Pick the category first: the sub-category and SKU lists then show only that category's entries."},
-		{"6. If a value needs a change on another sheet first (a vendor that is not on the Vendors sheet yet), Excel stops you and says which sheet to change."},
-		{"7. Grey cells are locked: the keys of existing rows (so a row stays tied to its record), and vendor bank details, GSTIN and PAN."},
-		{"Nothing is deleted by an upload. Mark records inactive on the screen."},
-		{""},
-		{"Sheets you can edit, in the order they are applied:"},
 	}}
+	tips := []string{"Many cells have a dropdown (click the cell, then the arrow). Pick the category first: the sub-category and SKU lists then show only that category's entries."}
+	if len(b.ref) > 0 {
+		tips = append(tips, "Sheets named \"Ref - ...\" are lists to copy exact names from. They are read-only and are not uploaded.")
+	}
+	if len(b.edit) > 1 {
+		tips = append(tips, "If a value needs a change on another sheet first (a vendor that is not on the Vendors sheet yet), Excel stops you and says which sheet to change.")
+	}
+	if name == "mappings" {
+		tips = append(tips, "Pick the vendor code and the item from their dropdowns. The vendor name, the item's category and sub-category, and item_available_at (from the item's Available at in Items) fill in by themselves.",
+			"Each property has its own column (P01 · name): yes = this vendor supplies the item there. On a new row the properties the item is available at are ticked by themselves; clear a yes to leave one out, or pick yes to add one. Grey cells are properties the item is not available at.",
+			"Every property ticked means all properties, including ones added later.",
+			"Leave the item blank to map a whole sub-category: pick the category, then the sub-category, and tick the properties.",
+			"Empty rows at the bottom are ready for new mappings. rate_status is for reading only.")
+	}
+	tips = append(tips, "Grey cells are locked: the keys of existing rows (so a row stays tied to its record), cells that fill in by themselves, and vendor bank details, GSTIN and PAN.")
+	for i, t := range tips {
+		readme.Rows = append(readme.Rows, []any{fmt.Sprintf("%d. %s", i+4, t)})
+	}
+	readme.Rows = append(readme.Rows, []any{"Nothing is deleted by an upload. Mark records inactive on the screen."}, []any{""}, []any{"Sheets you can edit, in the order they are applied:"})
 	sheets := []spreadsheet.Sheet{}
 	for _, kn := range b.edit {
 		k := s.kinds[kn]
@@ -99,12 +113,24 @@ func (s *Service) workbook(w http.ResponseWriter, r *http.Request) error {
 			return err
 		}
 		rl := rulesFor(kn)
+		if kn == "mappings" {
+			props, err := mappingProperties(r.Context(), s.DB)
+			if err != nil {
+				return err
+			}
+			rl = withPropertyTicks(rl, props)
+		}
 		sh := spreadsheet.Sheet{Name: k.title, Heads: heads, Rows: make([][]any, len(rows)), Text: true, Validations: rl.rules, LockedCols: rl.locked, Protect: len(rl.locked) > 0}
 		for i, row := range rows {
 			sh.Rows[i] = make([]any, len(row))
 			for j, v := range row {
 				sh.Rows[i][j] = v
 			}
+		}
+		addFormulas(&sh, rl)
+		sh.Shades = make([]spreadsheet.Shade, len(rl.shades))
+		for i, sd := range rl.shades {
+			sh.Shades[i] = spreadsheet.Shade{Column: sd.Column, Formula: fillFormula(sd.Formula, 2, sh.Heads)}
 		}
 		sheets = append(sheets, sh)
 		readme.Rows = append(readme.Rows, []any{fmt.Sprintf("  %s: key %s", k.title, keys[kn])})
@@ -137,7 +163,10 @@ func (s *Service) workbook(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 	sheets = append(sheets, lists)
-	return spreadsheet.Send(w, fmt.Sprintf("%s-%s.xlsx", strings.ReplaceAll(name, "_", "-"), clock.YMD(clock.Now())), append([]spreadsheet.Sheet{readme}, sheets...))
+	if !b.noReadme {
+		sheets = append([]spreadsheet.Sheet{readme}, sheets...)
+	}
+	return spreadsheet.Send(w, fmt.Sprintf("%s-%s.xlsx", strings.ReplaceAll(name, "_", "-"), clock.YMD(clock.Now())), sheets)
 }
 
 func textIn(list []string, v string) bool {
@@ -222,4 +251,50 @@ func sheetTitle(t string) string {
 		t = string(r[:31])
 	}
 	return t
+}
+
+// addFormulas puts a sheet's self-filling cells on its rows, and adds its spare rows with the formulas ready.
+func addFormulas(sh *spreadsheet.Sheet, rl sheetRules) {
+	if len(rl.formulas) == 0 {
+		return
+	}
+	col := map[string]int{}
+	for i, h := range sh.Heads {
+		col[h] = i
+	}
+	for n := 0; n < rl.spare; n++ {
+		sh.Rows = append(sh.Rows, make([]any, len(sh.Heads)))
+	}
+	for i, row := range sh.Rows {
+		for j := range row {
+			if row[j] == nil {
+				row[j] = ""
+			}
+		}
+		orig := append([]any{}, row...)
+		text := func(h string) string {
+			return `"` + strings.ReplaceAll(fmt.Sprint(orig[col[h]]), `"`, `""`) + `"`
+		}
+		for _, fm := range rl.formulas {
+			c, ok := col[fm.col]
+			if !ok {
+				continue
+			}
+			f := strings.ReplaceAll(fm.tmpl, "{orig}", text(fm.col))
+			for h := range col {
+				f = strings.ReplaceAll(f, "{orig:"+h+"}", text(h))
+			}
+			row[c] = spreadsheet.Formula(fillFormula(f, i+2, sh.Heads))
+		}
+	}
+}
+
+// fillFormula renders a cellFormula template for one row: {r} the row number and {column name} that column's letter.
+func fillFormula(tmpl string, r int, heads []string) string {
+	f := strings.ReplaceAll(tmpl, "{r}", fmt.Sprint(r))
+	for i, h := range heads {
+		l, _ := excelize.ColumnNumberToName(i + 1)
+		f = strings.ReplaceAll(f, "{"+h+"}", l)
+	}
+	return f
 }

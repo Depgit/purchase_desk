@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"purchasedesk/internal/access"
+	"purchasedesk/internal/advances"
 	"purchasedesk/internal/auditlog"
 	"purchasedesk/internal/clock"
 	"purchasedesk/internal/documents"
@@ -123,9 +124,18 @@ func (s *Service) receive(w http.ResponseWriter, r *http.Request) error {
 		}
 		var deliveryNo int
 		_ = tx.QueryRow(r.Context(), `SELECT count(*)+1 FROM goods_receipt WHERE document_id=$1`, id).Scan(&deliveryNo)
-		grn, err := documents.NextNumber(r.Context(), tx, "grn_seq", "GRN")
-		if err != nil {
-			return err
+		more := balance > 0 && in.Balance != "close"
+		// The GRN copies the request's number: GRN_HZ_0001 when everything comes in one delivery, otherwise one per
+		// delivery, GRN_HZ_0001_01, _02, ... (a delivery sent back for a recount keeps its number used).
+		grn, ok := documents.Derived(d.Number, "GRN")
+		if ok && (deliveryNo > 1 || more) {
+			grn = fmt.Sprintf("%s_%02d", grn, deliveryNo)
+		}
+		if !ok {
+			var err error
+			if grn, err = documents.NextNumber(r.Context(), tx, "grn_seq", "GRN"); err != nil {
+				return err
+			}
 		}
 		photoIDs := []int64{}
 		for _, p := range photos {
@@ -156,16 +166,17 @@ func (s *Service) receive(w http.ResponseWriter, r *http.Request) error {
 		if err != nil {
 			return err
 		}
-		if _, err := tx.Exec(r.Context(), `INSERT INTO invoice(document_id,goods_receipt_id,vendor_id,property_id,invoice_number,invoice_date,amount,file_id,status,created_by)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'RECEIVED',$9)`, id, grnID, d.VendorID, d.PropertyID, in.InvoiceNumber, invDate, money.Round2(in.InvoiceAmount), fileID, u.ID); err != nil {
+		var voucher string
+		if err := tx.QueryRow(r.Context(), `INSERT INTO invoice(document_id,goods_receipt_id,vendor_id,property_id,invoice_number,invoice_date,amount,file_id,status,created_by)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'RECEIVED',$9) RETURNING voucher_number`, id, grnID, d.VendorID, d.PropertyID, in.InvoiceNumber, invDate, money.Round2(in.InvoiceAmount), fileID, u.ID).Scan(&voucher); err != nil {
 			return err
 		}
 		note := ""
 		status := documents.POIssued
 		switch {
-		case balance == 0:
+		case !more && balance == 0:
 			status = documents.Received
-		case in.Balance == "close":
+		case !more:
 			status = documents.Received
 			note = "Short delivery. PO closed, the balance will not come"
 			if _, err := tx.Exec(r.Context(), `UPDATE document SET po_closed_short=TRUE WHERE id=$1`, id); err != nil {
@@ -177,11 +188,16 @@ func (s *Service) receive(w http.ResponseWriter, r *http.Request) error {
 		if _, err := tx.Exec(r.Context(), `UPDATE document SET status=$2, updated_at=now() WHERE id=$1`, id, status); err != nil {
 			return err
 		}
-		msg = grn + " saved"
+		if status == documents.Received {
+			if err := advances.CancelUnpaid(r.Context(), tx, u, id, d.Number, "Nothing more is due on "+d.PONumber); err != nil {
+				return err
+			}
+		}
+		msg = grn + " saved, invoice " + in.InvoiceNumber + " entered as voucher " + voucher
 		if status == documents.POIssued {
 			msg += ". Balance stays open on " + d.PONumber
 		}
-		return auditlog.Doc(r.Context(), tx, u, g.Name, d.ID, d.Number, "Purchases", fmt.Sprintf("Goods received (%s, delivery %d, invoice %s)", grn, deliveryNo, in.InvoiceNumber), note)
+		return auditlog.Doc(r.Context(), tx, u, g.Name, d.ID, d.Number, "Purchases", fmt.Sprintf("Goods received (%s, delivery %d, invoice %s, voucher %s)", grn, deliveryNo, in.InvoiceNumber, voucher), note)
 	})
 	if err != nil {
 		return err

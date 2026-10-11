@@ -52,7 +52,9 @@ type User struct {
 	Department string  `json:"department"`
 	Grants     []Grant `json:"roles"`
 	IsAdmin    bool    `json:"is_admin"`
-	Phase      int     `json:"phase"` // release phase switched on (RELEASE_PHASE), so screens show only what is open
+	// CreatableRoles are the roles the System Admin lets this user give when adding users (see AddsUsers).
+	CreatableRoles []int64 `json:"creatable_roles"`
+	Phase          int     `json:"phase"` // release phase switched on (RELEASE_PHASE), so screens show only what is open
 
 	visLoaded bool
 	visAll    bool
@@ -81,6 +83,11 @@ func (u *User) HasStep(step string) bool {
 		}
 	}
 	return false
+}
+
+// AddsUsers reports whether the user may add users: the System Admin, or someone the Admin gave creatable roles.
+func (u *User) AddsUsers() bool {
+	return u.IsAdmin || len(u.CreatableRoles) > 0
 }
 
 func (u *User) RoleName() string {
@@ -161,8 +168,10 @@ type Guard struct {
 func (g *Guard) Load(ctx context.Context, userID int64) (*User, error) {
 	u := &User{Phase: releasephase.Current()}
 	var active bool
-	err := g.DB.QueryRow(ctx, `SELECT id, name, coalesce(email::text,''), coalesce(mobile,''), department, active FROM app_user WHERE id=$1`, userID).
-		Scan(&u.ID, &u.Name, &u.Email, &u.Mobile, &u.Department, &active)
+	err := g.DB.QueryRow(ctx, `SELECT u.id, u.name, coalesce(u.email::text,''), coalesce(u.mobile,''), u.department, u.active,
+		coalesce((SELECT array_agg(r.id ORDER BY r.id) FROM role r WHERE r.id = ANY(u.creatable_role_ids) AND r.active AND r.step<>'admin'),'{}')
+		FROM app_user u WHERE u.id=$1`, userID).
+		Scan(&u.ID, &u.Name, &u.Email, &u.Mobile, &u.Department, &active, &u.CreatableRoles)
 	if err != nil || !active {
 		return nil, httpjson.Unauthorized("Your session has ended. Please sign in again.")
 	}

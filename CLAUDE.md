@@ -25,7 +25,7 @@ docker compose exec -T db psql -U purchasedesk -d purchasedesk -c "..."
 
 - After a backend change, rebuild with `docker compose up -d --build api`. After a frontend change, use `--build web`.
 - Dev without Docker: Vite on :5173 proxies `/api` to :8080. See README.
-- The automated tests are `go test ./internal/messaging/` (the MSG91 reply check) and `go test ./internal/photoshrink/`. Otherwise verify with the commands above and with API calls (sign in, then call with `Authorization: Bearer <token>`).
+- The automated tests are `go test ./internal/messaging/` (the MSG91 reply check), `go test ./internal/photoshrink/` and `go test ./internal/documents/` (document number helpers). Otherwise verify with the commands above and with API calls (sign in, then call with `Authorization: Bearer <token>`).
 - To switch phase: edit `RELEASE_PHASE` in `.env`, then `docker compose up -d api`. The frontend reads the phase from `/me`, so it needs no rebuild.
 - `backups/` holds `pg_dump` files (not in git). Restore with `docker compose exec -T db pg_restore -U purchasedesk -d purchasedesk --clean < backups/<file>.dump`.
 - `.env` holds real secrets (chmod 600). Never print it or copy values into files. `.env.example` is the template.
@@ -48,7 +48,7 @@ docker compose exec -T db psql -U purchasedesk -d purchasedesk -c "..."
 | rakesh, vivek | dh | CO1 (Admin and IT department L1) |
 | anil | capp | CO1 (L2 of both departments) |
 
-Demo properties: P01 to P05 live, WH Central Warehouse, X01 pre-opening, CO1 corporate office. There are 16 SKUs (LN-, EL-, GA-, ST-, DY-... codes), vendors V001 to V021, and the internal vendor `WH`.
+Demo properties (document codes SA, SB, DL, SK, HK, SX, WH, CO): P01 to P05 live, WH Central Warehouse, X01 pre-opening, CO1 corporate office. There are 16 SKUs (LN-, EL-, GA-, ST-, DY-... codes), vendors V001 to V021, and the internal vendor `WH`.
 
 ## Folder rule (the user asked for this)
 
@@ -60,11 +60,13 @@ Wiring lives in `router/router.go`. Startup, migrations and background jobs live
 
 - **access**: the signed-in user, rights, steps, scope. Exports `From(r)`, `Guard.Middleware`, `Guard.Visible`, `Guard.SeesProperty`, `User.HasRight`, `User.HasStep`, `User.Can`, `NeedRight`, `NeedAdmin`.
 - **activestatus**: mark masters active or inactive, with an impact preview. `POST /masters/{kind}/{id}/active`, `GET /masters/{kind}/{id}/impact`.
+- **advances**: vendor advances on an issued PO (purchase or corporate, not transfers, status PO_ISSUED). Requested by whoever can issue the PO (`CanAct(u,d,"purchase",IssuePO)`) as an amount or % with a reason (`advance_reasons`) and optional proforma; approved, rejected and marked paid (UTR, date; vendor emailed with template `advpaid`) by the same Finance grant as invoice payments (`u.Can("finance",Pay,...)`); cancelled by the requester/Purchase. Number `documents.AdvanceNumber`: ADV_HZ_0001_01, _02 for PO_HZ_0001; ADV_HZ_0001_01_01 for PO_HZ_0001_01; ADV-2001_01 for older/corporate POs. Total advances ≤ PO value. TDS in proportion to the PO's service lines. At payment approval `invoices.approveOne` calls `advances.Apply` (picks from the body, or the `Plan` suggestion: this PO's paid advances, then the vendor's carried-forward ones, oldest first, capped at amount − TDS); `advance_use` rows (kind invoice/refund) hold amount and TDS share. Net payable = amount − TDS − (advance − its TDS). Left over: `refund` or `carry-forward` (only once the PO is no longer open). `CancelUnpaid` runs when a GRN or balance reject leaves nothing due; `Release` when a bill is voided in Zoho. Zoho gets the bill at full value with the advance in its notes and a preview warning (applying a vendor advance in Zoho is untested). `GET /advances`, `GET /advances/{id}`, `GET|POST /documents/{id}/advances`, `GET /invoices/{id}/advances`, `POST /advances/{id}/approve|reject|cancel|paid|refund|carry-forward`. Advances waiting for Finance count in the payments badge.
 - **approvals**: routing (`Chain`, `CorpSteps`), the act on one or many documents, the workbench, `BillFlags`, `Enrich`, `Finalize`, and WhatsApp notify. `GET /approvals`, `POST /approvals/bulk`, `POST /documents/{id}/approve|return|reject|route`.
 - **auditlog**: `Write(...)` for the activity log and `Doc(...)` for the document history. `GET /activity`.
+- **balancereject**: rejects the undelivered balance of a PO (per line) when the vendor will not deliver it. Purchase, the receiving store (or wh) or the Admin; never the requester alone (`Who`). The quantity comes off `document_line.qty` into `rejected_qty` (migration 009), its value is released from `budget_spend`, the vendor is emailed (`pobal`) and the requester gets WhatsApp (`bal`, MSG91 `pd_bal`). Nothing left due: RECEIVED + `po_closed_short` (then `CloseIfPaid`), or CANCELLED ("PO cancelled, nothing delivered") if nothing was received. `POST /documents/{id}/reject-balance` with `{quantities, reason, note}`; reasons from the `balance_reasons` pick list.
 - **billtypes**: `GET|POST /bill-types`, `PUT /bill-types/{id}`.
 - **budgets**: month budget, week and day split, F&B sales, spend ledger, pace and flags. `GET /budgets/overview|property|export`, `PUT /budgets`, `GET /fb-sales`, `/fb-sales/export`.
-- **bulkupload**: CSV check then import, with kinds registered through `Register(...)`. `GET /uploads/{kind}/sample`, `POST /uploads/{kind}/check|import`. Edit round trip (`roundtrip.go`, `workbook.go`): `GET /uploads/{kind}/workbook` gives an .xlsx with a Read me sheet, the page's list plus the masters it depends on as editable sheets (named after each kind's title, applied in order: Vendor Mapping = Vendors then Vendor mapping; Rates = Vendors, Items, Vendor rates), and read-only "Ref - ..." sheets. Check and import take `{text}` (CSV, one list) or `{xlsx}` (base64 workbook). A workbook check is a dry run in a rolled-back transaction, sheet by sheet with savepoints, so a later sheet sees earlier sheets' changes. `GET /uploads/{kind}/export` still gives one list as CSV. A row with its key updates, one without adds, an unchanged row is skipped (`keyOf`); users also use `onSame` and `after` so a deleted role row removes that role. Vendor bank details, GSTIN and PAN are locked on update. The workbook carries Excel rules (`sheetrules.go`): dropdowns that read from other sheets (a mapping's vendor_code from the Vendors sheet; sub-category and SKU lists filtered by the row's category through the hidden `Lists` sheet and OFFSET/MATCH/COUNTIF), stop messages naming the sheet to change first, and protected sheets where existing rows' keys and vendor bank/GST/PAN cells are locked (grey). Reference sheets are read-only. `spreadsheet.Sheet` has `Validations`, `LockedCols`, `Protect` and `Hidden`; `{col}` and `{Sheet.col}` placeholders resolve in rule formulas. A mapping's vendor, level and item may change in place. Updates go through `items.Update`, `geography.UpdateProperty`, `vendors.Update`, `vendormapping.CheckMapping` and `SaveMapping`.
+- **bulkupload**: CSV check then import, with kinds registered through `Register(...)`. `GET /uploads/{kind}/sample`, `POST /uploads/{kind}/check|import`. Edit round trip (`roundtrip.go`, `workbook.go`): `GET /uploads/{kind}/workbook` gives an .xlsx with a Read me sheet, the page's list plus the masters it depends on as editable sheets (named after each kind's title, applied in order: Rates = Vendors, Items, Vendor rates; Vendor Mapping is the mapping sheet alone, no Vendors or Ref sheets), and read-only "Ref - ..." sheets. Check and import take `{text}` (CSV, one list) or `{xlsx}` (base64 workbook). A workbook check is a dry run in a rolled-back transaction, sheet by sheet with savepoints, so a later sheet sees earlier sheets' changes. `GET /uploads/{kind}/export` still gives one list as CSV. A row with its key updates, one without adds, an unchanged row is skipped (`keyOf`); users also use `onSame` and `after` so a deleted role row removes that role. Vendor bank details, GSTIN and PAN are locked on update. The workbook carries Excel rules (`sheetrules.go`): dropdowns that read from other sheets (a mapping's vendor_code from the Vendors sheet; sub-category and SKU lists filtered by the row's category through the hidden `Lists` sheet and OFFSET/MATCH/COUNTIF), stop messages naming the sheet to change first, and protected sheets where existing rows' keys and vendor bank/GST/PAN cells are locked (grey). Reference sheets are read-only. `spreadsheet.Sheet` has `Validations`, `LockedCols`, `Protect` and `Hidden`; `{col}` and `{Sheet.col}` placeholders resolve in rule formulas. A `spreadsheet.Formula` cell value is written as a formula (full recalculation on open). `sheetRules.formulas` (`cellFormula`, `{r}` = row) and `spare` rows fill cells from the row: the mapping sheet's vendor_name, item → category/sub_category (only on rows with an item), and item_available_at (the SKU's property scope) are VLOOKUPs into the hidden Lists sheet (columns I to N). Properties are one tick column per ordering property, headed "P01 · name" (`mappingProperties`, `withPropertyTicks`): on every row they show the saved mapping until the row's item changes (`{orig}` / `{orig:item}` in `cellFormula`), then tick themselves from item_available_at; category and sub_category likewise follow the item. The mapping download has no Read me sheet (`bundle.noReadme`) (code or cluster written into each formula, since excelize's calculator cannot nest a lookup in SEARCH), and are greyed by conditional format (`spreadsheet.Shade`) where the item is not available. Upload reads ticks with `tickedProperties`: all ticked = ALL; a CSV without tick columns still uses the `properties` cell. Its item column is a label "brand item (pack) · SKU code" (`itemLabelSQL`, read back by `skuOfItem`); level is derived (item given = sku); an item may only be mapped inside its scope (`outsideItem`, ALL allowed). `kind.computed` and `kind.derived` columns are ignored by the unchanged-row check. A mapping's vendor, level and item may change in place. Updates go through `items.Update`, `geography.UpdateProperty`, `vendors.Update`, `vendormapping.CheckMapping` and `SaveMapping`.
 - **clock**: IST helpers `Now`, `Today`, `ParseDate`, `ParseMonth`, `MonthStart`, `DaysInMonth`.
 - **config**: env vars, see `.env.example`.
 - **corporate**: departments, expense heads, corporate purchases and bills. `GET|POST /corporate/departments`, `PUT .../{id}`, `GET|POST /corporate/expense-heads`, `GET /corporate/form`, `POST /corporate/requests`.
@@ -72,12 +74,12 @@ Wiring lives in `router/router.go`. Startup, migrations and background jobs live
 - **dashboard**: tiles, sections and alerts per role view (ops, cc, fin, mgmt, my). `GET /dashboard`.
 - **database**: `Connect`, `Migrate`, `Tx`, and the `Q` interface (pool or tx). Holds `migrations/001_core.sql`, `002_seed.sql`, `003_warehouse_corporate_sheets.sql`.
 - **demodata**: the sample company when `SEED_DEMO=true`, split by phase (`core`, `billsBudgetsCorporate`, `warehouse`). The setting `demo_loaded_phase` records how far it loaded; raising `RELEASE_PHASE` adds the next sections on the next start. A database with properties but no such setting is treated as real data and left alone.
-- **documents**: `Load(ctx,q,id,lock)`, `LoadMany`, `Doc.Owner()` (whose step is next), `CanAct(u,d,step,right)`, `StatusLabel`, `NextNumber(seq,prefix)`, `CloseIfPaid`, plus the status constants.
+- **documents**: `Load(ctx,q,id,lock)`, `LoadMany`, `Doc.Owner()` (whose step is next), `CanAct(u,d,step,right)`, `StatusLabel`, `NextNumber(seq,prefix)`, `RequestNumbers`, `NextSplits`, `RequestBase`, `Derived` (numbers.go, tested), `CloseIfPaid`, plus the status constants.
 - **encryption**: AES-256-GCM `Box` for Zoho secrets and bank account numbers.
 - **filestorage**: the `Store` interface, with local and Supabase drivers.
 - **firstrun**: creates the first System Admin from env.
 - **flowsettings**: `Load` gives a `Settings` struct (thresholds, toggles). Also pick lists, message templates, `CheckReason`, `Template`, `Render` (returns text and MSG91 params in placeholder order) and `Fill`. `GET|PUT /settings`, `GET /pick-lists`, `PUT /pick-lists/{name}`, `GET /templates`, `PUT /templates/{code}`.
-- **geography**: cities, clusters, properties, F&B cost %. `GET|POST /cities|/clusters|/properties`, `PUT .../{id}`, `PUT /properties/{id}/pct`.
+- **geography**: cities, clusters, properties (with `doc_code`, checked by `checkDocCode`: exactly 2 letters/digits, unique, required on create, blank on edit keeps it, fixed once used), F&B cost %. `GET|POST /cities|/clusters|/properties`, `PUT .../{id}`, `PUT /properties/{id}/pct`.
 - **goodsreceipts**: receipts with part deliveries, invoice and photos, as multipart with a `data` JSON field. `POST /documents/{id}/receipts`.
 - **httpjson**: `Wrap(handler returning error)`, `OK`, `JSON`, `Decode`, `ID(r,"id")`, `QInt`. Errors: `Bad`, `Invalid([]string)`, `Forbidden`, `NotFound`, `Conflict`, `Unauthorized`. Bad, Forbidden and Conflict take a format string.
 - **indiantax**: GSTIN, PAN, IFSC, Udyam and HSN checks; GST state codes.
@@ -89,7 +91,7 @@ Wiring lives in `router/router.go`. Startup, migrations and background jobs live
 - **passwords**: bcrypt and one-time code hashes.
 - **photoshrink**: `Fit(data,name,type,max)` makes a JPEG or PNG fit a size limit (turned upright from EXIF, scaled down, saved as JPEG). Used before attaching an invoice to a Zoho bill (kept under 5 MB; Zoho's limit is about 10 MB). Tested in `go test ./internal/photoshrink/`.
 - **purchaseorders**: `POST /documents/{id}/po` issues the PO and emails the vendor. `POST /purchase-orders/bulk` issues several at their current rates with one delivery date (terms "" = each vendor's own); a request with an estimated rate is refused.
-- **purchaserequests**: raise (split per vendor), list, detail with allowed actions, resubmit, cancel, search, and `MyTurn`. `GET|POST /requests`, `GET /requests/form`, `GET /documents/{id}`, `POST /documents/{id}/resubmit|cancel|preop-approver`, `GET /search`. The detail returns `raised_with`: the other PRs split off the same submission (same requester, property and `created_at`).
+- **purchaserequests**: raise (split per vendor), edit, list, detail with allowed actions, resubmit, cancel, search, and `MyTurn`. `prepare` checks a new or edited request the same way. `PUT /requests/{id}` edits everything (property, items, event) while `Editable`: only the requester themself, and only while PENDING at step 0 or RETURNED; the route restarts, the first-step approvers are emailed (`edit`), and items from other vendors become new PRs with the same `created_at`. Clone is frontend only (`/requests/new?clone=<id>`, own PRs). `GET|POST /requests`, `PUT /requests/{id}`, `GET /requests/form`, `GET /documents/{id}`, `POST /documents/{id}/resubmit|cancel|preop-approver`, `GET /search`. The detail returns `raised_with`: the other PRs split off the same submission (same requester, property and `created_at`).
 - **releasephase**: the switched-on phase (`Set`, `Current`, `On(phase)`), the phase constants (`Zoho`, `Bills`, `Budgets`, `Corporate`, `Warehouse`, `Sheets`, `Dashboard`, `Reports`), and `RoleOn`, `VendorTypeOn`, `PropertyKindOn`, `NotYet`.
 - **reports**: 14 reports and the Excel pack. `GET /reports`, `GET /reports/{key}` (`?format=xlsx`), `GET /reports/pack`.
 - **router**: mounts everything, CORS for dev, `GET /health`.
@@ -98,7 +100,7 @@ Wiring lives in `router/router.go`. Startup, migrations and background jobs live
 - **spreadsheet**: writes .xlsx through excelize; `Send` writes it as a download.
 - **textclean**: `Clean`, `Key` (duplicate-name key; SQL `norm_key()` is the same idea), `Upper`, `Contains`, `Uniq`, `Default`.
 - **uploadedfiles**: `Save` and serve files. Bank proofs are visible only to Finance and Admin. `GET /files/{id}`.
-- **users**: users, roles and grants (`ValidateUser`, `SaveUser`). `GET /people`, `GET|POST /users`, `PUT /users/{id}`, `GET|POST /roles`, `PUT /roles/{id}`.
+- **users**: users, roles and grants (`ValidateUser`, `SaveUser`). `GET /people`, `GET|POST /users`, `PUT /users/{id}`, `GET|POST /roles`, `PUT /roles/{id}`. Delegated user creation: the Admin ticks roles a user may give (`app_user.creatable_role_ids`, migration 011; `access.User.CreatableRoles`, `AddsUsers()`, sent in `/me` as `creatable_roles`). Such a user gets the Users & Rights page with "+ Add user", sees and edits only users they added (`created_by`; `Manages`, also used by `activestatus` for deactivating), gives only those roles, and only property access inside their own (`delegateLimits`: all only if they have all, clusters they hold, properties they see). Only the Admin sets creatable roles (`UserInput.Creatable`, nil keeps it, so uploads keep it); never System Admin.
 - **utilitybills**: utility and AMC bills with no PO or receipt; blocks a duplicate period or invoice number. `GET /bills/form`, `POST /bills`.
 - **vendormapping**: who supplies what where (SKU beats sub-category), rate cards (`CurrentRate`, `CheckRate`, `AddRate`), property check. `GET|POST /rates`, `GET /rates/format`, `GET|POST /mappings`, `PUT /mappings/{id}`, `PUT /mappings/{id}/estimate`, `GET /mappings/check|check-all`.
 - **vendors**: onboarding (`Input`, `Validate`, `Insert`), bank verification, sending preferences. `GET|POST /vendors`, `GET|PUT /vendors/{id}`, `POST /vendors/{id}/verify`, `PUT /vendors/{id}/sending`.
@@ -123,7 +125,7 @@ Routes are in `app/App.tsx`. The left menu, top bar, badges and search are in `l
   - `auth/` holds the sign-in page and `session.tsx` (the current user).
   - `format/format.ts` has `inr`, `qty`, `day`, `dateTime`, `month`, `today`, `thisMonth`, `addDays` and `plural`.
 - **ui/:**
-  - `DataTable` gives search, filters, a date range (`date={{label, value, onFrom?}}`; `onFrom` lets `/requests` lists widen `days` with `daysBack`), paging, the column chooser saved to `/prefs` and CSV export.
+  - `DataTable` gives search, filters (`multi: true` for a tick-box `MultiSelect`, rows pass if any ticked value passes), a date range (`date={{label, value, onFrom?}}`; `onFrom` lets `/requests` lists widen `days` with `daysBack`), paging, the column chooser saved to `/prefs` and CSV export.
   - Widgets: `Modal`, `Field`, `Select`, `Checks`, `Seg`, `Pill` and `statusTone`, `Tabs`, `Errors`, `ActiveToggle`.
   - `Toast` provides `useToast`, and `useAction` provides `{busy,errors,run}`. `BulkResults` lists the per-item outcome of a bulk action.
 - **Screens:**
@@ -133,12 +135,13 @@ Routes are in `app/App.tsx`. The left menu, top bar, badges and search are in `l
 | dashboard | `/` from phase 5 |
 | mywork | `/` before phase 5: tiles of pending work from `/worklist` |
 | approvals | `/approvals` |
-| requests | `/requests`, `/requests/new` |
+| requests | `/requests`, `/requests/new` (also `?clone=<id>`), `/requests/:id/edit` |
 | documents | `/documents/:id`, the hub that shows the next action for any kind; it also holds BudgetBox |
 | purchaseorders | `/purchase-orders` |
 | goodsreceipts | `/goods-receipts` |
 | invoices | `/invoices`, `/invoices/:id` |
-| payments | `/payments` |
+| payments | `/payments` (tabs: invoices and bills, advances) |
+| advances | AdvancesCard (document page), AdvancesList (Payments tab), AdvanceActions |
 | bills | `/bills/:section`, `/bills/new/:section` |
 | vendors | `/vendors`, `/vendors/new`, `/vendors/:id/edit` |
 | items | `/items`, `/settings/item-setup` |
@@ -199,7 +202,11 @@ Routes are in `app/App.tsx`. The left menu, top bar, badges and search are in `l
 - `CloseIfPaid` closes the document when all its invoices are paid.
 
 **Numbering and history**
-- Numbers come from `NextNumber(seq, prefix)`: PR-, PO-, GRN-, BR-, WT-, CR- (`cr_seq`) and CB- (`cb_seq`). A short dispatch kept open becomes `<PR>-B1` with a new WT number and `parent_id`.
+- Purchase numbers carry the property's 2-character document code (`property.doc_code`, asked when the property is created; existing properties start blank and cannot raise until the admin sets it). `documents.RequestNumbers` counts per property (`property.doc_seq`, row-locked by the UPDATE): PR_HZ_0001, or PR_HZ_0001_01, _02 ... when one submission splits per vendor. Once `doc_seq` > 0 the code is fixed.
+- The PO, warehouse transfer and GRN copy the request number (`documents.Derived`): PO_HZ_0001_01, WT_HZ_0001, GRN_HZ_0001. Gaps are expected (a rejected PR has no PO). One PO stays open across part deliveries; each GRN then gets the delivery number: GRN_HZ_0001_01, _02 (a single delivery that leaves nothing due has no suffix). A short dispatch kept open becomes `<PR>_B1` with WT `<WT>_B1` and `parent_id`.
+- Edit (`purchaserequests.editNumbers`): a move to another property takes a fresh number there; a split renames PR_HZ_0001 to _01 and adds _02 ... (a request already _01 keeps it, new ones follow the highest suffix); each rename is logged "Renumbered from ...". The base is therefore never both plain and suffixed, so GRN numbers cannot collide.
+- Older numbers (PR-1001) and corporate, bill numbers keep `NextNumber(seq, prefix)`: PO-, GRN-, WT-, BR-, CR- (`cr_seq`), CB- (`cb_seq`).
+- Every invoice row gets a purchase voucher number from one global series, `invoice.voucher_number` PV_0001 (column default `next_voucher()`, `pv_seq`), at goods receipt, utility/AMC bill or corporate bill entry. Search finds PR, PO, GRN, invoice and PV numbers (input is LIKE-escaped, since `_` is a wildcard).
 - `activity_log` and `document_log` are immutable, enforced by database triggers. Write to them with `auditlog.Write` and `auditlog.Doc`.
 
 **Budgets**
@@ -227,6 +234,10 @@ Routes are in `app/App.tsx`. The left menu, top bar, badges and search are in `l
 - 001: app_user, role, user_role, otp_code, city, cluster, property, category, sub_category, brand, pack_size, sku, vendor, vendor_sub_category, bill_type, vendor_bill_type, rate_card, vendor_mapping, vendor_mapping_property, file_object, budget, fb_sale, document, document_line, document_log, budget_spend, goods_receipt, goods_receipt_line, invoice, setting, pick_list, message_template, user_pref, activity_log, message_log.
 - 001 Zoho tables: zoho_connection, zoho_account, zoho_tax, zoho_tag, zoho_tag_option, zoho_location, zoho_contact, zoho_map_property, zoho_map_account, zoho_map_tax, zoho_map_vendor.
 - 003: warehouse_stock, delivery_partner, delivery, expense_head, corp_department, vendor_sheet_log, zoho_journal.
+- 009: `document_line.rejected_qty`, the `balance_reasons` pick list, templates `bal`, `pobal`, `edit`.
+- 012: `advance`, `advance_use`, pick list `advance_reasons`, template `advpaid`.
+- 011: `app_user.creatable_role_ids` (roles a user may give when adding users).
+- 010: `property.doc_code` (unique, case-blind) and `doc_seq`; `invoice.voucher_number` with `pv_seq` and `next_voucher()`; existing invoices numbered in entry order.
 
 ## Zoho Books
 
@@ -249,7 +260,7 @@ Routes are in `app/App.tsx`. The left menu, top bar, badges and search are in `l
   - Taxes come as `tax_group` (intra) and `tax` igst (inter).
   - Name matching, on every sync and from "Match by name": `autoLinkAccounts` fills unmapped sub-categories, bill types and expense heads with the one active expense account of the same name; `autoLinkItems` links unmapped SKUs to the one active Zoho item named like the item (or brand + item) via `zoho_map_item`. A name shared by two Zoho records is never guessed. Bill lines send `item_id` for a linked active item. "Create in Zoho" for an account selects an existing account of that name instead of creating it.
 - The test org had no reporting tag at first; on 8 Oct 2026 it showed 6 reporting tags, 6 locations, 575 accounts, 124 taxes and 962 vendors. Check `cf_purchase_desk_id` before switching pushing on.
-- MSG91 WhatsApp template names: `pd_ok`, `pd_mod`, `pd_ret`, `pd_rej`, `pd_dlv`, `pd_vsw`. Parameters follow the placeholder order of the app's message template.
+- MSG91 WhatsApp template names: `pd_ok`, `pd_mod`, `pd_ret`, `pd_rej`, `pd_dlv`, `pd_vsw`, `pd_bal`. Parameters follow the placeholder order of the app's message template.
 
 ## Code patterns
 

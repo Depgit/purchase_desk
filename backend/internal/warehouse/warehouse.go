@@ -608,17 +608,25 @@ func (s *Service) dispatch(w http.ResponseWriter, r *http.Request) error {
 					}
 				}
 			} else {
-				wt, err := documents.NextNumber(r.Context(), tx, "wt_seq", "WT")
-				if err != nil {
-					return err
-				}
 				var n int
 				_ = tx.QueryRow(r.Context(), `SELECT count(*)+1 FROM document WHERE parent_id=$1`, id).Scan(&n)
+				// The balance order is PR_HZ_0001_B1 with transfer WT_HZ_0001_B1 (older numbers: PR-1001-B1 and the next WT).
+				number := fmt.Sprintf("%s-B%d", d.Number, n)
+				wt, ok := documents.Derived(d.Number, "WT")
+				if ok {
+					number = fmt.Sprintf("%s_B%d", d.Number, n)
+					wt, _ = documents.Derived(number, "WT")
+				} else {
+					var err error
+					if wt, err = documents.NextNumber(r.Context(), tx, "wt_seq", "WT"); err != nil {
+						return err
+					}
+				}
 				var nid int64
 				if err := tx.QueryRow(r.Context(), `INSERT INTO document(number,kind,property_id,vendor_id,requester_id,requester_step,status,route_steps,step_idx,approved_at,po_number,po_date,
 					deliver_by,payment_terms,is_transfer,parent_id,created_by)
-					SELECT number||'-B'||$2, kind, property_id, vendor_id, requester_id, requester_step, 'PO_ISSUED', route_steps, step_idx, approved_at, $3, now(),
-					current_date+1, payment_terms, TRUE, id, $4 FROM document WHERE id=$1 RETURNING id`, id, fmt.Sprint(n), wt, u.ID).Scan(&nid); err != nil {
+					SELECT $2, kind, property_id, vendor_id, requester_id, requester_step, 'PO_ISSUED', route_steps, step_idx, approved_at, $3, now(),
+					current_date+1, payment_terms, TRUE, id, $4 FROM document WHERE id=$1 RETURNING id`, id, number, wt, u.ID).Scan(&nid); err != nil {
 					return err
 				}
 				for _, l := range balance {
@@ -627,7 +635,7 @@ func (s *Service) dispatch(w http.ResponseWriter, r *http.Request) error {
 					}
 				}
 				note = "Short dispatch. Balance kept open as " + wt
-				if err := auditlog.Doc(r.Context(), tx, u, g.Name, nid, d.Number, "Warehouse", "Balance of "+d.PONumber+" kept open as "+wt, ""); err != nil {
+				if err := auditlog.Doc(r.Context(), tx, u, g.Name, nid, number, "Warehouse", "Balance of "+d.PONumber+" kept open as "+wt, ""); err != nil {
 					return err
 				}
 			}
@@ -709,9 +717,12 @@ func (s *Service) receiveTransfer(w http.ResponseWriter, r *http.Request) error 
 			}
 			photoIDs = append(photoIDs, pid)
 		}
-		grn, err := documents.NextNumber(r.Context(), tx, "grn_seq", "GRN")
-		if err != nil {
-			return err
+		grn, ok := documents.Derived(d.Number, "GRN")
+		if !ok {
+			var err error
+			if grn, err = documents.NextNumber(r.Context(), tx, "grn_seq", "GRN"); err != nil {
+				return err
+			}
 		}
 		var grnID int64
 		if err := tx.QueryRow(r.Context(), `INSERT INTO goods_receipt(number,document_id,delivery_no,received_by,photo_file_ids,note) VALUES ($1,$2,1,$3,$4,'Warehouse transfer') RETURNING id`, grn, id, u.ID, photoIDs).Scan(&grnID); err != nil {

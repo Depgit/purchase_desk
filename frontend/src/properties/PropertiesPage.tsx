@@ -1,4 +1,4 @@
-// Properties with their eZee code, cluster, approvers, stage, and the F&B cost % that turn sales into the F&B budget.
+// Properties with their document code (starts every PR, PO and GRN number), eZee code, cluster, approvers, stage, and the F&B cost % that turn sales into the F&B budget.
 import { useState } from 'react'
 import { post, put } from '../api/client'
 import { refreshLookups, useLookups } from '../api/lookups'
@@ -33,12 +33,13 @@ export function PropertiesPage() {
         <div className="acts">{ed && <>{hasRight('upload') && <><button className="btn ghost" onClick={() => setUpload('properties')}>Bulk upload / edit properties</button>
           {bud && <button className="btn ghost" onClick={() => setUpload('property_pct')}>Bulk upload / edit F&amp;B cost %</button>}</>}
           <button className="btn" onClick={() => setEdit('new')}>+ Add property</button></>}</div></div>
-      <DataTable screen="properties" rows={data || []} rowKey={(p) => p.id} dim={(p) => !p.active} search={(p) => [p.code, p.name, p.ezee_code, p.l1_name, p.cluster].join(' ')}
+      <DataTable screen="properties" rows={data || []} rowKey={(p) => p.id} dim={(p) => !p.active} search={(p) => [p.code, p.doc_code, p.name, p.ezee_code, p.l1_name, p.cluster].join(' ')}
         filters={[{ id: 'cl', label: 'Cluster', options: [['', 'All clusters'], ...(l?.clusters || []).map((c) => [String(c.id), c.name] as [string, string])], test: (p, v) => String(p.cluster_id) === v },
           { id: 'kind', label: 'Stage', options: [['', 'All stages'], ...Object.entries(KIND)], test: (p, v) => p.kind === v }]}
         columns={[
           { key: 'code', label: 'Code', render: (p) => p.code, csv: (p) => p.code },
           { key: 'name', label: 'Property', render: (p) => p.name, csv: (p) => p.name },
+          { key: 'doc', label: 'Document code', render: (p) => p.doc_code || <Pill tone="bad">Not set</Pill>, csv: (p) => p.doc_code },
           { key: 'ezee', label: 'eZee code', render: (p) => p.ezee_code, csv: (p) => p.ezee_code },
           { key: 'cluster', label: 'Cluster', render: (p) => p.cluster, csv: (p) => p.cluster },
           { key: 'city', label: 'City', render: (p) => `${p.city} (${p.state_code})`, csv: (p) => p.city },
@@ -58,7 +59,7 @@ export function PropertiesPage() {
 
 function PropertyModal({ p, onClose, onDone }: { p: Property | null; onClose: () => void; onDone: () => void }) {
   const l = useLookups()
-  const [f, setF] = useState({ name: p?.name || '', ezee_code: p?.ezee_code || '', cluster_id: p?.cluster_id || l?.clusters[0]?.id || 0, l1_user_id: p?.l1_user_id || 0,
+  const [f, setF] = useState({ name: p?.name || '', doc_code: p?.doc_code || '', ezee_code: p?.ezee_code || '', cluster_id: p?.cluster_id || l?.clusters[0]?.id || 0, l1_user_id: p?.l1_user_id || 0,
     kind: p?.kind || 'live', plan_pct: p?.plan_pct ?? 35, ird_pct: p?.ird_pct ?? 32, banquet_pct: p?.banquet_pct ?? 38, copy_from: 0 })
   const a = useAction()
   const l1s = (l?.people || []).filter((u) => u.active && u.steps.includes('l1'))
@@ -68,6 +69,8 @@ function PropertyModal({ p, onClose, onDone }: { p: Property | null; onClose: ()
     <Modal title={p ? 'Edit ' + p.name : 'Add property'} onClose={onClose} wide>
       <div className="grid2">
         <Field label="Property name"><input value={f.name} onChange={(e) => setF({ ...f, name: e.target.value })} /></Field>
+        <Field label="Document code" hint={p?.doc_code_used ? `Fixed: ${p.doc_code} is already in this property's document numbers.` : `2 letters or digits. Every PR, PO and GRN number starts with it: PR_${f.doc_code || 'HZ'}_0001.`}>
+          <input value={f.doc_code} maxLength={2} disabled={p?.doc_code_used} onChange={(e) => setF({ ...f, doc_code: e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, '') })} placeholder="e.g. HZ" /></Field>
         <Field label="eZee code"><input value={f.ezee_code} onChange={(e) => setF({ ...f, ezee_code: e.target.value })} placeholder="e.g. EZ-10441" /></Field>
         <Field label="Cluster" hint="City and Cluster Manager follow the cluster."><select value={f.cluster_id} onChange={(e) => setF({ ...f, cluster_id: +e.target.value })}>{l?.clusters.map((c) => <option key={c.id} value={c.id}>{c.name} · {c.city}</option>)}</select></Field>
         <Field label="Stage" hint="A pre-opening property has no monthly budget; its orders go to the Pre-opening Team.">

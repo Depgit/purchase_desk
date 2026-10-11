@@ -1,9 +1,9 @@
 // One invoice: ordered, received and invoiced side by side; confirm the match, accept a difference with a remark,
 // or send it back to the store. Finance approves payment here too.
-import { useState } from 'react'
+import { Fragment, useEffect, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
-import { fileUrl, post } from '../api/client'
-import type { Invoice } from '../api/types'
+import { fileUrl, get, post } from '../api/client'
+import type { AdvancePick, Invoice } from '../api/types'
 import { useApi } from '../api/useApi'
 import { useSession } from '../auth/session'
 import { day, inr, qty } from '../format/format'
@@ -27,7 +27,7 @@ export function InvoicePage() {
   return (
     <>
       <div className="head"><div><Link className="link" to={'/documents/' + x.document_id}>‹ {x.po_number || x.document_number}</Link>
-        <h1>Invoice {x.invoice_number}</h1><p className="sub">{x.vendor} · {x.property} · dated {day(x.invoice_date)}{x.grn_number ? ` · ${x.grn_number}, delivery ${x.delivery_no}` : ''}</p></div>
+        <h1>Invoice {x.invoice_number}</h1><p className="sub">Voucher {x.voucher_number} · {x.vendor} · {x.property} · dated {day(x.invoice_date)}{x.grn_number ? ` · ${x.grn_number}, delivery ${x.delivery_no}` : ''}</p></div>
         <Pill tone={statusTone(x.status)}>{x.status.replace('_', ' ').toLowerCase()}</Pill></div>
       <div className="cols">
         <div className="stack">
@@ -45,13 +45,13 @@ export function InvoicePage() {
               </div>
             </section>
           )}
-          {x.status === 'MATCHED' && hasStep('finance') && (
-            <section className="card act"><h2>Payment approval</h2>
-              <dl className="kv"><dt>Invoice amount</dt><dd>{inr(x.amount)}</dd>{x.tds_amount > 0 && <><dt>TDS ({x.tds_sections})</dt><dd>− {inr(x.tds_amount)}</dd></>}<dt>Pay the vendor</dt><dd><b>{inr(x.net_payable)}</b></dd><dt>Terms</dt><dd>{x.payment_terms} · pay by {day(x.pay_by)}</dd></dl>
-              {x.vendor_msme && <p className="note warn">MSME vendor: pay by {day(x.msme_limit)} at the latest.</p>}
-              {!x.vendor_gst_registered && <p className="note warn">Unregistered vendor: no GST is charged.</p>}
-              <Errors list={a.errors} />
-              <div className="btns"><button className="btn" disabled={a.busy} onClick={() => a.run(() => post(`/invoices/${x.id}/approve-payment`), done)}>Approve for payment</button></div>
+          {x.status === 'MATCHED' && hasStep('finance') && <PaymentApproval x={x} onDone={reload} />}
+          {x.advance_adjusted > 0 && x.status !== 'MATCHED' && (
+            <section className="card"><h2>Advance adjusted</h2>
+              <dl className="kv"><dt>Invoice amount</dt><dd>{inr(x.amount)}</dd>{x.tds_amount > 0 && <><dt>TDS ({x.tds_sections})</dt><dd>− {inr(x.tds_amount)}</dd></>}
+                {(x.advance_uses || []).map((u) => <Fragment key={u.id}><dt>Advance {u.advance_number}</dt><dd>− {inr(u.amount - u.tds_amount)}{u.tds_amount > 0 ? <span className="hint"> (TDS {inr(u.tds_amount)} held when paid)</span> : null}</dd></Fragment>)}
+                <dt>Pay the vendor</dt><dd><b>{inr(x.net_payable)}</b></dd></dl>
+              {zoho && <p className="hint">Zoho gets the bill at full value with the advance in its notes; apply the vendor advance to the bill in Zoho when paying.</p>}
             </section>
           )}
           {x.status === 'PAY_APPROVED' && !zoho && (
@@ -91,5 +91,35 @@ export function InvoicePage() {
       </div>
       {preview && <ZohoPreview invoiceId={x.id} onClose={() => setPreview(false)} />}
     </>
+  )
+}
+
+// Finance approves a matched invoice for payment, adjusting the vendor's paid advances: this PO's first, then any
+// carried forward from the vendor's other POs. The suggested amounts can be changed (0 leaves an advance for later).
+function PaymentApproval({ x, onDone }: { x: Invoice; onDone: () => void }) {
+  const a = useAction()
+  const [picks, setPicks] = useState<AdvancePick[]>([])
+  useEffect(() => { get<{ available: AdvancePick[] }>(`/invoices/${x.id}/advances`).then((r) => setPicks(r.available)).catch(() => setPicks([])) }, [x.id])
+  const share = (p: AdvancePick, amt: number) => p.advance_amount > 0 ? Math.round(p.advance_tds * amt / p.advance_amount * 100) / 100 : 0
+  const advNet = picks.reduce((t, p) => t + (p.amount || 0) - share(p, p.amount || 0), 0)
+  const pay = Math.round((x.amount - x.tds_amount - advNet) * 100) / 100
+  return (
+    <section className="card act"><h2>Payment approval</h2>
+      <dl className="kv"><dt>Invoice amount</dt><dd>{inr(x.amount)}</dd>{x.tds_amount > 0 && <><dt>TDS ({x.tds_sections})</dt><dd>− {inr(x.tds_amount)}</dd></>}
+        {picks.length > 0 && <><dt>Advance adjusted</dt><dd>− {inr(advNet)}</dd></>}
+        <dt>Pay the vendor</dt><dd><b>{inr(pay)}</b></dd><dt>Terms</dt><dd>{x.payment_terms} · pay by {day(x.pay_by)}</dd></dl>
+      {picks.length > 0 && <div className="scroll"><table>
+        <thead><tr><th>Advance paid earlier</th><th className="r">Left on it</th><th className="r">Adjust now</th></tr></thead>
+        <tbody>{picks.map((p, i) => <tr key={p.advance_id}>
+          <td className="id">{p.number}<br /><span className="hint">{p.same_po ? 'this PO' : `${p.po_number} · ${p.property} · carried forward`}{p.advance_tds > 0 ? ' · TDS held when paid' : ''}</span></td>
+          <td className="r">{inr(p.open)}</td>
+          <td className="r"><input type="number" style={{ width: 120 }} value={p.amount} min={0} max={p.open}
+            onChange={(e) => setPicks(picks.map((q, j) => j === i ? { ...q, amount: +e.target.value } : q))} /></td></tr>)}</tbody></table></div>}
+      {pay < 0 && <p className="note bad">The advance adjusted is more than this invoice. Lower it; what is left stays for the next invoice.</p>}
+      {x.vendor_msme && <p className="note warn">MSME vendor: pay by {day(x.msme_limit)} at the latest.</p>}
+      {!x.vendor_gst_registered && <p className="note warn">Unregistered vendor: no GST is charged.</p>}
+      <Errors list={a.errors} />
+      <div className="btns"><button className="btn" disabled={a.busy || pay < 0} onClick={() => a.run(() => post(`/invoices/${x.id}/approve-payment`, { advances: picks.map((p) => ({ advance_id: p.advance_id, amount: p.amount || 0 })) }), (r: any) => { onDone(); return r.message })}>Approve for payment</button></div>
+    </section>
   )
 }

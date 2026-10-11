@@ -372,7 +372,7 @@ func (s *Service) create(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 	steps := approvals.CorpSteps(st, amount, u.ID, dept.L1ID)
-	var number string
+	var number, voucher string
 	var id int64
 	err = pgx.BeginFunc(ctx, s.DB, func(tx pgx.Tx) error {
 		kind, seq, prefix := "corp_purchase", "cr_seq", "CR"
@@ -415,8 +415,8 @@ func (s *Service) create(w http.ResponseWriter, r *http.Request) error {
 				return err
 			}
 			date, _ := clock.ParseDate(in.InvoiceDate)
-			if _, err := tx.Exec(ctx, `INSERT INTO invoice(document_id,vendor_id,property_id,invoice_number,invoice_date,amount,gst_pct,file_id,status,created_by)
-				VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'AWAITING',$9)`, id, in.VendorID, officeID, in.InvoiceNumber, date, money.Round2(in.InvoiceAmount), in.GST, fid, u.ID); err != nil {
+			if err := tx.QueryRow(ctx, `INSERT INTO invoice(document_id,vendor_id,property_id,invoice_number,invoice_date,amount,gst_pct,file_id,status,created_by)
+				VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'AWAITING',$9) RETURNING voucher_number`, id, in.VendorID, officeID, in.InvoiceNumber, date, money.Round2(in.InvoiceAmount), in.GST, fid, u.ID).Scan(&voucher); err != nil {
 				return err
 			}
 		}
@@ -429,5 +429,9 @@ func (s *Service) create(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
-	return httpjson.OK(w, map[string]any{"id": id, "number": number, "message": number + " sent for approval"})
+	msg := number + " sent for approval"
+	if voucher != "" {
+		msg = number + " (voucher " + voucher + ") sent for approval"
+	}
+	return httpjson.OK(w, map[string]any{"id": id, "number": number, "voucher_number": voucher, "message": msg})
 }

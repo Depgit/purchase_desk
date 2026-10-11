@@ -4,7 +4,11 @@
 package invoices
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"fmt"
+	"io"
 	"math"
 	"net/http"
 	"strings"
@@ -15,6 +19,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"purchasedesk/internal/access"
+	"purchasedesk/internal/advances"
 	"purchasedesk/internal/auditlog"
 	"purchasedesk/internal/clock"
 	"purchasedesk/internal/database"
@@ -46,51 +51,55 @@ func (s *Service) Routes(r chi.Router) {
 }
 
 type Invoice struct {
-	ID            int64      `json:"id"`
-	DocumentID    int64      `json:"document_id"`
-	DocNumber     string     `json:"document_number"`
-	Kind          string     `json:"kind"`
-	PONumber      string     `json:"po_number"`
-	GRN           string     `json:"grn_number"`
-	DeliveryNo    int        `json:"delivery_no"`
-	ReceivedAt    *time.Time `json:"received_at"`
-	VendorID      int64      `json:"vendor_id"`
-	Vendor        string     `json:"vendor"`
-	VendorMSME    bool       `json:"vendor_msme"`
-	VendorGST     bool       `json:"vendor_gst_registered"`
-	Terms         string     `json:"payment_terms"`
-	PropertyID    int64      `json:"property_id"`
-	Property      string     `json:"property"`
-	ClusterID     int64      `json:"cluster_id"`
-	City          string     `json:"city"`
-	BillType      string     `json:"bill_type"`
-	Number        string     `json:"invoice_number"`
-	Date          string     `json:"invoice_date"`
-	Amount        float64    `json:"amount"`
-	GST           *float64   `json:"gst_pct"`
-	FileID        *int64     `json:"file_id"`
-	Status        string     `json:"status"`
-	MatchRemark   string     `json:"match_remark"`
-	DueDate       string     `json:"due_date"`
-	PayBy         string     `json:"pay_by"`
-	MSMELimit     string     `json:"msme_limit"`
-	ZohoBillID    string     `json:"zoho_bill_id"`
-	ZohoStatus    string     `json:"zoho_status"`
-	ZohoBalance   *float64   `json:"zoho_balance"`
-	ZohoPaid      *float64   `json:"zoho_paid"`
-	ZohoError     string     `json:"zoho_error"`
-	PaidAt        *time.Time `json:"paid_at"`
-	PaymentRef    string     `json:"payment_ref"`
-	OrderedValue  float64    `json:"ordered_value"`
-	ReceivedValue float64    `json:"received_value"`
-	Difference    float64    `json:"difference"`
-	WithinTol     bool       `json:"within_tolerance"`
-	Held          []string   `json:"held"`
-	TDS           float64    `json:"tds_amount"`   // tax deducted at source on service lines, on the value before GST
-	TDSSections   string     `json:"tds_sections"` // the sections it falls under, for example "194C"
-	NetPayable    float64    `json:"net_payable"`  // what the vendor is paid: amount less TDS
-	CreatedAt     time.Time  `json:"created_at"`
-	Lines         []RLine    `json:"lines,omitempty"`
+	ID            int64          `json:"id"`
+	DocumentID    int64          `json:"document_id"`
+	DocNumber     string         `json:"document_number"`
+	Kind          string         `json:"kind"`
+	PONumber      string         `json:"po_number"`
+	GRN           string         `json:"grn_number"`
+	DeliveryNo    int            `json:"delivery_no"`
+	ReceivedAt    *time.Time     `json:"received_at"`
+	VendorID      int64          `json:"vendor_id"`
+	Vendor        string         `json:"vendor"`
+	VendorMSME    bool           `json:"vendor_msme"`
+	VendorGST     bool           `json:"vendor_gst_registered"`
+	Terms         string         `json:"payment_terms"`
+	PropertyID    int64          `json:"property_id"`
+	Property      string         `json:"property"`
+	ClusterID     int64          `json:"cluster_id"`
+	City          string         `json:"city"`
+	BillType      string         `json:"bill_type"`
+	Number        string         `json:"invoice_number"`
+	Voucher       string         `json:"voucher_number"` // purchase voucher PV_0001: one series for every bill entered
+	Date          string         `json:"invoice_date"`
+	Amount        float64        `json:"amount"`
+	GST           *float64       `json:"gst_pct"`
+	FileID        *int64         `json:"file_id"`
+	Status        string         `json:"status"`
+	MatchRemark   string         `json:"match_remark"`
+	DueDate       string         `json:"due_date"`
+	PayBy         string         `json:"pay_by"`
+	MSMELimit     string         `json:"msme_limit"`
+	ZohoBillID    string         `json:"zoho_bill_id"`
+	ZohoStatus    string         `json:"zoho_status"`
+	ZohoBalance   *float64       `json:"zoho_balance"`
+	ZohoPaid      *float64       `json:"zoho_paid"`
+	ZohoError     string         `json:"zoho_error"`
+	PaidAt        *time.Time     `json:"paid_at"`
+	PaymentRef    string         `json:"payment_ref"`
+	OrderedValue  float64        `json:"ordered_value"`
+	ReceivedValue float64        `json:"received_value"`
+	Difference    float64        `json:"difference"`
+	WithinTol     bool           `json:"within_tolerance"`
+	Held          []string       `json:"held"`
+	TDS           float64        `json:"tds_amount"`       // tax deducted at source on service lines, on the value before GST
+	TDSSections   string         `json:"tds_sections"`     // the sections it falls under, for example "194C"
+	NetPayable    float64        `json:"net_payable"`      // what the vendor is paid: amount less TDS, less the advance adjusted
+	AdvanceUsed   float64        `json:"advance_adjusted"` // advances adjusted on this invoice (including the TDS held on them)
+	AdvanceTDS    float64        `json:"advance_tds"`      // TDS already held when those advances were paid
+	AdvanceUses   []advances.Use `json:"advance_uses,omitempty"`
+	CreatedAt     time.Time      `json:"created_at"`
+	Lines         []RLine        `json:"lines,omitempty"`
 }
 
 // RLine is one line of a goods receipt: ordered, received in this delivery, and its value.
@@ -109,12 +118,13 @@ type RLine struct {
 
 const selectInvoice = `SELECT i.id, i.document_id, d.number, d.kind, coalesce(d.po_number,''), coalesce(g.number,''), coalesce(g.delivery_no,0), g.received_at,
 	i.vendor_id, v.legal_name, v.msme, v.gst_registered, coalesce(nullif(d.payment_terms,''), v.payment_terms), i.property_id, p.name, p.cluster_id, c.name, coalesce(bt.name, eh.name, ''),
-	i.invoice_number, i.invoice_date::text, i.amount, i.gst_pct, i.file_id, i.status, i.match_remark, coalesce(i.due_date::text,''),
+	i.invoice_number, i.voucher_number, i.invoice_date::text, i.amount, i.gst_pct, i.file_id, i.status, i.match_remark, coalesce(i.due_date::text,''),
 	coalesce(i.zoho_bill_id,''), i.zoho_status, i.zoho_balance, i.zoho_paid, i.zoho_error, i.paid_at, i.payment_ref, i.created_at,
 	coalesce((SELECT sum(l.qty*l.rate*(1+l.gst_pct/100)) FROM goods_receipt_line gl JOIN document_line l ON l.id=gl.line_id WHERE gl.goods_receipt_id=g.id),0),
 	coalesce((SELECT sum(gl.qty*l.rate*(1+l.gst_pct/100)) FROM goods_receipt_line gl JOIN document_line l ON l.id=gl.line_id WHERE gl.goods_receipt_id=g.id),0),
 	coalesce((SELECT sum(gl.qty*l.rate*l.tds_pct/100) FROM goods_receipt_line gl JOIN document_line l ON l.id=gl.line_id WHERE gl.goods_receipt_id=g.id),0),
-	coalesce((SELECT string_agg(DISTINCT l.tds_section, ', ') FROM goods_receipt_line gl JOIN document_line l ON l.id=gl.line_id WHERE gl.goods_receipt_id=g.id AND l.tds_pct>0),'')
+	coalesce((SELECT string_agg(DISTINCT l.tds_section, ', ') FROM goods_receipt_line gl JOIN document_line l ON l.id=gl.line_id WHERE gl.goods_receipt_id=g.id AND l.tds_pct>0),''),
+	coalesce((SELECT sum(x.amount) FROM advance_use x WHERE x.invoice_id=i.id),0)::float8, coalesce((SELECT sum(x.tds_amount) FROM advance_use x WHERE x.invoice_id=i.id),0)::float8
 	FROM invoice i JOIN document d ON d.id=i.document_id JOIN vendor v ON v.id=i.vendor_id JOIN property p ON p.id=i.property_id
 	JOIN cluster k ON k.id=p.cluster_id JOIN city c ON c.id=k.city_id
 	LEFT JOIN goods_receipt g ON g.id=i.goods_receipt_id LEFT JOIN bill_type bt ON bt.id=d.bill_type_id LEFT JOIN expense_head eh ON eh.id=d.expense_head_id`
@@ -124,15 +134,15 @@ func scan(st flowsettings.Settings) func(pgx.CollectableRow) (Invoice, error) {
 		var x Invoice
 		err := row.Scan(&x.ID, &x.DocumentID, &x.DocNumber, &x.Kind, &x.PONumber, &x.GRN, &x.DeliveryNo, &x.ReceivedAt,
 			&x.VendorID, &x.Vendor, &x.VendorMSME, &x.VendorGST, &x.Terms, &x.PropertyID, &x.Property, &x.ClusterID, &x.City, &x.BillType,
-			&x.Number, &x.Date, &x.Amount, &x.GST, &x.FileID, &x.Status, &x.MatchRemark, &x.DueDate,
+			&x.Number, &x.Voucher, &x.Date, &x.Amount, &x.GST, &x.FileID, &x.Status, &x.MatchRemark, &x.DueDate,
 			&x.ZohoBillID, &x.ZohoStatus, &x.ZohoBalance, &x.ZohoPaid, &x.ZohoError, &x.PaidAt, &x.PaymentRef, &x.CreatedAt,
-			&x.OrderedValue, &x.ReceivedValue, &x.TDS, &x.TDSSections)
+			&x.OrderedValue, &x.ReceivedValue, &x.TDS, &x.TDSSections, &x.AdvanceUsed, &x.AdvanceTDS)
 		if err != nil {
 			return x, err
 		}
 		// TDS is rounded to the nearest rupee (Income Tax Act, section 288B) and taken off what the vendor is paid.
 		x.TDS = math.Round(x.TDS)
-		x.NetPayable = money.Round2(x.Amount - x.TDS)
+		x.NetPayable = money.Round2(x.Amount - x.TDS - (x.AdvanceUsed - x.AdvanceTDS))
 		x.OrderedValue, x.ReceivedValue = money.Round2(x.OrderedValue), money.Round2(x.ReceivedValue)
 		bill := x.Kind == "bill" || x.Kind == "corp_bill"
 		if bill {
@@ -260,6 +270,10 @@ func Load(ctx context.Context, q database.Q, id int64) (*Invoice, error) {
 		l.Value = money.Round2(money.LineValue(l.Received, l.Rate, l.GST))
 		return l, err
 	})
+	if err != nil {
+		return nil, err
+	}
+	x.AdvanceUses, err = advances.UsesForInvoice(ctx, q, id)
 	return &x, err
 }
 
@@ -399,11 +413,21 @@ func (s *Service) approvePayment(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
+	// The body may list the advances to adjust ({"advances": [{advance_id, amount}]}); without one, the suggestion
+	// (this PO's paid advances, then the vendor's carried-forward ones) is adjusted.
+	var in struct {
+		Advances *[]advances.Pick `json:"advances"`
+	}
+	if raw, _ := io.ReadAll(io.LimitReader(r.Body, 1<<20)); len(bytes.TrimSpace(raw)) > 0 {
+		if err := json.Unmarshal(raw, &in); err != nil {
+			return httpjson.Bad("Could not read the request.")
+		}
+	}
 	st, err := flowsettings.Load(r.Context(), s.DB)
 	if err != nil {
 		return err
 	}
-	err = pgx.BeginFunc(r.Context(), s.DB, func(tx pgx.Tx) error { return approveOne(r.Context(), tx, u, st, id, false) })
+	err = pgx.BeginFunc(r.Context(), s.DB, func(tx pgx.Tx) error { return approveOne(r.Context(), tx, u, st, id, false, in.Advances) })
 	if err != nil {
 		return err
 	}
@@ -411,12 +435,20 @@ func (s *Service) approvePayment(w http.ResponseWriter, r *http.Request) error {
 	if !releasephase.On(releasephase.Zoho) {
 		msg = "Payment approved."
 	}
+	if x, err := Load(r.Context(), s.DB, id); err == nil && x.AdvanceUsed > 0 {
+		msg += fmt.Sprintf(" Advance of %s adjusted; pay the vendor %s.", money.INR(x.AdvanceUsed-x.AdvanceTDS), money.INR(x.NetPayable))
+	}
 	return httpjson.OK(w, map[string]string{"message": msg})
 }
 
-// approveOne approves one matched invoice for payment and sets its pay-by date.
-func approveOne(ctx context.Context, tx pgx.Tx, u *access.User, st flowsettings.Settings, id int64, bulk bool) error {
+// approveOne approves one matched invoice for payment and sets its pay-by date. It adjusts paid advances: picks, or
+// the suggestion when picks is nil (always in bulk).
+func approveOne(ctx context.Context, tx pgx.Tx, u *access.User, st flowsettings.Settings, id int64, bulk bool, picks *[]advances.Pick) error {
 	x, g, err := lockInvoice(ctx, tx, u, id, documents.InvMatched, "finance", access.Pay)
+	if err != nil {
+		return err
+	}
+	adv, err := advances.Apply(ctx, tx, u, id, money.Round2(x.Amount-x.TDS), picks)
 	if err != nil {
 		return err
 	}
@@ -430,6 +462,9 @@ func approveOne(ctx context.Context, tx pgx.Tx, u *access.User, st flowsettings.
 	}
 	if !x.VendorGST {
 		note += " · unregistered vendor"
+	}
+	if adv != "" {
+		note += " · " + adv
 	}
 	if bulk {
 		note += " · approved in bulk"
@@ -471,7 +506,7 @@ func (s *Service) bulk(w http.ResponseWriter, r *http.Request) error {
 			if in.Action == "match" {
 				return matchOne(r.Context(), tx, u, id, "")
 			}
-			return approveOne(r.Context(), tx, u, st, id, true)
+			return approveOne(r.Context(), tx, u, st, id, true, nil)
 		})
 		if err != nil {
 			res = append(res, bulkResult{ID: id, Message: err.Error()})

@@ -99,6 +99,22 @@ func (s *Service) counts(w http.ResponseWriter, r *http.Request) error {
 			}
 		}
 	}
+	// Advances waiting for Finance to approve or pay count with the payments.
+	ar, err := s.DB.Query(r.Context(), `SELECT a.property_id, p.cluster_id FROM advance a JOIN property p ON p.id=a.property_id
+		WHERE a.status IN ('PENDING','APPROVED') AND ($1 OR a.property_id = ANY($2))`, all, ids)
+	if err != nil {
+		return err
+	}
+	defer ar.Close()
+	for ar.Next() {
+		var pid, cid int64
+		if err := ar.Scan(&pid, &cid); err != nil {
+			return err
+		}
+		if u.Can("finance", access.Pay, pid, cid, nil) != nil {
+			c["payments"]++
+		}
+	}
 	if u.IsAdmin || u.HasStep("finance") {
 		var n int
 		_ = s.DB.QueryRow(r.Context(), `SELECT count(*) FROM vendor WHERE active AND NOT bank_verified AND vendor_type<>'warehouse'`).Scan(&n)

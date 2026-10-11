@@ -52,6 +52,8 @@ type kind struct {
 	keyOf    func(row csvfile.Row) string                       // the row's key in that file; an uploaded row equal to it is skipped as unchanged
 	onSame   func(ctx context.Context, x *run, row csvfile.Row) // sees a skipped unchanged row (a user's other roles)
 	after    func(ctx context.Context, x *run) []result         // extra changes found once every row is read (a role row deleted)
+	computed []string                                           // columns the workbook fills in itself (a vendor's name); not read and not compared
+	derived  map[string]string                                  // column → the column it fills in from when that one has a value (category from item); not compared then
 }
 
 type result struct {
@@ -427,7 +429,7 @@ func (s *Service) define() map[string]*kind {
 		"properties": {
 			title: "Properties", module: "Properties", allowed: masters,
 			required: []string{"property_name", "ezee_code", "cluster"},
-			sample:   "property_code,property_name,ezee_code,cluster,stage,property_manager_login,plan_cost_pct,ird_cost_pct,banquet_cost_pct\n,\"Sector 45, Gurugram\",EZ-10401,Gurugram North,live,ravi.kumar@saltstayz.com,35,32,38\n",
+			sample:   "property_code,property_name,doc_code,ezee_code,cluster,stage,property_manager_login,plan_cost_pct,ird_cost_pct,banquet_cost_pct\n,\"Sector 45, Gurugram\",SG,EZ-10401,Gurugram North,live,ravi.kumar@saltstayz.com,35,32,38\n",
 			keyOf:    key("property_code"),
 			check: func(ctx context.Context, x *run, row csvfile.Row) result {
 				in := geography.PropertyInput{Kind: "live", PlanPct: 35, IRDPct: 32, BanquetPct: 38}
@@ -442,7 +444,8 @@ func (s *Service) define() map[string]*kind {
 						return bad("Duplicate row in the file")
 					}
 				}
-				in.Name, in.EzeeCode = row.Get("property_name"), row.Get("ezee_code")
+				// doc_code starts the property's document numbers (PR_SG_0001); blank on an edit keeps the one on file.
+				in.Name, in.EzeeCode, in.DocCode = row.Get("property_name"), row.Get("ezee_code"), row.Get("doc_code")
 				if v := row.Get("stage"); strings.TrimSpace(v) != "" {
 					in.Kind = strings.ToLower(strings.ReplaceAll(strings.ReplaceAll(strings.TrimSpace(v), "-", ""), " ", ""))
 				}
@@ -468,7 +471,7 @@ func (s *Service) define() map[string]*kind {
 				if errs := geography.ValidateProperty(ctx, x.q, &in, id); len(errs) > 0 {
 					return bad("%s", strings.Join(errs, " "))
 				}
-				if x.dup(textclean.Key(in.Name)) || x.dup("ez"+in.EzeeCode) {
+				if x.dup(textclean.Key(in.Name)) || x.dup("ez"+in.EzeeCode) || (in.DocCode != "" && x.dup("doc"+in.DocCode)) {
 					return bad("Duplicate row in the file")
 				}
 				msg := "New property"
@@ -494,8 +497,8 @@ func (s *Service) define() map[string]*kind {
 				return nil
 			},
 			export: func(ctx context.Context, q database.Q, r *http.Request) ([]string, [][]string, error) {
-				heads := []string{"property_code", "property_name", "ezee_code", "cluster", "stage", "property_manager_login", "plan_cost_pct", "ird_cost_pct", "banquet_cost_pct"}
-				rows, err := rowsOf(ctx, q, `SELECT p.code, p.name, p.ezee_code, k.name, p.kind, coalesce(u.email::text, u.mobile, ''),
+				heads := []string{"property_code", "property_name", "doc_code", "ezee_code", "cluster", "stage", "property_manager_login", "plan_cost_pct", "ird_cost_pct", "banquet_cost_pct"}
+				rows, err := rowsOf(ctx, q, `SELECT p.code, p.name, coalesce(p.doc_code,''), p.ezee_code, k.name, p.kind, coalesce(u.email::text, u.mobile, ''),
 					p.plan_pct::float8::text, p.ird_pct::float8::text, p.banquet_pct::float8::text
 					FROM property p JOIN cluster k ON k.id=p.cluster_id LEFT JOIN app_user u ON u.id=p.l1_user_id WHERE p.active ORDER BY p.code`)
 				return heads, rows, err

@@ -30,9 +30,10 @@ export function InvoicesPage() {
       {results && <BulkResults title="Last bulk match" results={results} label={(id) => rows.find((r) => r.id === id)?.invoice_number || String(id)} onClose={() => setResults(null)} />}
       <DataTable screen="invoices" rows={rows} rowKey={(r) => r.id} date={{ label: 'Invoice date', value: (r) => r.invoice_date }} onOpen={(r) => nav('/invoices/' + r.id)}
         selectable={ap ? (r) => r.status === 'RECEIVED' && r.within_tolerance : undefined} selected={sel} onSelect={setSel}
-        search={(r) => [r.invoice_number, r.vendor, r.po_number, r.document_number, r.property].join(' ')}
+        search={(r) => [r.invoice_number, r.voucher_number, r.vendor, r.po_number, r.document_number, r.property].join(' ')}
         filters={[{ id: 'st', label: 'Match', options: [['', 'All'], ['RECEIVED', 'To match'], ['DONE', 'Matched']], test: (r, v) => v === 'RECEIVED' ? r.status === 'RECEIVED' : r.status !== 'RECEIVED' }]}
         columns={[
+          { key: 'pv', label: 'Voucher', render: (r) => r.voucher_number, sort: (r) => r.id, csv: (r) => r.voucher_number },
           { key: 'inv', label: 'Invoice', render: (r) => r.invoice_number, csv: (r) => r.invoice_number },
           { key: 'date', label: 'Invoice date', render: (r) => day(r.invoice_date), sort: (r) => r.invoice_date, csv: (r) => r.invoice_date },
           { key: 'vendor', label: 'Vendor', render: (r) => r.vendor, csv: (r) => r.vendor },

@@ -5,12 +5,14 @@ export interface Grant {
 }
 export interface Me {
   id: number; name: string; email: string; mobile: string; department: string; roles: Grant[]; is_admin: boolean; phase: number
+  /** Roles the System Admin lets this user give when adding users; empty means they cannot add users. */
+  creatable_roles: number[] | null
 }
 export interface Line {
   id: number; sku_id: number; sku_code: string; item_name: string; brand: string; pack_size: string; hsn: string
   sub_category_id: number; sub_category: string; category_id: number; category: string
   qty: number; original_qty: number | null; rate: number; gst_pct: number; estimated: boolean
-  dispatched_qty: number | null; received_qty: number; value: number
+  dispatched_qty: number | null; received_qty: number; rejected_qty: number; value: number
   description: string; unit: string; expense_head_id: number | null
 }
 export interface Delivery { partner_id: number; partner: string; driver: string; phone: string; date: string; slot: string; vehicle: string; note: string; version: number }
@@ -37,26 +39,48 @@ export interface Doc {
 }
 export interface ListRow {
   id: number; number: string; kind: string; po_number: string; created_at: string; property_id: number; property: string
-  cluster_id: number; cluster: string; city: string; category: string; items: string; vendor: string; vendor_msme: boolean; requester: string
+  cluster_id: number; cluster: string; city: string; category: string; items: string; vendor: string; vendor_msme: boolean; requester: string; requester_id: number; editable: boolean
   amount: number; status: string; status_label: string; owner: string; modified: boolean; event: boolean; deliver_by: string; payment_terms: string
   is_transfer: boolean; bill_type: string; bill_section: string; period_start: string; months: number; property_kind: string
   po_closed_short: boolean; received_value: number; my_turn: boolean; department: string
 }
 export interface Invoice {
   tds_amount: number; tds_sections: string; net_payable: number
+  /** Advances adjusted at payment approval (gross), and the TDS already held when they were paid. */
+  advance_adjusted: number; advance_tds: number; advance_uses?: AdvanceUse[]
   id: number; document_id: number; document_number: string; kind: string; po_number: string; grn_number: string; delivery_no: number
   received_at: string | null; vendor_id: number; vendor: string; vendor_msme: boolean; vendor_gst_registered: boolean; payment_terms: string
-  property_id: number; property: string; cluster_id: number; city: string; bill_type: string; invoice_number: string; invoice_date: string
+  property_id: number; property: string; cluster_id: number; city: string; bill_type: string; invoice_number: string; voucher_number: string; invoice_date: string
   amount: number; gst_pct: number | null; file_id: number | null; status: string; match_remark: string; due_date: string; pay_by: string; msme_limit: string
   zoho_bill_id: string; zoho_status: string; zoho_balance: number | null; zoho_paid: number | null; zoho_error: string; paid_at: string | null; payment_ref: string
   ordered_value: number; received_value: number; difference: number; within_tolerance: boolean; held: string[]; created_at: string
   lines?: { line_id: number; sku_code: string; item: string; pack_size: string; hsn: string; ordered: number; received: number; rate: number; gst_pct: number; value: number }[]
 }
 export interface Property {
-  id: number; code: string; name: string; ezee_code: string; cluster_id: number; cluster: string; city_id: number; city: string; state_code: string
+  /** doc_code starts the property's document numbers (PR_HZ_0001); it is fixed once a number uses it (doc_code_used). */
+  id: number; code: string; doc_code: string; doc_code_used: boolean; name: string; ezee_code: string; cluster_id: number; cluster: string; city_id: number; city: string; state_code: string
   l1_user_id: number | null; l1_name: string; l2_name: string; kind: string; plan_pct: number; ird_pct: number; banquet_pct: number; active: boolean; inactive_reason: string
 }
 export interface Option { id: number; name: string }
 
 /** Payment terms, as the server accepts them. "15th of next month": anything dated in October is due on 15 November. */
 export const PAYMENT_TERMS = ['Net 15', 'Net 30', 'Net 45', '15th of next month', 'Advance']
+
+/** A vendor advance on an issued PO: requested by Purchase, approved and paid by Finance, then adjusted on the
+ * vendor's invoices; what is left is refunded or carried forward to the vendor's next invoices. */
+export interface Advance {
+  id: number; number: string; document_id: number; document_number: string; po_number: string; kind: string; po_open: boolean
+  vendor_id: number; vendor: string; property_id: number; property: string; amount: number; pct: number | null; tds_amount: number; pay_vendor: number
+  reason: string; note: string; proforma_file_id: number | null; status: 'PENDING' | 'APPROVED' | 'PAID' | 'REJECTED' | 'CANCELLED'
+  requested_by: number; requester: string; requested_at: string; decided_by: string; decided_at: string | null; decision_note: string
+  paid_on: string; payment_ref: string; carry_forward: boolean; adjusted: number; refunded: number; open: number; actions: string[]; uses?: AdvanceUse[]
+}
+export interface AdvanceUse {
+  id: number; advance_id: number; advance_number: string; kind: 'invoice' | 'refund'; invoice_id: number | null; invoice_number: string; voucher_number: string
+  amount: number; tds_amount: number; reference: string; used_on: string; by: string
+}
+/** An advance an invoice can use at payment approval, with the suggested amount. */
+export interface AdvancePick {
+  advance_id: number; amount: number; number: string; po_number: string; property: string; open: number
+  advance_amount: number; advance_tds: number; same_po?: boolean; carried_forward?: boolean; suggested: number
+}

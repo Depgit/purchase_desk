@@ -171,7 +171,7 @@ func (s *Service) create(w http.ResponseWriter, r *http.Request) error {
 	if g == nil {
 		return httpjson.Forbidden("You cannot raise bills for %s.", propName)
 	}
-	var number string
+	var number, voucher string
 	err = pgx.BeginFunc(ctx, s.DB, func(tx pgx.Tx) error {
 		var err error
 		if number, err = documents.NextNumber(ctx, tx, "br_seq", "BR"); err != nil {
@@ -187,14 +187,14 @@ func (s *Service) create(w http.ResponseWriter, r *http.Request) error {
 		if err != nil {
 			return err
 		}
-		if _, err := tx.Exec(ctx, `INSERT INTO invoice(document_id,vendor_id,property_id,invoice_number,invoice_date,amount,gst_pct,file_id,status,created_by)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'AWAITING',$9)`, id, in.VendorID, in.PropertyID, in.InvoiceNumber, invDate, money.Round2(in.InvoiceAmount), in.GST, fid, u.ID); err != nil {
+		if err := tx.QueryRow(ctx, `INSERT INTO invoice(document_id,vendor_id,property_id,invoice_number,invoice_date,amount,gst_pct,file_id,status,created_by)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'AWAITING',$9) RETURNING voucher_number`, id, in.VendorID, in.PropertyID, in.InvoiceNumber, invDate, money.Round2(in.InvoiceAmount), in.GST, fid, u.ID).Scan(&voucher); err != nil {
 			return err
 		}
-		return auditlog.Doc(ctx, tx, u, g.Name, id, number, "Bills", "Bill submitted", typeName+" · "+in.PeriodStart)
+		return auditlog.Doc(ctx, tx, u, g.Name, id, number, "Bills", "Bill submitted", typeName+" · "+in.PeriodStart+" · voucher "+voucher)
 	})
 	if err != nil {
 		return err
 	}
-	return httpjson.OK(w, map[string]string{"message": number + " sent to the " + documents.StepNames[st.BillApprover], "number": number})
+	return httpjson.OK(w, map[string]string{"message": number + " (voucher " + voucher + ") sent to the " + documents.StepNames[st.BillApprover], "number": number, "voucher_number": voucher})
 }

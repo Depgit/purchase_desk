@@ -22,7 +22,19 @@ type Sheet struct {
 	Protect     bool         // read-only, or with LockedCols: only those cells of the existing rows are locked
 	LockedCols  []string     // columns whose existing rows cannot be edited (keys, bank details)
 	Validations []Validation // dropdowns and stop messages per column
+	Shades      []Shade      // cells greyed out where a choice does not apply
 }
+
+// Shade greys a column's data cells where Formula is true. The formula is written for row 2; Excel moves its row
+// references down with each row.
+type Shade struct {
+	Column  string
+	Formula string
+}
+
+// Formula is a cell value written as an Excel formula (without the leading =), for cells that fill themselves in from
+// another cell, such as a vendor's name from its code. Excel works the formulas out when the file is opened.
+type Formula string
 
 // Validation is a rule on one column's data rows. With List or Source the cell must be one of those values (a
 // dropdown); with neither, only the prompt shows. Source is a formula and may use {col} for this sheet's column
@@ -101,6 +113,13 @@ func Build(sheets []Sheet) ([]byte, error) {
 		for r, row := range sh.Rows {
 			for c, v := range row {
 				cell, _ := excelize.CoordinatesToCellName(c+1, r+2)
+				if fm, ok := v.(Formula); ok {
+					_ = f.SetCellFormula(name, cell, string(fm))
+					continue
+				}
+				if v == "" {
+					continue // a truly empty cell, so COUNTA-sized dropdown lists stop at the last value
+				}
 				_ = f.SetCellValue(name, cell, v)
 				if c < len(widths) {
 					if n := utf8.RuneCountInString(fmt.Sprint(v)); n > widths[c] && r < 200 {
@@ -124,6 +143,23 @@ func Build(sheets []Sheet) ([]byte, error) {
 		}
 		if err := rules(f, name, sh, heads); err != nil {
 			return nil, err
+		}
+		if len(sh.Shades) > 0 {
+			grey, err := f.NewConditionalStyle(&excelize.Style{Font: &excelize.Font{Color: "9A9A9A"}, Fill: excelize.Fill{Type: "pattern", Pattern: 1, Color: []string{"E4E4E4"}}})
+			if err != nil {
+				return nil, err
+			}
+			for _, sd := range sh.Shades {
+				for c, h := range sh.Heads {
+					if h != sd.Column {
+						continue
+					}
+					l, _ := excelize.ColumnNumberToName(c + 1)
+					if err := f.SetConditionalFormat(name, fmt.Sprintf("%s2:%s%d", l, l, lastRow), []excelize.ConditionalFormatOptions{{Type: "formula", Criteria: sd.Formula, Format: &grey}}); err != nil {
+						return nil, err
+					}
+				}
+			}
 		}
 		if sh.Protect {
 			if len(sh.LockedCols) > 0 && len(sh.Heads) > 0 {
@@ -154,6 +190,8 @@ func Build(sheets []Sheet) ([]byte, error) {
 		}
 		_ = f.SetPanes(name, &excelize.Panes{Freeze: true, YSplit: 1, TopLeftCell: "A2", ActivePane: "bottomLeft"})
 	}
+	full := true
+	_ = f.SetCalcProps(&excelize.CalcPropsOptions{FullCalcOnLoad: &full})
 	var b bytes.Buffer
 	if err := f.Write(&b); err != nil {
 		return nil, err
@@ -231,11 +269,34 @@ func Read(data []byte) ([]string, map[string][][]string, error) {
 	}
 	defer f.Close()
 	names := f.GetSheetList()
+	// A file straight from our download, never saved by Excel or Sheets, has formulas without their results: work them
+	// out here, so cells that fill themselves in (a mapping's property ticks) read as Excel would show them.
+	app, _ := f.GetAppProps()
+	calc := app != nil && app.Application == "Go Excelize"
 	out := map[string][][]string{}
 	for _, n := range names {
 		rows, err := f.GetRows(n)
 		if err != nil {
 			return nil, nil, err
+		}
+		if calc && len(rows) > 0 {
+			width := len(rows[0])
+			for r := range rows {
+				for c := 0; c < width; c++ {
+					cell, _ := excelize.CoordinatesToCellName(c+1, r+1)
+					if fm, _ := f.GetCellFormula(n, cell); fm == "" {
+						continue
+					}
+					v, err := f.CalcCellValue(n, cell)
+					if err != nil {
+						continue
+					}
+					for len(rows[r]) <= c {
+						rows[r] = append(rows[r], "")
+					}
+					rows[r][c] = v
+				}
+			}
 		}
 		out[n] = rows
 	}

@@ -1,5 +1,7 @@
 // Package users manages who can sign in, their roles, and each role's property and category scope.
 // It also manages roles: a role is a named bundle of rights that sits at one step in the flow.
+// The System Admin manages every user, and can let a user add users of chosen roles (creatable roles): that user then
+// sees, edits and deactivates only the users they added, with those roles, inside their own property access.
 package users
 
 import (
@@ -22,7 +24,10 @@ import (
 	"purchasedesk/internal/textclean"
 )
 
-type Service struct{ DB *pgxpool.Pool }
+type Service struct {
+	DB    *pgxpool.Pool
+	Guard *access.Guard
+}
 
 func (s *Service) Routes(r chi.Router) {
 	r.Get("/people", httpjson.Wrap(s.people))
@@ -53,10 +58,14 @@ type User struct {
 	HasPwd     bool        `json:"has_password"`
 	Active     bool        `json:"active"`
 	Roles      []RoleGrant `json:"roles"`
+	Creatable  []int64     `json:"creatable_roles"` // roles this user may give when adding users; set by the System Admin
+	CreatedBy  int64       `json:"created_by"`
+	CanEdit    bool        `json:"can_edit"` // the viewer may edit or deactivate this user
 }
 
 func (s *Service) load(ctx context.Context, where string, args ...any) ([]User, error) {
-	rows, err := s.DB.Query(ctx, `SELECT u.id, u.name, coalesce(u.email::text,''), coalesce(u.mobile,''), u.department, u.password_hash IS NOT NULL, u.active
+	rows, err := s.DB.Query(ctx, `SELECT u.id, u.name, coalesce(u.email::text,''), coalesce(u.mobile,''), u.department, u.password_hash IS NOT NULL, u.active,
+		u.creatable_role_ids, coalesce(u.created_by,0)
 		FROM app_user u `+where+` ORDER BY u.name`, args...)
 	if err != nil {
 		return nil, err
@@ -64,7 +73,7 @@ func (s *Service) load(ctx context.Context, where string, args ...any) ([]User, 
 	out, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (User, error) {
 		var x User
 		x.Roles = []RoleGrant{}
-		return x, row.Scan(&x.ID, &x.Name, &x.Email, &x.Mobile, &x.Department, &x.HasPwd, &x.Active)
+		return x, row.Scan(&x.ID, &x.Name, &x.Email, &x.Mobile, &x.Department, &x.HasPwd, &x.Active, &x.Creatable, &x.CreatedBy)
 	})
 	if err != nil {
 		return nil, err
@@ -91,16 +100,42 @@ func (s *Service) load(ctx context.Context, where string, args ...any) ([]User, 
 	return out, gr.Err()
 }
 
+// list gives the System Admin and the Purchase Team every user. Someone allowed to add users sees the users they
+// added (and, with the masters right, everyone, but edits only their own).
 func (s *Service) list(w http.ResponseWriter, r *http.Request) error {
 	u := access.From(r)
-	if !u.IsAdmin && !u.HasRight(access.Masters) {
+	if !u.IsAdmin && !u.HasRight(access.Masters) && !u.AddsUsers() {
 		return httpjson.Forbidden("Only the System Admin and the Purchase Team can see the user list.")
 	}
-	out, err := s.load(r.Context(), "")
+	where, args := "", []any{}
+	if !u.IsAdmin && !u.HasRight(access.Masters) {
+		where, args = "WHERE u.created_by=$1", []any{u.ID}
+	}
+	out, err := s.load(r.Context(), where, args...)
 	if err != nil {
 		return err
 	}
+	for i := range out {
+		out[i].CanEdit = u.IsAdmin || (u.AddsUsers() && out[i].CreatedBy == u.ID)
+	}
 	return httpjson.OK(w, out)
+}
+
+// Manages refuses unless u may edit or deactivate user id: the System Admin always; someone allowed to add users,
+// only for the users they added.
+func Manages(ctx context.Context, q database.Q, u *access.User, id int64) error {
+	if u.IsAdmin {
+		return nil
+	}
+	if !u.AddsUsers() {
+		return httpjson.Forbidden("Only the System Admin can do this.")
+	}
+	var by int64
+	_ = q.QueryRow(ctx, `SELECT coalesce(created_by,0) FROM app_user WHERE id=$1`, id).Scan(&by)
+	if by != u.ID {
+		return httpjson.Forbidden("You can change only the users you added. Ask the System Admin for anyone else.")
+	}
+	return nil
 }
 
 type Person struct {
@@ -135,6 +170,8 @@ type UserInput struct {
 	Department string      `json:"department"`
 	Password   string      `json:"password"`
 	Roles      []RoleGrant `json:"roles"`
+	// Creatable are the roles this user may give when adding users. nil keeps what is on file (an upload row).
+	Creatable *[]int64 `json:"creatable_roles"`
 }
 
 // ValidateUser tidies the input and returns every problem. id is the user being edited, or 0; selfID is the Admin doing it.
@@ -206,6 +243,15 @@ func ValidateUser(ctx context.Context, q database.Q, in *UserInput, id, selfID i
 	if id != 0 && id == selfID && !hasAdmin {
 		errs = append(errs, "You cannot remove your own System Admin role.")
 	}
+	if in.Creatable != nil {
+		ids := textclean.Uniq(*in.Creatable)
+		var bad bool
+		_ = q.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM unnest($1::bigint[]) x LEFT JOIN role r ON r.id=x WHERE r.id IS NULL OR NOT r.active OR r.step='admin')`, ids).Scan(&bad)
+		if bad {
+			errs = append(errs, "The roles this user may add must be active roles other than System Admin.")
+		}
+		in.Creatable = &ids
+	}
 	return errs
 }
 
@@ -255,13 +301,25 @@ func SaveUser(ctx context.Context, tx pgx.Tx, u *access.User, id int64, in UserI
 	if hash != nil {
 		detail += " · password set"
 	}
+	if in.Creatable != nil {
+		var before []int64
+		_ = tx.QueryRow(ctx, `SELECT creatable_role_ids FROM app_user WHERE id=$1`, id).Scan(&before)
+		if _, err := tx.Exec(ctx, `UPDATE app_user SET creatable_role_ids=$2 WHERE id=$1`, id, *in.Creatable); err != nil {
+			return 0, err
+		}
+		if len(before) > 0 || len(*in.Creatable) > 0 {
+			var can string
+			_ = tx.QueryRow(ctx, `SELECT coalesce(string_agg(name, ', ' ORDER BY id),'') FROM role WHERE id = ANY($1)`, *in.Creatable).Scan(&can)
+			detail += " · may add users: " + textclean.Default(can, "none")
+		}
+	}
 	return id, auditlog.Write(ctx, tx, u, "Users", act, in.Name, detail)
 }
 
 func (s *Service) save(w http.ResponseWriter, r *http.Request) error {
 	u := access.From(r)
-	if err := access.NeedAdmin(u); err != nil {
-		return err
+	if !u.AddsUsers() {
+		return httpjson.Forbidden("Only the System Admin, or someone the Admin lets add users, can do this.")
 	}
 	var in UserInput
 	if err := httpjson.Decode(r, &in); err != nil {
@@ -273,8 +331,19 @@ func (s *Service) save(w http.ResponseWriter, r *http.Request) error {
 		if id, err = httpjson.ID(r, "id"); err != nil {
 			return err
 		}
+		if err := Manages(r.Context(), s.DB, u, id); err != nil {
+			return err
+		}
 	}
-	if errs := ValidateUser(r.Context(), s.DB, &in, id, u.ID); len(errs) > 0 {
+	errs := ValidateUser(r.Context(), s.DB, &in, id, u.ID)
+	if !u.IsAdmin {
+		if in.Creatable != nil && len(*in.Creatable) > 0 {
+			return httpjson.Forbidden("Only the System Admin can let a user add users.")
+		}
+		in.Creatable = nil
+		errs = append(errs, s.delegateLimits(r.Context(), u, in.Roles)...)
+	}
+	if len(errs) > 0 {
 		return httpjson.Invalid(errs)
 	}
 	err := pgx.BeginFunc(r.Context(), s.DB, func(tx pgx.Tx) error {
@@ -286,6 +355,55 @@ func (s *Service) save(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 	return httpjson.OK(w, map[string]int64{"id": id})
+}
+
+// delegateLimits checks the roles a non-Admin gives: only roles the Admin allowed them, and property access inside
+// their own (all properties only if they have all; a cluster only if they hold that cluster; named properties only
+// ones they can see).
+func (s *Service) delegateLimits(ctx context.Context, u *access.User, roles []RoleGrant) []string {
+	errs := []string{}
+	all, visible, err := s.Guard.Visible(ctx, u)
+	if err != nil {
+		return []string{err.Error()}
+	}
+	clusters := []int64{}
+	for _, g := range u.Grants {
+		if g.Scope == "clusters" {
+			clusters = append(clusters, g.ClusterIDs...)
+		}
+	}
+	for _, g := range roles {
+		var name string
+		_ = s.DB.QueryRow(ctx, `SELECT name FROM role WHERE id=$1`, g.RoleID).Scan(&name)
+		if !textclean.Contains(u.CreatableRoles, g.RoleID) {
+			var can string
+			_ = s.DB.QueryRow(ctx, `SELECT string_agg(name, ', ' ORDER BY id) FROM role WHERE id = ANY($1)`, u.CreatableRoles).Scan(&can)
+			errs = append(errs, fmt.Sprintf("You cannot give the role %s. You may add users as: %s.", textclean.Default(name, "chosen"), can))
+			continue
+		}
+		if all {
+			continue
+		}
+		switch g.Scope {
+		case "all":
+			errs = append(errs, fmt.Sprintf("%s: you can give only the properties you have access to, not all properties.", name))
+		case "clusters":
+			for _, c := range g.ClusterIDs {
+				if !textclean.Contains(clusters, c) {
+					errs = append(errs, fmt.Sprintf("%s: you can give only the clusters you have access to.", name))
+					break
+				}
+			}
+		case "properties":
+			for _, p := range g.PropertyIDs {
+				if !textclean.Contains(visible, p) {
+					errs = append(errs, fmt.Sprintf("%s: you can give only the properties you have access to.", name))
+					break
+				}
+			}
+		}
+	}
+	return errs
 }
 
 type Role struct {

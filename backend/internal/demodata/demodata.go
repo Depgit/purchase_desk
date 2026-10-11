@@ -169,16 +169,16 @@ func (d *loader) core() {
 	ex(`UPDATE user_role SET scope='clusters', cluster_ids=ARRAY[$2::bigint] WHERE user_id=$1`, sana, ds)
 	props := map[string]int64{}
 	for _, p := range []struct {
-		code, name, ezee string
-		cl               int64
-		kind             string
+		code, doc, name, ezee string
+		cl                    int64
+		kind                  string
 	}{
-		{"P01", "Sector 45, Gurugram", "EZ-10401", gn, "live"}, {"P02", "Sector 14, Gurugram", "EZ-10402", gn, "live"},
-		{"P03", "DLF Phase 2, Gurugram", "EZ-10403", gs, "live"}, {"P04", "Saket, Delhi", "EZ-10404", ds, "live"},
-		{"P05", "Hauz Khas, Delhi", "EZ-10405", ds, "live"},
-		{"X01", "Sector 65, Gurugram (pre-opening)", "PRE-001", gs, "preopening"},
+		{"P01", "SA", "Sector 45, Gurugram", "EZ-10401", gn, "live"}, {"P02", "SB", "Sector 14, Gurugram", "EZ-10402", gn, "live"},
+		{"P03", "DL", "DLF Phase 2, Gurugram", "EZ-10403", gs, "live"}, {"P04", "SK", "Saket, Delhi", "EZ-10404", ds, "live"},
+		{"P05", "HK", "Hauz Khas, Delhi", "EZ-10405", ds, "live"},
+		{"X01", "SX", "Sector 65, Gurugram (pre-opening)", "PRE-001", gs, "preopening"},
 	} {
-		props[p.code] = id(`INSERT INTO property(code,name,ezee_code,cluster_id,kind) VALUES ($1,$2,$3,$4,$5) RETURNING id`, p.code, p.name, p.ezee, p.cl, p.kind)
+		props[p.code] = id(`INSERT INTO property(code,doc_code,name,ezee_code,cluster_id,kind) VALUES ($1,$2,$3,$4,$5,$6) RETURNING id`, p.code, p.doc, p.name, p.ezee, p.cl, p.kind)
 	}
 	cats := map[string]int64{}
 	for _, c := range [][2]string{{"Housekeeping", "f"}, {"Food & Beverage", "t"}, {"Engineering", "f"}, {"Admin & Front Office", "f"}} {
@@ -286,7 +286,7 @@ func (d *loader) billsBudgetsCorporate() {
 	}
 	// Corporate office, its departments (L1 then L2) and the expense heads used instead of SKUs.
 	gs := id(`SELECT id FROM cluster WHERE name='Gurugram South'`)
-	co := id(`INSERT INTO property(code,name,ezee_code,cluster_id,kind) VALUES ('CO1','Corporate Office, Gurugram','CORP-001',$1,'corporate') RETURNING id`, gs)
+	co := id(`INSERT INTO property(code,doc_code,name,ezee_code,cluster_id,kind) VALUES ('CO1','CO','Corporate Office, Gurugram','CORP-001',$1,'corporate') RETURNING id`, gs)
 	user("Meera Iyer", "meera@demo.saltstayz.com", "", "Admin", "creq", "properties", nil, []int64{co}, nil)
 	rakesh := user("Rakesh Jain", "rakesh@demo.saltstayz.com", "", "Admin", "dh", "properties", nil, []int64{co}, nil)
 	vivek := user("Vivek Rao", "vivek@demo.saltstayz.com", "", "IT", "dh", "properties", nil, []int64{co}, nil)
@@ -301,7 +301,7 @@ func (d *loader) billsBudgetsCorporate() {
 func (d *loader) warehouse() {
 	ex, id := d.ex, d.id
 	gs := id(`SELECT id FROM cluster WHERE name='Gurugram South'`)
-	id(`INSERT INTO property(code,name,ezee_code,cluster_id,kind) VALUES ('WH','Central Warehouse, Gurugram','WH-001',$1,'warehouse') RETURNING id`, gs)
+	id(`INSERT INTO property(code,doc_code,name,ezee_code,cluster_id,kind) VALUES ('WH','WH','Central Warehouse, Gurugram','WH-001',$1,'warehouse') RETURNING id`, gs)
 	d.user("Vikas Tomar", "vikas@demo.saltstayz.com", "", "Warehouse", "wh", "all", nil, nil, nil)
 	wh := id(`SELECT id FROM vendor WHERE vendor_type='warehouse' LIMIT 1`)
 	ex(`UPDATE vendor SET city='Gurugram', state_code='HR' WHERE id=$1`, wh)

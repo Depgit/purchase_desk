@@ -266,9 +266,12 @@ func Finalize(ctx context.Context, tx pgx.Tx, u *access.User, d *documents.Doc) 
 		}
 	}
 	if d.VendorType == "warehouse" {
-		wt, err := documents.NextNumber(ctx, tx, "wt_seq", "WT")
-		if err != nil {
-			return err
+		wt, ok := documents.Derived(d.Number, "WT")
+		if !ok {
+			var err error
+			if wt, err = documents.NextNumber(ctx, tx, "wt_seq", "WT"); err != nil {
+				return err
+			}
 		}
 		if _, err := tx.Exec(ctx, `UPDATE document SET status='PO_ISSUED', approved_at=now(), is_transfer=TRUE, po_number=$2, po_date=now(),
 			deliver_by=current_date+1, payment_terms='Internal transfer', updated_at=now() WHERE id=$1`, d.ID, wt); err != nil {

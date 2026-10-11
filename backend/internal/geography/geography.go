@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"regexp"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
@@ -194,6 +195,8 @@ func (s *Service) saveCluster(w http.ResponseWriter, r *http.Request) error {
 type Property struct {
 	ID          int64   `json:"id"`
 	Code        string  `json:"code"`
+	DocCode     string  `json:"doc_code"`
+	DocCodeUsed bool    `json:"doc_code_used"`
 	Name        string  `json:"name"`
 	EzeeCode    string  `json:"ezee_code"`
 	ClusterID   int64   `json:"cluster_id"`
@@ -212,14 +215,14 @@ type Property struct {
 	InactiveWhy string  `json:"inactive_reason"`
 }
 
-const propertySelect = `SELECT p.id, p.code, p.name, p.ezee_code, p.cluster_id, k.name, c.id, c.name, c.state_code, p.l1_user_id, coalesce(u.name,''), coalesce(m.name,''),
+const propertySelect = `SELECT p.id, p.code, coalesce(p.doc_code,''), p.doc_seq>0, p.name, p.ezee_code, p.cluster_id, k.name, c.id, c.name, c.state_code, p.l1_user_id, coalesce(u.name,''), coalesce(m.name,''),
 	p.kind, p.plan_pct, p.ird_pct, p.banquet_pct, p.active, coalesce(p.inactive_reason,'')
 	FROM property p JOIN cluster k ON k.id=p.cluster_id JOIN city c ON c.id=k.city_id
 	LEFT JOIN app_user u ON u.id=p.l1_user_id LEFT JOIN app_user m ON m.id=k.manager_id`
 
 func scanProperty(row pgx.CollectableRow) (Property, error) {
 	var x Property
-	err := row.Scan(&x.ID, &x.Code, &x.Name, &x.EzeeCode, &x.ClusterID, &x.Cluster, &x.CityID, &x.City, &x.StateCode, &x.L1UserID, &x.L1Name, &x.L2Name,
+	err := row.Scan(&x.ID, &x.Code, &x.DocCode, &x.DocCodeUsed, &x.Name, &x.EzeeCode, &x.ClusterID, &x.Cluster, &x.CityID, &x.City, &x.StateCode, &x.L1UserID, &x.L1Name, &x.L2Name,
 		&x.Kind, &x.PlanPct, &x.IRDPct, &x.BanquetPct, &x.Active, &x.InactiveWhy)
 	return x, err
 }
@@ -239,6 +242,7 @@ func (s *Service) listProperties(w http.ResponseWriter, r *http.Request) error {
 // PropertyInput is a property from the form or an upload row.
 type PropertyInput struct {
 	Name       string  `json:"name"`
+	DocCode    string  `json:"doc_code"`
 	EzeeCode   string  `json:"ezee_code"`
 	ClusterID  int64   `json:"cluster_id"`
 	L1UserID   *int64  `json:"l1_user_id"`
@@ -254,6 +258,7 @@ func validPct(v float64) bool { return v >= 0 && v <= 100 }
 // ValidateProperty tidies the input and returns every problem. id is the property being edited, or 0.
 func ValidateProperty(ctx context.Context, q database.Q, in *PropertyInput, id int64) []string {
 	in.Name, in.EzeeCode = textclean.Clean(in.Name), strings.ToUpper(strings.TrimSpace(in.EzeeCode))
+	in.DocCode = strings.ToUpper(strings.TrimSpace(in.DocCode))
 	if in.Kind == "" {
 		in.Kind = "live"
 	}
@@ -264,6 +269,7 @@ func ValidateProperty(ctx context.Context, q database.Q, in *PropertyInput, id i
 	if in.EzeeCode == "" {
 		errs = append(errs, "Enter the eZee code.")
 	}
+	errs = append(errs, checkDocCode(ctx, q, in, id)...)
 	if !textclean.Contains([]string{"live", "warehouse", "preopening", "corporate"}, in.Kind) {
 		errs = append(errs, "Stage must be live, warehouse, pre-opening or corporate.")
 	} else if !releasephase.PropertyKindOn(in.Kind) {
@@ -290,6 +296,36 @@ func ValidateProperty(ctx context.Context, q database.Q, in *PropertyInput, id i
 	return errs
 }
 
+var docCodeFormat = regexp.MustCompile(`^[A-Z0-9]{2}$`)
+
+// checkDocCode checks the 2-character code that starts the property's document numbers (PR_HZ_0001). A new property
+// needs one. On an edit a blank code keeps what is on file, and a code already used in a document number stays fixed.
+func checkDocCode(ctx context.Context, q database.Q, in *PropertyInput, id int64) []string {
+	var current string
+	var used bool
+	if id != 0 {
+		_ = q.QueryRow(ctx, `SELECT coalesce(doc_code,''), doc_seq>0 FROM property WHERE id=$1`, id).Scan(&current, &used)
+		if in.DocCode == "" {
+			in.DocCode = current
+			return nil
+		}
+	}
+	switch {
+	case in.DocCode == "":
+		return []string{"Enter the 2-letter document code, for example HZ. Every PR, PO and GRN number for this property starts with it (PR_HZ_0001)."}
+	case !docCodeFormat.MatchString(in.DocCode):
+		return []string{"The document code must be exactly 2 letters or digits, for example HZ."}
+	case used && in.DocCode != current:
+		return []string{fmt.Sprintf("The document code %s is already in this property's document numbers, so it cannot change.", current)}
+	}
+	var other string
+	_ = q.QueryRow(ctx, `SELECT name FROM property WHERE upper(doc_code)=$1 AND id<>$2`, in.DocCode, id).Scan(&other)
+	if other != "" {
+		return []string{fmt.Sprintf("The document code %s is already used by %s.", in.DocCode, other)}
+	}
+	return nil
+}
+
 // CreateProperty saves a validated new property with the next code (P41, P42, ...).
 // CopyFrom gives the new property the same vendor for every item as an existing property.
 func CreateProperty(ctx context.Context, tx pgx.Tx, u *access.User, in PropertyInput) (int64, string, error) {
@@ -300,11 +336,11 @@ func CreateProperty(ctx context.Context, tx pgx.Tx, u *access.User, in PropertyI
 	_ = tx.QueryRow(ctx, `SELECT coalesce(max(substring(code from 2)::int),0)+1 FROM property WHERE code ~ '^P[0-9]+$'`).Scan(&n)
 	code := fmt.Sprintf("P%02d", n)
 	var id int64
-	if err := tx.QueryRow(ctx, `INSERT INTO property(code,name,ezee_code,cluster_id,l1_user_id,kind,plan_pct,ird_pct,banquet_pct,created_by)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id`, code, in.Name, in.EzeeCode, in.ClusterID, in.L1UserID, in.Kind, in.PlanPct, in.IRDPct, in.BanquetPct, u.ID).Scan(&id); err != nil {
+	if err := tx.QueryRow(ctx, `INSERT INTO property(code,name,ezee_code,cluster_id,l1_user_id,kind,plan_pct,ird_pct,banquet_pct,created_by,doc_code)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING id`, code, in.Name, in.EzeeCode, in.ClusterID, in.L1UserID, in.Kind, in.PlanPct, in.IRDPct, in.BanquetPct, u.ID, in.DocCode).Scan(&id); err != nil {
 		return 0, "", err
 	}
-	detail := code + " · " + in.EzeeCode
+	detail := code + " · " + in.EzeeCode + " · document code " + in.DocCode
 	if in.CopyFrom > 0 {
 		ct, err := tx.Exec(ctx, `INSERT INTO vendor_mapping_property(mapping_id, property_id)
 			SELECT mp.mapping_id, $2 FROM vendor_mapping_property mp JOIN vendor_mapping m ON m.id=mp.mapping_id
@@ -319,11 +355,18 @@ func CreateProperty(ctx context.Context, tx pgx.Tx, u *access.User, in PropertyI
 
 // UpdateProperty saves a validated edit of property id. Its code stays as it is.
 func UpdateProperty(ctx context.Context, tx pgx.Tx, u *access.User, id int64, in PropertyInput) error {
-	if _, err := tx.Exec(ctx, `UPDATE property SET name=$2, ezee_code=$3, cluster_id=$4, l1_user_id=$5, kind=$6, plan_pct=$7, ird_pct=$8, banquet_pct=$9 WHERE id=$1`,
-		id, in.Name, in.EzeeCode, in.ClusterID, in.L1UserID, in.Kind, in.PlanPct, in.IRDPct, in.BanquetPct); err != nil {
+	var before string
+	_ = tx.QueryRow(ctx, `SELECT coalesce(doc_code,'') FROM property WHERE id=$1`, id).Scan(&before)
+	if _, err := tx.Exec(ctx, `UPDATE property SET name=$2, ezee_code=$3, cluster_id=$4, l1_user_id=$5, kind=$6, plan_pct=$7, ird_pct=$8, banquet_pct=$9,
+		doc_code=CASE WHEN doc_seq>0 THEN doc_code ELSE nullif($10,'') END WHERE id=$1`,
+		id, in.Name, in.EzeeCode, in.ClusterID, in.L1UserID, in.Kind, in.PlanPct, in.IRDPct, in.BanquetPct, in.DocCode); err != nil {
 		return err
 	}
-	return auditlog.Write(ctx, tx, u, "Properties", "Property changed", in.Name, in.Kind)
+	detail := in.Kind
+	if in.DocCode != before {
+		detail += " · document code " + textclean.Default(before, "(none)") + " to " + in.DocCode
+	}
+	return auditlog.Write(ctx, tx, u, "Properties", "Property changed", in.Name, detail)
 }
 
 func (s *Service) saveProperty(w http.ResponseWriter, r *http.Request) error {

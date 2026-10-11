@@ -65,7 +65,7 @@ export function Shell({ children }: { children: ReactNode }) {
     { to: '/settings/corporate', label: 'Corporate Setup', phase: PHASE.corporate },
     { to: '/settings/bill-types', label: 'Bill Types', phase: PHASE.bills },
     { to: '/settings/item-setup', label: 'Item Setup' },
-    { to: '/settings/users', label: 'Users & Rights', show: me?.is_admin || hasRight('masters') },
+    { to: '/settings/users', label: 'Users & Rights', show: me?.is_admin || hasRight('masters') || !!me?.creatable_roles?.length },
     { to: '/settings/flow', label: 'Flow Settings' },
     { to: '/settings/zoho', label: 'Zoho Books', phase: PHASE.zoho },
     { to: '/settings/templates', label: 'Message Templates' },

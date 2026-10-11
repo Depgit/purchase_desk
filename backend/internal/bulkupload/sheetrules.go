@@ -7,16 +7,58 @@ package bulkupload
 
 import (
 	"context"
+	"fmt"
+	"strings"
 
 	"purchasedesk/internal/database"
 	"purchasedesk/internal/indiantax"
 	"purchasedesk/internal/money"
+	"purchasedesk/internal/releasephase"
 	"purchasedesk/internal/spreadsheet"
 )
 
 type sheetRules struct {
-	locked []string
-	rules  []spreadsheet.Validation
+	locked   []string
+	rules    []spreadsheet.Validation
+	formulas []cellFormula // cells that fill themselves in from the row
+	spare    int           // empty rows added below the data with the formulas ready, for new entries
+	shades   []spreadsheet.Shade
+}
+
+// cellFormula fills a column from other cells of its row, on every row including the spare ones. {r} is the row
+// number and {col} a column letter of this sheet; {orig} is the cell's value as downloaded and {orig:col} that
+// column's, as Excel text, so a row shows its saved values until the cell it depends on changes.
+type cellFormula struct {
+	col, tmpl string
+}
+
+// Columns of the hidden Lists sheet (see listsSheet) that the mapping formulas look up.
+const (
+	vendorName    = `IF({vendor_code}{r}="","",IFERROR(VLOOKUP({vendor_code}{r},Lists!$I:$J,2,FALSE),"Not an active goods vendor"))`
+	itemCategory  = `IF({item}{r}="",{orig},IFERROR(VLOOKUP({item}{r},Lists!$K:$N,2,FALSE),""))`
+	itemSubcat    = `IF({item}{r}="",{orig},IFERROR(VLOOKUP({item}{r},Lists!$K:$N,3,FALSE),""))`
+	itemAvailable = `IF({item}{r}="","",IFERROR(VLOOKUP({item}{r},Lists!$K:$N,4,FALSE),"Unknown item: pick it from the list"))`
+)
+
+// availableHere is true when the row's item_available_at covers a property: ALL, its code, or its cluster.
+func availableHere(code, cluster string) string {
+	q := func(s string) string { return `"` + strings.ReplaceAll(s, `"`, `""`) + `"` }
+	in := `";"&{item_available_at}{r}&";"`
+	return `OR({item_available_at}{r}="ALL",ISNUMBER(SEARCH(` + q(";"+code+";") + `,` + in + `)),ISNUMBER(SEARCH(` + q(";cluster:"+cluster+";") + `,` + in + `)))`
+}
+
+// withPropertyTicks adds the vendor mapping sheet's tick column per property (headed "P01 · name"): a yes dropdown;
+// it shows the saved mapping until the row's item changes, then ticks itself for every property the new item is
+// available at (as in Items); greyed where the item is not available.
+func withPropertyTicks(rl sheetRules, props []mappingProperty) sheetRules {
+	for _, p := range props {
+		h, here := p.head, availableHere(p.code, p.cluster)
+		rl.rules = append(rl.rules, spreadsheet.Validation{Column: h, List: []string{"yes"}, PromptTitle: "Supplies this property?",
+			Prompt: "yes = this vendor supplies the item here. Blank = not here. Grey = the item is not available at this property (see Items).", ErrorTitle: "yes or blank", Error: "Pick yes, or clear the cell."})
+		rl.formulas = append(rl.formulas, cellFormula{col: h, tmpl: `IF({item}{r}={orig:item},{orig},IF(` + here + `,"yes",""))`})
+		rl.shades = append(rl.shades, spreadsheet.Shade{Column: h, Formula: `AND({item}{r}<>"",NOT(` + here + `))`})
+	}
+	return rl
 }
 
 // The hidden Lists sheet's columns: category → sub-category pairs, the categories, category → SKU pairs, and
@@ -51,16 +93,18 @@ var (
 func rulesFor(kind string) sheetRules {
 	switch kind {
 	case "mappings":
-		return sheetRules{locked: []string{"mapping_id"}, rules: []spreadsheet.Validation{
-			{Column: "vendor_code", Source: "{Vendors.vendor_code}", ErrorTitle: "Vendor not on the Vendors sheet",
-				Error: "Pick a vendor code from the Vendors sheet. To map a new vendor, add it on the Vendors sheet and upload once, so it gets its code; then map it."},
-			{Column: "level", List: []string{"sub_category", "sku"}, ErrorTitle: "Level", Error: "Level is sub_category (the whole sub-category) or sku (one item)."},
+		return sheetRules{locked: []string{"mapping_id", "vendor_name", "item_available_at", "rate_status"}, spare: 300, rules: []spreadsheet.Validation{
+			{Column: "vendor_code", Source: "{Lists.vendor_code}", PromptTitle: "Vendor", Prompt: "Pick the vendor's code; the name fills in next to it.",
+				ErrorTitle: "Unknown vendor", Error: "Pick an active goods vendor's code from the list. Add a new vendor on the Vendors screen first."},
+			{Column: "item", Source: "{Lists.item}", PromptTitle: "Item", Prompt: "Pick the item: its category and sub-category fill in, and item_available_at shows where it can be mapped. Leave blank to map a whole sub-category.",
+				ErrorTitle: "Unknown item", Error: "Pick the item from the list. Add a new item on the Items screen first."},
 			ruleCategory, ruleSubcat,
-			{Column: "sku_code", Source: skusOfCategory, PromptTitle: "SKU (level sku only)",
-				Prompt: "Pick the category first: this list then shows only that category's items.", ErrorTitle: "Not in this category",
-				Error: "This SKU is not in the category on this row (see Ref - Items). Change the category first, then pick from the list."},
-			rulePropsCell,
-			{Column: "estimate_allowed", List: []string{"yes", "no"}, ErrorTitle: "yes or no", Error: "Write yes or no."},
+			{Column: "estimate_allowed", List: []string{"yes", "no"}, PromptTitle: "Estimate allowed", Prompt: "Sub-category mappings only: yes lets an item without a rate be ordered at an estimated rate.", ErrorTitle: "yes or no", Error: "Write yes or no."},
+		}, formulas: []cellFormula{
+			{col: "vendor_name", tmpl: vendorName},
+			{col: "category", tmpl: itemCategory},
+			{col: "sub_category", tmpl: itemSubcat},
+			{col: "item_available_at", tmpl: itemAvailable},
 		}}
 	case "vendors":
 		locked := spreadsheet.Validation{PromptTitle: "Locked for existing vendors", Prompt: "Bank details, GSTIN and PAN change only on the vendor screen, where Finance re-verifies them. Fill them only for a new vendor."}
@@ -95,6 +139,7 @@ func rulesFor(kind string) sheetRules {
 		}}
 	case "properties":
 		return sheetRules{locked: []string{"property_code"}, rules: []spreadsheet.Validation{
+			{Column: "doc_code", PromptTitle: "Document code", Prompt: "2 letters or digits, for example HZ. Starts every PR, PO and GRN number (PR_HZ_0001). Cannot change once used."},
 			{Column: "cluster", Source: "{Ref - Clusters.cluster}", ErrorTitle: "Unknown cluster", Error: "Pick a cluster from the list. Add a new one under Settings, Cities & Clusters first."},
 			{Column: "stage", List: []string{"live", "preopening", "warehouse", "corporate"}, ErrorTitle: "Stage", Error: "Pick live, preopening, warehouse or corporate."},
 			{Column: "property_manager_login", Source: "{Ref - Users.login}", ErrorTitle: "Unknown user", Error: "Pick a user's login from the list (see Ref - Users), or leave it blank."},
@@ -129,6 +174,10 @@ func listsSheet(ctx context.Context, q database.Q) (spreadsheet.Sheet, error) {
 		`SELECT c.name, k.code FROM sku k JOIN sub_category sc ON sc.id=k.sub_category_id JOIN category c ON c.id=sc.category_id WHERE k.active ORDER BY c.name, k.code`,
 		`SELECT t.name, o.name FROM zoho_tag_option o JOIN zoho_tag t ON t.tag_id=o.tag_id WHERE o.active AND t.active ORDER BY t.name, o.name`,
 		`SELECT name FROM zoho_tag WHERE active ORDER BY name`,
+		fmt.Sprintf(`SELECT code, legal_name FROM vendor WHERE active AND (vendor_type='goods' OR (vendor_type='warehouse' AND %v)) ORDER BY code`, releasephase.VendorTypeOn("warehouse")),
+		`SELECT ` + itemLabelSQL + `, c.name, sc.name, ` + fmt.Sprintf(scopeSQL, "k.scope='all'", "k.cluster_ids", "k.property_ids") + `
+			FROM sku k JOIN brand b ON b.id=k.brand_id JOIN pack_size ps ON ps.id=k.pack_size_id JOIN sub_category sc ON sc.id=k.sub_category_id JOIN category c ON c.id=sc.category_id
+			WHERE k.active ORDER BY c.name, sc.name, 1`,
 	} {
 		rows, err := rowsOf(ctx, q, sql)
 		if err != nil {
@@ -136,14 +185,15 @@ func listsSheet(ctx context.Context, q database.Q) (spreadsheet.Sheet, error) {
 		}
 		cols = append(cols, rows)
 	}
-	widths := []int{2, 1, 2, 2, 1}
+	widths := []int{2, 1, 2, 2, 1, 2, 4}
 	n := 0
 	for _, c := range cols {
 		if len(c) > n {
 			n = len(c)
 		}
 	}
-	sh := spreadsheet.Sheet{Name: "Lists", Heads: []string{"category", "sub_category", "categories", "item_category", "sku_code", "tag", "tag_option", "tags"},
+	sh := spreadsheet.Sheet{Name: "Lists", Heads: []string{"category", "sub_category", "categories", "item_category", "sku_code", "tag", "tag_option", "tags",
+		"vendor_code", "vendor_name", "item", "item_category_name", "item_sub_category", "item_available_at"},
 		Rows: make([][]any, n), Hidden: true, Protect: true, Text: true}
 	for i := 0; i < n; i++ {
 		row := []any{}
