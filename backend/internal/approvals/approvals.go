@@ -29,6 +29,7 @@ import (
 	"purchasedesk/internal/messaging"
 	"purchasedesk/internal/money"
 	"purchasedesk/internal/releasephase"
+	"purchasedesk/internal/screens"
 )
 
 type Service struct {
@@ -115,6 +116,11 @@ func (s *Service) Act(ctx context.Context, tx pgx.Tx, u *access.User, st flowset
 	g := documents.CanAct(u, d, step, access.Approve)
 	if g == nil {
 		return out, httpjson.Forbidden("%s is waiting for the %s, and you cannot act on it.", d.Number, documents.StepNames[step])
+	}
+	// Screen levels win over rights: approving needs edit on Approvals (Corporate for corporate documents) there.
+	screen := approveScreen(d)
+	if u.Level(screen, d.PropertyID, d.ClusterID) < screens.Edit {
+		return out, httpjson.Forbidden("Your role can only view %s at %s, so it cannot act on %s.", screens.Label(screen), d.Property, d.Number)
 	}
 	module := moduleOf(d)
 	logIt := func(action, note string) error {
@@ -459,6 +465,14 @@ func Enrich(ctx context.Context, q database.Q, st flowsettings.Settings, docs []
 	return out, nil
 }
 
+// approveScreen is the screen whose edit level approving d needs: Corporate for corporate documents, else Approvals.
+func approveScreen(d *documents.Doc) string {
+	if d.IsCorp() {
+		return "corporate"
+	}
+	return "approvals"
+}
+
 func (s *Service) workbench(w http.ResponseWriter, r *http.Request) error {
 	u := access.From(r)
 	all, ids, err := s.Guard.Visible(r.Context(), u)
@@ -471,7 +485,7 @@ func (s *Service) workbench(w http.ResponseWriter, r *http.Request) error {
 	}
 	mine := []*documents.Doc{}
 	for _, d := range docs {
-		if documents.CanAct(u, d, d.Owner(), access.Approve) != nil {
+		if documents.CanAct(u, d, d.Owner(), access.Approve) != nil && u.Level(approveScreen(d), d.PropertyID, d.ClusterID) >= screens.Edit {
 			mine = append(mine, d)
 		}
 	}

@@ -1,12 +1,25 @@
 // Shapes of the main objects the API returns.
+export type Level = 'none' | 'view' | 'edit'
 export interface Grant {
   role_id: number; code: string; name: string; step: string; rights: string[]
   scope: string; cluster_ids: number[]; property_ids: number[]; category_ids: number[]
+  /** The role's level on each screen: 0 no access, 1 view, 2 edit. */
+  screens: Record<string, number>
 }
 export interface Me {
   id: number; name: string; email: string; mobile: string; department: string; roles: Grant[]; is_admin: boolean; phase: number
-  /** Roles the System Admin lets this user give when adding users; empty means they cannot add users. */
-  creatable_roles: number[] | null
+  /** Highest level on each screen across the user's roles; it decides the menu and which screens open. */
+  screens: Record<string, Level>
+  /** Reports the user's roles include; null means every report. */
+  reports: string[] | null
+  /** From the user's roles: may add users (giving user_roles, at any property if user_scope_any), may manage roles. */
+  adds_users: boolean; user_roles: number[]; user_scope_any: boolean; manages_roles: boolean
+}
+/** A role with everything the role editor shows. */
+export interface Role {
+  id: number; code: string; name: string; step: string; rights: string[]; is_custom: boolean; active: boolean; users: number
+  group_id: number | null; group: string; screens: Record<string, Level>; reports: string[] | null
+  can_users: boolean; user_role_ids: number[]; user_scope: 'own' | 'any'; can_roles: boolean
 }
 export interface Line {
   id: number; sku_id: number; sku_code: string; item_name: string; brand: string; pack_size: string; hsn: string
@@ -27,6 +40,8 @@ export interface Doc {
   event_reason: string; event_note: string; routed_reason: string; routed_note: string; cm_approved_at: string | null
   preop_user_id: number | null; preop_user: string; return_reason: string; return_note: string; modified_note: string; modified_by: string; modified_at: string | null
   approved_at: string | null; po_number: string; po_date: string | null; deliver_by: string; payment_terms: string; po_closed_short: boolean
+  /** Set while the PO waits for Finance to approve its advance: the number the PO will be raised under. */
+  advance_hold_po: string
   is_transfer: boolean; dispatched_at: string | null; wait_until: string; wait_note: string
   bill_type_id: number | null; bill_type: string; bill_section: string; period_start: string; months: number; remark: string
   created_at: string; lines: Line[]; total: number
@@ -54,6 +69,8 @@ export interface Invoice {
   amount: number; gst_pct: number | null; file_id: number | null; status: string; match_remark: string; due_date: string; pay_by: string; msme_limit: string
   zoho_bill_id: string; zoho_status: string; zoho_balance: number | null; zoho_paid: number | null; zoho_error: string; paid_at: string | null; payment_ref: string
   ordered_value: number; received_value: number; difference: number; within_tolerance: boolean; held: string[]; created_at: string
+  /** Advances on the PO Finance has not settled (asked, or approved but unpaid): payment approval waits for them. */
+  advance_wait: string[]
   lines?: { line_id: number; sku_code: string; item: string; pack_size: string; hsn: string; ordered: number; received: number; rate: number; gst_pct: number; value: number }[]
 }
 export interface Property {
@@ -70,6 +87,8 @@ export const PAYMENT_TERMS = ['Net 15', 'Net 30', 'Net 45', '15th of next month'
  * vendor's invoices; what is left is refunded or carried forward to the vendor's next invoices. */
 export interface Advance {
   id: number; number: string; document_id: number; document_number: string; po_number: string; kind: string; po_open: boolean
+  /** The PO waits for this advance to be approved before it is raised. */
+  po_held: boolean
   vendor_id: number; vendor: string; property_id: number; property: string; amount: number; pct: number | null; tds_amount: number; pay_vendor: number
   reason: string; note: string; proforma_file_id: number | null; status: 'PENDING' | 'APPROVED' | 'PAID' | 'REJECTED' | 'CANCELLED'
   requested_by: number; requester: string; requested_at: string; decided_by: string; decided_at: string | null; decision_note: string

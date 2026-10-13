@@ -11,21 +11,23 @@ import { Pill } from '../ui/Pill'
 import { useAction } from '../ui/useAction'
 import { PHASE, usePhase } from '../releasephase/phase'
 import type { Vendor } from './VendorForm'
+import { useScreen } from '../screenaccess/screen'
 
 const TYPE: Record<string, string> = { goods: 'Goods', utility: 'Utility', amc: 'AMC', other: 'Other services', warehouse: 'Internal warehouse' }
 
 export function VendorsPage() {
   const nav = useNavigate()
   const { hasRight, hasStep } = useSession()
+  const sc = useScreen('vendors')
   const bills = usePhase().on(PHASE.bills)
   const { data, reload } = useApi<Vendor[]>('/vendors')
   const [upload, setUpload] = useState(false)
   const a = useAction()
-  const fin = hasStep('finance')
+  const fin = sc.edit && hasStep('finance')
   return (
     <>
       <div className="head"><div><h1>Vendors</h1><p className="sub">Goods suppliers, utility providers, AMC contractors and other services. A vendor is used only when active and bank verified.</p></div>
-        <div className="acts">{hasRight('masters') && <>{hasRight('upload') && <button className="btn ghost" onClick={() => setUpload(true)}>Bulk upload / edit</button>}
+        <div className="acts">{(sc.edit && hasRight('masters')) && <>{hasRight('upload') && <button className="btn ghost" onClick={() => setUpload(true)}>Bulk upload / edit</button>}
           <button className="btn" onClick={() => nav('/vendors/new')}>+ Onboard vendor</button></>}</div></div>
       <DataTable screen="vendors" rows={data || []} rowKey={(v) => v.id} dim={(v) => !v.active}
         search={(v) => [v.code, v.legal_name, v.city, v.gstin, v.pan, ...v.supplies].join(' ')}
@@ -49,7 +51,7 @@ export function VendorsPage() {
             {fin && !v.bank_verified && v.vendor_type !== 'warehouse' && <> <button className="link" disabled={a.busy} onClick={() => a.run(() => post(`/vendors/${v.id}/verify`), () => { reload(); return 'Bank details verified for ' + v.legal_name })}>Verify</button></>}</>,
             csv: (v) => v.bank_verified ? 'Verified' : 'Pending' },
           { key: 'status', label: 'Status', render: (v) => <ActiveToggle kind="vendor" id={v.id} name={v.legal_name} active={v.active} reason={v.inactive_reason} onDone={reload} />, csv: (v) => v.active ? 'Active' : 'Inactive' },
-          { key: 'edit', label: '', render: (v) => hasRight('masters') && v.vendor_type !== 'warehouse' ? <button className="link" onClick={() => nav(`/vendors/${v.id}/edit`)}>Edit</button> : null },
+          { key: 'edit', label: '', render: (v) => (sc.edit && hasRight('masters')) && v.vendor_type !== 'warehouse' ? <button className="link" onClick={() => nav(`/vendors/${v.id}/edit`)}>Edit</button> : null },
         ]} csvName="vendors" />
       {a.errors.length > 0 && <p className="note bad">{a.errors.join(' ')}</p>}
       {upload && <UploadModal kind="vendors" title="Bulk upload or edit vendors" onClose={() => setUpload(false)} onDone={reload} />}

@@ -14,11 +14,13 @@ import { Pill } from '../ui/Pill'
 import { useAction } from '../ui/useAction'
 import { BulkResults, type BulkResult } from '../ui/BulkResults'
 import { col, placeFilters, search } from '../requests/columns'
+import { useScreen } from '../screenaccess/screen'
 
 export function PurchaseOrdersPage() {
   const nav = useNavigate()
   const l = useLookups()
   const { hasRight } = useSession()
+  const sc = useScreen('purchase_orders')
   const [days, setDays] = useState(90)
   const fromChanged = useCallback((f: string) => setDays(daysBack(f)), [])
   const { data, reload } = useApi<ListRow[]>(`/requests?view=po&days=${days}`)
@@ -30,10 +32,10 @@ export function PurchaseOrdersPage() {
   return (
     <>
       <div className="head"><div><h1>Purchase Orders</h1><p className="sub">Approved requests to convert, and orders sent to vendors. Tick several approved requests to issue their POs at once.</p></div>
-        {hasRight('issue_po') && <div className="acts"><button className="btn" disabled={!sel.size} onClick={() => setIssuing(true)}>Issue POs for selected ({sel.size})</button></div>}</div>
+        {(sc.edit && hasRight('issue_po')) && <div className="acts"><button className="btn" disabled={!sel.size} onClick={() => setIssuing(true)}>Issue POs for selected ({sel.size})</button></div>}</div>
       {results && <BulkResults title="Last bulk issue" results={results} label={(id) => rows.find((r) => r.id === id)?.number || String(id)} onClose={() => setResults(null)} />}
       <DataTable screen="purchase-orders" rows={rows} rowKey={(r) => r.id} date={{ label: 'Raised', value: (r) => r.created_at, onFrom: fromChanged }} search={search} onOpen={(r) => nav('/documents/' + r.id)}
-        selectable={hasRight('issue_po') ? (r) => r.status === 'APPROVED' && !r.is_transfer : undefined} selected={sel} onSelect={setSel}
+        selectable={(sc.edit && hasRight('issue_po')) ? (r) => r.status === 'APPROVED' && !r.is_transfer : undefined} selected={sel} onSelect={setSel}
         filters={[{ id: 'st', label: 'Status', options: [['', 'All'], ['APPROVED', 'PO pending'], ['PO_ISSUED', 'Awaiting delivery'], ['DONE', 'Received']], test: (r, v) => v === 'DONE' ? !['APPROVED', 'PO_ISSUED'].includes(r.status) : r.status === v }, ...placeFilters(l)]}
         columns={[col.po, col.number, col.vendor, col.property, col.deliver, col.terms, col.amount, { key: 'status', label: 'Status', render: st, csv: (r) => r.status_label }]} csvName="purchase-orders" />
       {issuing && <BulkIssue ids={[...sel] as number[]} onClose={() => setIssuing(false)} onDone={(r) => { setIssuing(false); setSel(new Set()); setResults(r); reload() }} />}
@@ -51,7 +53,8 @@ function BulkIssue({ ids, onClose, onDone }: { ids: number[]; onClose: () => voi
       <div className="grid2">
         <label className="field"><span>Deliver by</span><input type="date" min={today()} value={due} onChange={(e) => setDue(e.target.value)} /></label>
         <label className="field"><span>Payment terms</span>
-          <select value={terms} onChange={(e) => setTerms(e.target.value)}><option value="">Each vendor's own terms</option>{PAYMENT_TERMS.map((t) => <option key={t}>{t}</option>)}</select></label>
+          <select value={terms} onChange={(e) => setTerms(e.target.value)}><option value="">Each vendor's own terms</option>{PAYMENT_TERMS.filter((t) => t !== 'Advance').map((t) => <option key={t}>{t}</option>)}</select>
+            <span className="hint">A PO on Advance terms is issued on its own page, where the advance is asked with it.</span></label>
       </div>
       <Errors list={a.errors} />
       <div className="btns"><button className="btn ghost" onClick={onClose}>Cancel</button>

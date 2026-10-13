@@ -20,11 +20,13 @@ import (
 	"purchasedesk/internal/access"
 	"purchasedesk/internal/auditlog"
 	"purchasedesk/internal/clock"
+	"purchasedesk/internal/database"
 	"purchasedesk/internal/documents"
 	"purchasedesk/internal/flowsettings"
 	"purchasedesk/internal/httpjson"
 	"purchasedesk/internal/messaging"
 	"purchasedesk/internal/money"
+	"purchasedesk/internal/screens"
 	"purchasedesk/internal/textclean"
 	"purchasedesk/internal/uploadedfiles"
 )
@@ -34,6 +36,8 @@ type Service struct {
 	Guard    *access.Guard
 	Files    *uploadedfiles.Service
 	Messages *messaging.Sender
+	// POReleased sends the vendor a PO that was raised when Finance approved its advance (purchaseorders.SendPO).
+	POReleased func(u *access.User, docID int64)
 }
 
 func (s *Service) Routes(r chi.Router) {
@@ -67,6 +71,7 @@ type Advance struct {
 	PONumber     string     `json:"po_number"`
 	Kind         string     `json:"kind"`
 	POOpen       bool       `json:"po_open"` // goods still due on the PO
+	POHeld       bool       `json:"po_held"` // the PO waits for this advance to be approved before it is raised
 	VendorID     int64      `json:"vendor_id"`
 	Vendor       string     `json:"vendor"`
 	VendorEmail  string     `json:"-"`
@@ -97,7 +102,8 @@ type Advance struct {
 	Uses         []Use      `json:"uses,omitempty"`
 }
 
-const selectAdvance = `SELECT a.id, a.number, a.document_id, d.number, coalesce(d.po_number,''), d.kind, d.status='PO_ISSUED',
+const selectAdvance = `SELECT a.id, a.number, a.document_id, d.number, coalesce(d.po_number, d.advance_hold_po, ''), d.kind,
+	d.status='PO_ISSUED' OR (d.status='APPROVED' AND d.advance_hold_po IS NOT NULL), d.advance_hold_po IS NOT NULL,
 	a.vendor_id, v.legal_name, coalesce(v.email::text,''), a.property_id, p.name, p.cluster_id, a.amount::float8, a.pct::float8, a.tds_amount::float8,
 	a.reason, a.note, a.proforma_file_id, a.status, a.requested_by, ru.name, a.requested_at, coalesce(du.name,''), a.decided_at, a.decision_note,
 	coalesce(a.paid_on::text,''), a.payment_ref, a.carry_forward,
@@ -108,7 +114,7 @@ const selectAdvance = `SELECT a.id, a.number, a.document_id, d.number, coalesce(
 
 func scan(row pgx.CollectableRow) (Advance, error) {
 	var x Advance
-	err := row.Scan(&x.ID, &x.Number, &x.DocumentID, &x.DocNumber, &x.PONumber, &x.Kind, &x.POOpen, &x.VendorID, &x.Vendor, &x.VendorEmail,
+	err := row.Scan(&x.ID, &x.Number, &x.DocumentID, &x.DocNumber, &x.PONumber, &x.Kind, &x.POOpen, &x.POHeld, &x.VendorID, &x.Vendor, &x.VendorEmail,
 		&x.PropertyID, &x.Property, &x.ClusterID, &x.Amount, &x.Pct, &x.TDS, &x.Reason, &x.Note, &x.ProformaID, &x.Status, &x.RequestedBy, &x.Requester,
 		&x.RequestedAt, &x.DecidedBy, &x.DecidedAt, &x.DecisionNote, &x.PaidOn, &x.PaymentRef, &x.CarryForward, &x.Adjusted, &x.Refunded)
 	x.PayVendor = money.Round2(x.Amount - x.TDS)
@@ -119,13 +125,20 @@ func scan(row pgx.CollectableRow) (Advance, error) {
 	return x, err
 }
 
-// finance is the approver of the advance: the same Finance role and scope that approves invoice payments.
+// finance is the approver of the advance: the same Finance role and scope that approves invoice payments, with edit
+// on Payments at the advance's property.
 func finance(u *access.User, x *Advance) *access.Grant {
+	if u.Level("payments", x.PropertyID, x.ClusterID) < screens.Edit {
+		return nil
+	}
 	return u.Can("finance", access.Pay, x.PropertyID, x.ClusterID, nil)
 }
 
 // issuer is whoever can issue the PO the advance belongs to; they request and cancel advances.
 func issuer(u *access.User, x *Advance) bool {
+	if u.Level("purchase_orders", x.PropertyID, x.ClusterID) < screens.Edit {
+		return false
+	}
 	return u.ID == x.RequestedBy || u.Can("purchase", access.IssuePO, x.PropertyID, x.ClusterID, nil) != nil
 }
 
@@ -245,16 +258,21 @@ func poValues(ctx context.Context, q pgx.Tx, docID int64) (value, tds float64, e
 	return money.Round2(value), tds, err
 }
 
-// requestable checks a PO can take an advance request from u: a purchase (or corporate purchase) with its PO issued
-// and goods still due, not a warehouse transfer, and u can issue its PO.
+// requestable checks a PO can take an advance request from u: a purchase (or corporate purchase) on Advance payment
+// terms with its PO issued and goods still due, not a warehouse transfer, and u can issue its PO. The first advance
+// is asked while issuing the PO; a later one (a second instalment) on the PO page.
 func requestable(u *access.User, d *documents.Doc) error {
 	if (d.Kind != "purchase" && d.Kind != "corp_purchase") || d.IsTransfer {
 		return httpjson.Bad("An advance can be asked only on a vendor's purchase order.")
 	}
-	if d.Status != documents.POIssued || d.PONumber == "" {
-		return httpjson.Conflict("An advance can be asked only after the PO is issued and while goods are still due on it.")
+	if d.PaymentTerms != money.Advance {
+		return httpjson.Conflict("%s is on %s terms. An advance is asked only on a PO issued with Advance payment terms.", d.PONumber, d.PaymentTerms)
 	}
-	if documents.CanAct(u, d, "purchase", access.IssuePO) == nil {
+	held := d.Status == documents.Approved && d.AdvanceHold != ""
+	if !held && (d.Status != documents.POIssued || d.PONumber == "") {
+		return httpjson.Conflict("An advance can be asked only with the PO, and later while goods are still due on it.")
+	}
+	if documents.CanAct(u, d, "purchase", access.IssuePO) == nil || u.Level("purchase_orders", d.PropertyID, d.ClusterID) < screens.Edit {
 		return httpjson.Forbidden("Only the Purchase Team, who issue this PO, can ask for an advance on it.")
 	}
 	return nil
@@ -288,11 +306,113 @@ func (s *Service) forDocument(w http.ResponseWriter, r *http.Request) error {
 			asked += out[i].Amount
 		}
 	}
-	return httpjson.OK(w, map[string]any{"advances": out, "can_request": requestable(u, d) == nil, "po_value": money.Round2(value), "requested": money.Round2(asked)})
+	var poTDS float64 // TDS on the PO's service lines, so the form can show what the vendor gets
+	_ = s.DB.QueryRow(r.Context(), `SELECT coalesce(sum(qty*rate*tds_pct/100),0)::float8 FROM document_line WHERE document_id=$1`, id).Scan(&poTDS)
+	paid := 0.0
+	for _, x := range out {
+		if x.Status == Paid {
+			paid += x.Amount
+		}
+	}
+	return httpjson.OK(w, map[string]any{"advances": out, "can_request": d.AdvanceHold == "" && requestable(u, d) == nil, "po_value": money.Round2(value), "po_tds": poTDS,
+		"requested": money.Round2(asked), "paid": money.Round2(paid)})
 }
 
-// request asks for an advance on an issued PO: an amount or a % of the PO value, a reason, and the vendor's proforma
-// (multipart: a data JSON field and an optional proforma file). TDS on service lines is worked out in proportion.
+// Ask is an advance asked for on a PO: an amount or a % of the PO value, with a reason from the advance_reasons list.
+type Ask struct {
+	Amount float64 `json:"amount"`
+	Pct    float64 `json:"pct"`
+	Reason string  `json:"reason"`
+	Note   string  `json:"note"`
+}
+
+// Check tidies an Ask and checks it on its own, before the PO is touched.
+func (in *Ask) Check(ctx context.Context, q database.Q) error {
+	in.Note = strings.TrimSpace(in.Note)
+	if (in.Amount > 0) == (in.Pct > 0) {
+		return httpjson.Bad("Enter the advance as an amount or as a %% of the PO value.")
+	}
+	if in.Pct > 100 {
+		return httpjson.Bad("The advance cannot be more than 100%% of the PO.")
+	}
+	return flowsettings.CheckReason(ctx, q, "advance_reasons", in.Reason, in.Note)
+}
+
+// ReadProforma reads the optional proforma file of a multipart request.
+func ReadProforma(r *http.Request) (*uploadedfiles.File, error) {
+	if r.MultipartForm == nil {
+		return nil, nil
+	}
+	if fhs := r.MultipartForm.File["proforma"]; len(fhs) > 0 {
+		return uploadedfiles.Read(fhs[0])
+	}
+	return nil, nil
+}
+
+// Create records a checked advance on d inside tx, after requestable passes: it is numbered from the PO, kept within
+// the PO value, and its TDS is worked out in proportion to the PO's service lines. It returns the message for the user.
+func Create(ctx context.Context, tx pgx.Tx, u *access.User, files *uploadedfiles.Service, d *documents.Doc, in Ask, proforma *uploadedfiles.File) (string, error) {
+	if err := requestable(u, d); err != nil {
+		return "", err
+	}
+	po := d.PONumber
+	if d.AdvanceHold != "" {
+		po = d.AdvanceHold // the PO is raised under this number once Finance approves the advance
+	}
+	value, poTDS, err := poValues(ctx, tx, d.ID)
+	if err != nil {
+		return "", err
+	}
+	amount := money.Round2(in.Amount)
+	var pct *float64
+	if in.Pct > 0 {
+		amount = money.Round2(value * in.Pct / 100)
+		pct = &in.Pct
+	}
+	var asked float64
+	var n int
+	if err := tx.QueryRow(ctx, `SELECT coalesce(sum(amount) FILTER (WHERE status IN ('PENDING','APPROVED','PAID')),0)::float8, count(*) FROM advance WHERE document_id=$1`, d.ID).
+		Scan(&asked, &n); err != nil {
+		return "", err
+	}
+	if amount <= 0 {
+		return "", httpjson.Bad("The advance must be more than zero.")
+	}
+	if asked+amount > value+0.01 {
+		return "", httpjson.Bad("Advances on %s would come to %s, more than the PO value of %s. At most %s more can be asked.",
+			po, money.INR(asked+amount), money.INR(value), money.INR(math.Max(0, value-asked)))
+	}
+	tds := 0.0
+	if value > 0 && poTDS > 0 {
+		tds = math.Round(amount * poTDS / value)
+	}
+	number := documents.AdvanceNumber(po, n+1)
+	fileID, err := files.Save(ctx, tx, u, proforma, "proformas", false)
+	if err != nil {
+		return "", err
+	}
+	var fid *int64
+	if fileID != 0 {
+		fid = &fileID
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO advance(number,document_id,vendor_id,property_id,amount,pct,tds_amount,reason,note,proforma_file_id,status,requested_by)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'PENDING',$11)`, number, d.ID, d.VendorID, d.PropertyID, amount, pct, tds, in.Reason, in.Note, fid, u.ID); err != nil {
+		return "", err
+	}
+	detail := in.Reason
+	if in.Note != "" {
+		detail += " · " + in.Note
+	}
+	if tds > 0 {
+		detail += " · TDS " + money.INR(tds)
+	}
+	g := documents.CanAct(u, d, "purchase", access.IssuePO)
+	msg := fmt.Sprintf("%s for %s sent to Finance for approval", number, money.INR(amount))
+	return msg, auditlog.Doc(ctx, tx, u, g.Name, d.ID, d.Number, module(d.Kind), fmt.Sprintf("Advance %s requested · %s", number, money.INR(amount)), detail)
+}
+
+// request asks for a further advance on an issued Advance-terms PO (multipart: a data JSON field and an optional
+// proforma file). The first advance is asked with the PO itself (purchaseorders).
 func (s *Service) request(w http.ResponseWriter, r *http.Request) error {
 	u := access.From(r)
 	id, err := httpjson.ID(r, "id")
@@ -302,30 +422,16 @@ func (s *Service) request(w http.ResponseWriter, r *http.Request) error {
 	if err := r.ParseMultipartForm(32 << 20); err != nil {
 		return httpjson.Bad("Could not read the form: %v", err)
 	}
-	var in struct {
-		Amount float64 `json:"amount"`
-		Pct    float64 `json:"pct"`
-		Reason string  `json:"reason"`
-		Note   string  `json:"note"`
-	}
+	var in Ask
 	if err := json.Unmarshal([]byte(r.FormValue("data")), &in); err != nil {
 		return httpjson.Bad("Could not read the form data.")
 	}
-	in.Note = strings.TrimSpace(in.Note)
-	if (in.Amount > 0) == (in.Pct > 0) {
-		return httpjson.Bad("Enter the advance as an amount or as a %% of the PO value.")
-	}
-	if in.Pct > 100 {
-		return httpjson.Bad("The advance cannot be more than 100%% of the PO.")
-	}
-	if err := flowsettings.CheckReason(r.Context(), s.DB, "advance_reasons", in.Reason, in.Note); err != nil {
+	if err := in.Check(r.Context(), s.DB); err != nil {
 		return err
 	}
-	var proforma *uploadedfiles.File
-	if fhs := r.MultipartForm.File["proforma"]; len(fhs) > 0 {
-		if proforma, err = uploadedfiles.Read(fhs[0]); err != nil {
-			return err
-		}
+	proforma, err := ReadProforma(r)
+	if err != nil {
+		return err
 	}
 	var msg string
 	err = pgx.BeginFunc(r.Context(), s.DB, func(tx pgx.Tx) error {
@@ -333,59 +439,11 @@ func (s *Service) request(w http.ResponseWriter, r *http.Request) error {
 		if err != nil {
 			return err
 		}
-		if err := requestable(u, d); err != nil {
-			return err
+		if d.AdvanceHold != "" {
+			return httpjson.Conflict("%s is waiting for Finance to approve its first advance.", d.AdvanceHold)
 		}
-		value, poTDS, err := poValues(r.Context(), tx, d.ID)
-		if err != nil {
-			return err
-		}
-		amount := money.Round2(in.Amount)
-		var pct *float64
-		if in.Pct > 0 {
-			amount = money.Round2(value * in.Pct / 100)
-			pct = &in.Pct
-		}
-		var asked float64
-		var n int
-		if err := tx.QueryRow(r.Context(), `SELECT coalesce(sum(amount) FILTER (WHERE status IN ('PENDING','APPROVED','PAID')),0)::float8, count(*) FROM advance WHERE document_id=$1`, d.ID).
-			Scan(&asked, &n); err != nil {
-			return err
-		}
-		if amount <= 0 {
-			return httpjson.Bad("The advance must be more than zero.")
-		}
-		if asked+amount > value+0.01 {
-			return httpjson.Bad("Advances on %s would come to %s, more than the PO value of %s. At most %s more can be asked.",
-				d.PONumber, money.INR(asked+amount), money.INR(value), money.INR(math.Max(0, value-asked)))
-		}
-		tds := 0.0
-		if value > 0 && poTDS > 0 {
-			tds = math.Round(amount * poTDS / value)
-		}
-		number := documents.AdvanceNumber(d.PONumber, n+1)
-		fileID, err := s.Files.Save(r.Context(), tx, u, proforma, "proformas", false)
-		if err != nil {
-			return err
-		}
-		var fid *int64
-		if fileID != 0 {
-			fid = &fileID
-		}
-		if _, err := tx.Exec(r.Context(), `INSERT INTO advance(number,document_id,vendor_id,property_id,amount,pct,tds_amount,reason,note,proforma_file_id,status,requested_by)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'PENDING',$11)`, number, d.ID, d.VendorID, d.PropertyID, amount, pct, tds, in.Reason, in.Note, fid, u.ID); err != nil {
-			return err
-		}
-		detail := in.Reason
-		if in.Note != "" {
-			detail += " · " + in.Note
-		}
-		if tds > 0 {
-			detail += " · TDS " + money.INR(tds)
-		}
-		g := documents.CanAct(u, d, "purchase", access.IssuePO)
-		msg = fmt.Sprintf("%s for %s sent to Finance for approval", number, money.INR(amount))
-		return auditlog.Doc(r.Context(), tx, u, g.Name, d.ID, d.Number, module(d.Kind), fmt.Sprintf("Advance %s requested · %s", number, money.INR(amount)), detail)
+		msg, err = Create(r.Context(), tx, u, s.Files, d, in, proforma)
+		return err
 	})
 	if err != nil {
 		return err
@@ -418,6 +476,7 @@ func (s *Service) decide(action string) httpjson.Handler {
 		}
 		in.Note = strings.TrimSpace(in.Note)
 		var msg string
+		var released int64 // the held PO raised by approving this advance
 		err = pgx.BeginFunc(r.Context(), s.DB, func(tx pgx.Tx) error {
 			x, err := s.one(r.Context(), tx, u, id, true)
 			if err != nil {
@@ -457,10 +516,35 @@ func (s *Service) decide(action string) httpjson.Handler {
 				return err
 			}
 			msg = x.Number + " " + act
-			return auditlog.Doc(r.Context(), tx, u, role, x.DocumentID, x.DocNumber, module(x.Kind), fmt.Sprintf("Advance %s %s · %s", x.Number, act, money.INR(x.Amount)), in.Note)
+			if err := auditlog.Doc(r.Context(), tx, u, role, x.DocumentID, x.DocNumber, module(x.Kind), fmt.Sprintf("Advance %s %s · %s", x.Number, act, money.INR(x.Amount)), in.Note); err != nil {
+				return err
+			}
+			if !x.POHeld {
+				return nil
+			}
+			// The PO was waiting for this advance: approved, it is raised and goes to the vendor; rejected or
+			// cancelled, the request goes back to Purchase to issue the PO again.
+			if status == Approved {
+				po, err := documents.ReleaseHeldPO(r.Context(), tx, x.DocumentID)
+				if err != nil || po == "" {
+					return err
+				}
+				released = x.DocumentID
+				msg += ". " + po + " is raised and sent to " + x.Vendor
+				return auditlog.Doc(r.Context(), tx, u, role, x.DocumentID, x.DocNumber, module(x.Kind), po+" issued to vendor", "Advance "+x.Number+" approved by Finance")
+			}
+			po, err := documents.ClearHeldPO(r.Context(), tx, x.DocumentID)
+			if err != nil || po == "" {
+				return err
+			}
+			msg += ". " + po + " is not raised: Purchase can issue the PO again"
+			return auditlog.Doc(r.Context(), tx, u, role, x.DocumentID, x.DocNumber, module(x.Kind), po+" not raised, advance "+act, in.Note)
 		})
 		if err != nil {
 			return err
+		}
+		if released != 0 && s.POReleased != nil {
+			s.POReleased(u, released)
 		}
 		return httpjson.OK(w, map[string]string{"message": msg})
 	}

@@ -1,7 +1,7 @@
 // Small master lists used in pickers (cities, clusters, properties, categories, ...), loaded once and shared.
 import { useEffect, useState } from 'react'
 import { get } from './client'
-import type { Property } from './types'
+import type { Property, Role } from './types'
 
 export interface Lookups {
   cities: { id: number; name: string; state_code: string; active: boolean }[]
@@ -13,7 +13,7 @@ export interface Lookups {
   packSizes: { id: number; name: string; active: boolean }[]
   billTypes: { id: number; name: string; section: string; default_gst: number; active: boolean }[]
   people: { id: number; name: string; active: boolean; steps: string[] }[]
-  roles: { id: number; code: string; name: string; step: string; rights: string[]; is_custom: boolean; active: boolean; users: number }[]
+  roles: Role[]
 }
 
 let cache: Lookups | null = null

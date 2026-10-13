@@ -11,6 +11,7 @@ import { Field } from '../ui/Field'
 import { Modal } from '../ui/Modal'
 import { Pill } from '../ui/Pill'
 import { useAction } from '../ui/useAction'
+import { useScreen } from '../screenaccess/screen'
 
 interface Row { vendor_id: number; code: string; vendor: string; confirmed_pos: number; properties_confirmed: number; confirmed_value: number; approved_without_po: number; in_approval: number;
   sheet_mode: string; sheet_time: string; sheet_channel: string; last_sent_at: string | null; last_version: number; new_pos: number }
@@ -20,7 +21,8 @@ interface Preview { sheet: { vendor: string; version: number; file_name: string;
 
 export function VendorSheetsPage() {
   const { hasStep } = useSession()
-  const cc = hasStep('cc')
+  const sc = useScreen('vendor_sheets')
+  const cc = sc.edit && hasStep('cc')
   const { data, reload } = useApi<Row[]>('/vendor-sheets')
   const [open, setOpen] = useState<number | null>(null)
   const [sending, setSending] = useState<number[] | null>(null)

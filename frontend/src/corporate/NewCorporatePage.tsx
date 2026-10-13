@@ -1,10 +1,12 @@
 // Raise a corporate purchase (something still to buy: free-text lines, a PO follows) or a corporate bill (an invoice already received).
+// Save draft keeps the half-filled form (invoice and quotation files too); ?draft=<id> opens it again.
 import { useEffect, useState } from 'react'
-import { useNavigate, useParams } from 'react-router-dom'
-import { upload } from '../api/client'
+import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
+import { get, upload } from '../api/client'
+import { DraftControls, DraftList, KeptFiles, useDraft, type Draft } from '../formdrafts/drafts'
 import { useApi } from '../api/useApi'
 import { useSession } from '../auth/session'
-import { inr, lineValue, today } from '../format/format'
+import { dateTime, inr, lineValue, today } from '../format/format'
 import { Errors } from '../ui/Errors'
 import { Field } from '../ui/Field'
 import { Seg } from '../ui/Tabs'
@@ -34,6 +36,20 @@ export function NewCorporatePage() {
   const [file, setFile] = useState<File | null>(null)
   const [quote, setQuote] = useState<File | null>(null)
   const a = useAction()
+  const [sp] = useSearchParams()
+  const draftId = Number(sp.get('draft')) || 0
+  const draft = useDraft('corporate')
+  useEffect(() => {
+    if (!draftId) return
+    get<Draft<CorpFields>[]>('/drafts?form=corporate').then(async (list) => {
+      const x = list.find((y) => y.id === draftId)
+      if (!x) return
+      const f = x.fields
+      setKind(f.kind); setDept(f.dept); setVendor(f.vendor); setNote(f.note); setLines(f.lines.length ? f.lines : [blank()]); setHead(f.head); setInv(f.inv)
+      const files = await draft.open(x)
+      setFile(files.invoice?.[0] || null); setQuote(files.quote?.[0] || null)
+    }).catch(() => {})
+  }, [draftId]) // eslint-disable-line react-hooks/exhaustive-deps
   const deps = (data?.departments || []).filter((d) => d.active)
   const heads = (data?.expense_heads || []).filter((h) => h.active)
   useEffect(() => { if (!dept && deps.length) setDept(deps[0].id) }, [deps, dept])
@@ -41,11 +57,16 @@ export function NewCorporatePage() {
   const total = kind === 'purchase' ? lines.reduce((t, l) => t + lineValue(+l.qty || 0, +l.rate || 0, l.gst_pct), 0) : +inv.amount || 0
   const isL1 = d && d.l1_user_id === me?.id
   const set = (i: number, patch: Partial<L>) => setLines(lines.map((l, j) => j === i ? { ...l, ...patch } : l))
+  const saveDraft = () => draft.save([kind === 'purchase' ? 'Corporate purchase' : 'Corporate bill', deps.find((x) => x.id === dept)?.name, data?.vendors.find((v) => v.id === vendor)?.name,
+    kind === 'bill' && inv.number ? 'invoice ' + inv.number : '', total ? inr(total) : ''].filter(Boolean).join(' · '),
+    { kind, dept, vendor, note, lines, head, inv } satisfies CorpFields, { invoice: kind === 'bill' ? file : null, quote: kind === 'purchase' ? quote : null })
   if (error) return <p className="note bad">{error.message}</p>
   return (
     <>
       <div className="head"><div><button className="link" onClick={() => nav('/corporate')}>‹ Corporate</button><h1>{kind === 'purchase' ? 'New corporate purchase' : 'New corporate bill'}</h1>
         <p className="sub">{kind === 'purchase' ? 'For something still to buy: a PO goes to the vendor after approval.' : 'For an invoice already received, with no PO. Finance pays it after approval.'} Charged to {data?.office}.</p></div></div>
+      {!draftId && <DraftList form="corporate" label="Your corporate drafts" onOpen={(x) => nav(`/corporate/new/${x.fields.kind}?draft=${x.id}`)} />}
+      {draftId > 0 && draft.savedAt && <p className="note">Your draft from {dateTime(draft.savedAt)} is filled in. Finish it and send it, or save the draft again.</p>}
       <Seg value={kind} onChange={setKind} items={[['purchase', 'Corporate purchase'], ['bill', 'Corporate bill']]} />
       <div className="cols">
         <div className="stack">
@@ -74,12 +95,12 @@ export function NewCorporatePage() {
               <Field label="Invoice date"><input type="date" max={today()} value={inv.date} onChange={(e) => setInv({ ...inv, date: e.target.value })} /></Field>
               <Field label="Invoice amount incl. GST (₹)"><input type="number" min="0" value={inv.amount} onChange={(e) => setInv({ ...inv, amount: e.target.value })} /></Field>
               <Field label="GST %"><select value={inv.gst} onChange={(e) => setInv({ ...inv, gst: +e.target.value })}>{[0, 5, 12, 18, 28, 40].map((g) => <option key={g} value={g}>{g}%</option>)}</select></Field>
-              <Field label="Invoice file"><input type="file" accept="image/*,application/pdf" onChange={(e) => setFile(e.target.files?.[0] || null)} /></Field>
+              <Field label="Invoice file"><input type="file" accept="image/*,application/pdf" onChange={(e) => setFile(e.target.files?.[0] || null)} /><KeptFiles files={[file]} /></Field>
             </div></section>
           )}
           <section className="card">
             <Field label="Why is this needed?"><textarea value={note} onChange={(e) => setNote(e.target.value)} /></Field>
-            {kind === 'purchase' && <Field label="Quotation (optional)"><input type="file" accept="image/*,application/pdf" onChange={(e) => setQuote(e.target.files?.[0] || null)} /></Field>}
+            {kind === 'purchase' && <Field label="Quotation (optional)"><input type="file" accept="image/*,application/pdf" onChange={(e) => setQuote(e.target.files?.[0] || null)} /><KeptFiles files={[quote]} /></Field>}
           </section>
         </div>
         <section className="card"><h2>Approval</h2>
@@ -89,13 +110,16 @@ export function NewCorporatePage() {
             {d.backup && <p className="hint">Backup if either is away: {d.backup}</p>}</>}
           <p className="hint">Then: {kind === 'purchase' ? 'Purchase issues the PO, you confirm receipt with the invoice, Accounts matches, Finance pays and pushes to Zoho.' : 'Finance approves payment and pushes to Zoho.'}</p>
           <Errors list={a.errors} />
+          <div className="btns"><DraftControls draft={draft} onSave={saveDraft} />
           <button className="btn" disabled={a.busy} onClick={() => a.run(() => upload('/corporate/requests', {
             kind, department_id: dept, vendor_id: vendor, note,
             lines: kind === 'purchase' ? lines.map((l) => ({ ...l, qty: +l.qty, rate: +l.rate })) : [],
             expense_head_id: head, invoice_number: inv.number, invoice_date: inv.date, invoice_amount: +inv.amount, gst_pct: inv.gst,
-          }, { invoice: file, quote }), (r: any) => { nav('/documents/' + r.id); return r.message })}>Send for approval · {inr(total)}</button>
+          }, { invoice: file, quote }), (r: any) => { draft.clear(); nav('/documents/' + r.id); return r.message })}>Send for approval · {inr(total)}</button></div>
         </section>
       </div>
     </>
   )
 }
+
+interface CorpFields { kind: string; dept: number; vendor: number; note: string; lines: L[]; head: number; inv: { number: string; date: string; amount: string; gst: number } }

@@ -161,8 +161,9 @@ func Release(ctx context.Context, q database.Q, invoiceID int64) error {
 	return err
 }
 
-// CancelUnpaid cancels a PO's advances that are not paid yet, once nothing more is due on it (fully received, or the
-// balance rejected). A paid advance stays and is adjusted on the invoices, refunded or carried forward.
+// CancelUnpaid cancels a PO's advances that are not paid yet when the PO is cancelled with nothing delivered (its
+// balance rejected). After any delivery they stay with Finance, and the invoices' payment approval waits for them
+// (Waiting). A paid advance stays and is adjusted on the invoices, refunded or carried forward.
 func CancelUnpaid(ctx context.Context, q database.Q, u *access.User, docID int64, docNumber, why string) error {
 	rows, err := q.Query(ctx, `UPDATE advance SET status='CANCELLED', decided_at=now(), decision_note=$2
 		WHERE document_id=$1 AND status IN ('PENDING','APPROVED') RETURNING number`, docID, why)
@@ -215,4 +216,33 @@ func uses(ctx context.Context, q database.Q, where string, arg int64) ([]Use, er
 // UsesForInvoice lists the advances adjusted on one invoice.
 func UsesForInvoice(ctx context.Context, q database.Q, invoiceID int64) ([]Use, error) {
 	return uses(ctx, q, `WHERE x.invoice_id=$1`, invoiceID)
+}
+
+// Waiting lists, per PO, the advances Finance has not settled yet: asked but not approved, or approved but not paid.
+// An invoice on such a PO waits for them at payment approval, so the vendor is never paid in full while an advance on
+// the same PO is still due to be paid and adjusted. A rejected or cancelled advance does not hold anything.
+func Waiting(ctx context.Context, q database.Q, docIDs []int64) (map[int64][]string, error) {
+	out := map[int64][]string{}
+	if len(docIDs) == 0 {
+		return out, nil
+	}
+	rows, err := q.Query(ctx, `SELECT document_id, number, amount::float8, status FROM advance WHERE document_id = ANY($1) AND status IN ('PENDING','APPROVED') ORDER BY id`, docIDs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var doc int64
+		var number, status string
+		var amount float64
+		if err := rows.Scan(&doc, &number, &amount, &status); err != nil {
+			return nil, err
+		}
+		what := "is waiting for Finance to approve it"
+		if status == Approved {
+			what = "is approved but not paid yet"
+		}
+		out[doc] = append(out[doc], fmt.Sprintf("Advance %s of %s %s", number, money.INR(amount), what))
+	}
+	return out, rows.Err()
 }

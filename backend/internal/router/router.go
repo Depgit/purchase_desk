@@ -25,6 +25,7 @@ import (
 	"purchasedesk/internal/encryption"
 	"purchasedesk/internal/filestorage"
 	"purchasedesk/internal/flowsettings"
+	"purchasedesk/internal/formdrafts"
 	"purchasedesk/internal/geography"
 	"purchasedesk/internal/goodsreceipts"
 	"purchasedesk/internal/httpjson"
@@ -36,6 +37,7 @@ import (
 	"purchasedesk/internal/purchaserequests"
 	"purchasedesk/internal/releasephase"
 	"purchasedesk/internal/reports"
+	"purchasedesk/internal/screenguard"
 	"purchasedesk/internal/sessiontoken"
 	"purchasedesk/internal/uploadedfiles"
 	"purchasedesk/internal/users"
@@ -105,6 +107,7 @@ func New(d Deps) *Built {
 		loginSvc.PublicRoutes(r)
 		r.Group(func(r chi.Router) {
 			r.Use(guard.Middleware)
+			r.Use((&screenguard.Guard{DB: d.DB}).Middleware) // screen levels from the user's roles, on every request
 			loginSvc.Routes(r)
 			(&auditlog.Service{DB: d.DB}).Routes(r)
 			(&flowsettings.Service{DB: d.DB}).Routes(r)
@@ -116,12 +119,14 @@ func New(d Deps) *Built {
 			(&users.Service{DB: d.DB, Guard: guard}).Routes(r)
 			(&approvals.Service{DB: d.DB, Guard: guard, Messages: d.Messages}).Routes(r)
 			(&purchaserequests.Service{DB: d.DB, Guard: guard, Messages: d.Messages}).Routes(r)
-			(&purchaseorders.Service{DB: d.DB, Messages: d.Messages}).Routes(r)
+			poSvc := &purchaseorders.Service{DB: d.DB, Messages: d.Messages, Files: files}
+			poSvc.Routes(r)
 			(&goodsreceipts.Service{DB: d.DB, Files: files}).Routes(r)
 			(&balancereject.Service{DB: d.DB, Messages: d.Messages}).Routes(r)
-			(&advances.Service{DB: d.DB, Guard: guard, Files: files, Messages: d.Messages}).Routes(r)
+			(&advances.Service{DB: d.DB, Guard: guard, Files: files, Messages: d.Messages, POReleased: poSvc.SendPO}).Routes(r)
 			inv.Routes(r)
 			files.Routes(r)
+			(&formdrafts.Service{DB: d.DB, Files: files}).Routes(r)
 			uploads.Routes(r)
 			(&worklist.Service{DB: d.DB, Guard: guard}).Routes(r)
 

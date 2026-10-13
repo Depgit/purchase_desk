@@ -8,10 +8,13 @@ import { day, inr, daysBack } from '../format/format'
 import { DataTable } from '../ui/DataTable'
 import { Pill, statusTone } from '../ui/Pill'
 import { Tabs } from '../ui/Tabs'
+import { useScreen } from '../screenaccess/screen'
+import { DraftList } from '../formdrafts/drafts'
 
 export function CorporatePage() {
   const nav = useNavigate()
   const { me, hasRight } = useSession()
+  const sc = useScreen('corporate')
   const [days, setDays] = useState(90)
   const fromChanged = useCallback((f: string) => setDays(daysBack(f)), [])
   const { data } = useApi<ListRow[]>(`/requests?kind=corp&days=${days}`)
@@ -23,7 +26,8 @@ export function CorporatePage() {
   return (
     <>
       <div className="head"><div><h1>Corporate</h1><p className="sub">Purchases and bills of the corporate office. Lines need no SKU: a description and an expense head. Every request is approved by the department's L1, then its L2.</p></div>
-        <div className="acts">{hasRight('raise') && <><button className="btn" onClick={() => nav('/corporate/new/purchase')}>+ Corporate purchase</button><button className="btn ghost" onClick={() => nav('/corporate/new/bill')}>+ Corporate bill</button></>}</div></div>
+        <div className="acts">{sc.edit && hasRight('raise') && <><button className="btn" onClick={() => nav('/corporate/new/purchase')}>+ Corporate purchase</button><button className="btn ghost" onClick={() => nav('/corporate/new/bill')}>+ Corporate bill</button></>}</div></div>
+      {sc.edit && <DraftList form="corporate" label="Your corporate drafts" onOpen={(d) => nav(`/corporate/new/${d.fields.kind}?draft=${d.id}`)} />}
       <Tabs value={tab} onChange={setTab} items={[['todo', `Waiting for me (${mine.length})`], ['mine', `Raised by me (${raised.length})`], ['all', `All corporate (${rows.length})`]]} />
       <DataTable screen="corporate" rows={shown} rowKey={(r) => r.id} date={{ label: 'Raised', value: (r) => r.created_at, onFrom: fromChanged }} onOpen={(r) => nav('/documents/' + r.id)} search={(r) => [r.number, r.po_number, r.department, r.vendor, r.items, r.requester].join(' ')}
         filters={[{ id: 't', label: 'Type', options: [['', 'Purchases and bills'], ['corp_purchase', 'Purchases (with PO)'], ['corp_bill', 'Bills (no PO)']], test: (r, v) => r.kind === v },

@@ -157,9 +157,13 @@ func (s *Service) reject(w http.ResponseWriter, r *http.Request) error {
 			msg += " Nothing was delivered, so the PO is cancelled."
 		}
 		if left <= 0 {
-			// Nothing more is due: advances not paid yet are cancelled; a paid one is refunded or carried forward.
-			if err := advances.CancelUnpaid(r.Context(), tx, u, id, d.Number, "Balance rejected on "+number); err != nil {
-				return err
+			// Nothing more is due. With nothing delivered the PO is cancelled, so advances not paid yet are cancelled too;
+			// after a part delivery they stay with Finance and the invoices' payment approval waits for them. A paid
+			// advance is adjusted on the invoices, refunded or carried forward.
+			if !received {
+				if err := advances.CancelUnpaid(r.Context(), tx, u, id, d.Number, "Balance rejected on "+number+", nothing delivered"); err != nil {
+					return err
+				}
 			}
 			var open float64
 			_ = tx.QueryRow(r.Context(), `SELECT coalesce(sum(a.amount - coalesce((SELECT sum(x.amount) FROM advance_use x WHERE x.advance_id=a.id),0)),0)::float8

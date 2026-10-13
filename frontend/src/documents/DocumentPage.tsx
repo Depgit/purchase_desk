@@ -1,7 +1,7 @@
 // One purchase request or bill: where it stands, what was asked and changed, and the next action for the signed-in user.
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
-import { fileUrl, get, post } from '../api/client'
+import { fileUrl, post } from '../api/client'
 import { useApi } from '../api/useApi'
 import { AdvancesCard } from '../advances/AdvancesCard'
 import type { Doc, Invoice } from '../api/types'
@@ -9,6 +9,7 @@ import { ReasonModal, type ReasonKind } from '../approvals/ReasonModal'
 import { useSession } from '../auth/session'
 import { dateTime, day, inr, month, qty } from '../format/format'
 import { ReceivePanel } from '../goodsreceipts/ReceivePanel'
+import { BalanceDuePanel } from '../balancereject/RejectBalanceForm'
 import { IssuePOPanel } from '../purchaseorders/IssuePOPanel'
 import { Errors } from '../ui/Errors'
 import { Modal } from '../ui/Modal'
@@ -70,6 +71,7 @@ export function DocumentPage() {
         <div className="acts">
           {data.actions.includes('edit') && <button className="btn ghost" onClick={() => nav(`/requests/${d.id}/edit`)}>Edit</button>}
           {mine && <button className="btn ghost" onClick={() => nav(`/requests/new?clone=${d.id}`)} title="Start a new request with the same property and items">Clone</button>}
+          {d.kind === 'bill' && <button className="btn ghost" onClick={() => nav(`/bills/new/${d.bill_section}?clone=${d.id}`)} title="Start the next bill with the same property, type and vendor">Clone</button>}
           <Pill tone={statusTone(d.status)}>{d.status_label}</Pill></div>
       </div>
       {stepper(d, inv.data || [])}
@@ -91,7 +93,7 @@ export function DocumentPage() {
       <div className="cols">
         <div className="stack">
           <ActionPanel detail={data} onDone={refresh} />
-          {data.actions.includes('reject_balance') && <RejectBalancePanel doc={d} onDone={refresh} />}
+          {data.actions.includes('reject_balance') && !data.actions.includes('receive') && <BalanceDuePanel doc={d} onDone={refresh} />}
           {d.kind === 'corp_bill' ? (
             <section className="card"><h2>Corporate bill</h2>
               <dl className="kv"><dt>Department</dt><dd>{d.department}</dd><dt>Expense head</dt><dd>{d.expense_head}</dd><dt>Amount incl. GST</dt><dd>{inr(d.total)}</dd>{d.remark && <><dt>Why</dt><dd>{d.remark}</dd></>}</dl>
@@ -175,10 +177,11 @@ export function DocumentPage() {
 function ActionPanel({ detail, onDone }: { detail: Detail; onDone: () => void }) {
   const d = detail.document
   const acts = detail.actions
+  if (d.status === 'APPROVED' && d.advance_hold_po) return <p className="note warn"><b>{d.advance_hold_po} is prepared on Advance terms and waits for Finance to approve the advance.</b> It is raised and sent to {d.vendor} only once Finance approves it (see Advance to vendor below). If Finance rejects the advance, the Purchase Team issues the PO again.</p>
   if (acts.includes('approve')) return <ApprovePanel doc={d} canRoute={acts.includes('route')} canPreop={acts.includes('preop_approver')} onDone={onDone} />
   if (acts.includes('resubmit')) return <ResubmitPanel doc={d} canEdit={acts.includes('edit')} onDone={onDone} />
   if (acts.includes('issue_po')) return <IssuePOPanel doc={d} onDone={onDone} />
-  if (acts.includes('receive')) return <ReceivePanel doc={d} onDone={onDone} />
+  if (acts.includes('receive')) return <ReceivePanel doc={d} onDone={onDone} canReject={acts.includes('reject_balance')} />
   if (acts.includes('edit') && d.status === 'PENDING') return <p className="note"><b>Nobody has approved this yet.</b> You can still change anything on it with Edit; once the {d.owner_name} acts, it is locked.</p>
   if (acts.includes('dispatch')) return <DispatchPanel doc={d} onDone={onDone} />
   if (acts.includes('receive_transfer')) return <ReceiveTransferPanel doc={d} onDone={onDone} />
@@ -270,54 +273,3 @@ function ResubmitPanel({ doc, canEdit, onDone }: { doc: Doc; canEdit: boolean; o
   )
 }
 
-// After a part delivery the balance stays open on the PO. When the vendor will not deliver it, Purchase, the store or
-// the Admin rejects it: per item, all of it by default. The PO closes once nothing is left due.
-function RejectBalancePanel({ doc, onDone }: { doc: Doc; onDone: () => void }) {
-  const due = doc.lines.filter((l) => l.qty - l.received_qty > 0)
-  const [open, setOpen] = useState(false)
-  if (!due.length) return null
-  return (
-    <section className="card">
-      <div className="head"><div><h2>Balance still due</h2>
-        <p className="sub">{due.map((l) => `${l.item_name} ${qty(l.qty - l.received_qty)}`).join(', ')}. If the vendor will not deliver it, reject the balance so it does not stay open.</p></div>
-        <button className="btn no" onClick={() => setOpen(true)}>Reject balance</button></div>
-      {open && <RejectBalanceModal doc={doc} onClose={() => setOpen(false)} onDone={() => { setOpen(false); onDone() }} />}
-    </section>
-  )
-}
-
-function RejectBalanceModal({ doc, onClose, onDone }: { doc: Doc; onClose: () => void; onDone: () => void }) {
-  const due = doc.lines.filter((l) => l.qty - l.received_qty > 0)
-  const [q, setQ] = useState<Record<number, string>>(Object.fromEntries(due.map((l) => [l.id, String(l.qty - l.received_qty)])))
-  const [reasons, setReasons] = useState<string[]>([])
-  const [reason, setReason] = useState('')
-  const [note, setNote] = useState('')
-  const a = useAction()
-  useEffect(() => { get<Record<string, string[]>>('/pick-lists').then((l) => setReasons(l.balance_reasons || [])).catch(() => {}) }, [])
-  const other = reason.startsWith('Other')
-  const all = due.every((l) => +q[l.id] === l.qty - l.received_qty)
-  const none = !doc.lines.some((l) => l.received_qty > 0)
-  return (
-    <Modal title={`Reject the balance on ${doc.po_number || doc.number}`} onClose={onClose}>
-      <p className="sub">The vendor is told not to supply these, the requester is told, and the value is released from the budget. To get the items, raise a new request.</p>
-      <div className="scroll"><table>
-        <thead><tr><th>Item</th><th className="r">Still due</th><th className="r">Reject</th></tr></thead>
-        <tbody>{due.map((l) => (
-          <tr key={l.id}><td>{l.item_name}<br /><span className="hint">{l.sku_code} · {l.pack_size}</span></td><td className="r">{qty(l.qty - l.received_qty)}</td>
-            <td className="r"><input className="qty" type="number" min="0" max={l.qty - l.received_qty} inputMode="decimal" aria-label={'Reject ' + l.item_name}
-              value={q[l.id]} onChange={(e) => setQ({ ...q, [l.id]: e.target.value })} /></td></tr>))}
-        </tbody></table></div>
-      <label className="field"><span>Reason</span>
-        <select value={reason} onChange={(e) => setReason(e.target.value)}><option value="">Choose a reason</option>{reasons.map((r) => <option key={r}>{r}</option>)}</select></label>
-      <label className="field"><span>Remark{other ? '' : ' (optional)'}</span><textarea value={note} onChange={(e) => setNote(e.target.value)} /></label>
-      <p className="hint">{all ? (none ? 'Nothing was delivered, so the PO will be cancelled.' : 'Nothing will be left due, so the PO will close.') : 'The rest stays open for delivery.'}</p>
-      <Errors list={a.errors} />
-      <div className="btns">
-        <button className="btn ghost" onClick={onClose}>Cancel</button>
-        <button className="btn no" disabled={a.busy || !reason || (other && note.trim().length < 3)} onClick={() => a.run(() => post(`/documents/${doc.id}/reject-balance`, {
-          quantities: Object.fromEntries(Object.entries(q).map(([k, v]) => [k, +v || 0])), reason, note,
-        }), (r: any) => { onDone(); return r.message })}>Reject balance</button>
-      </div>
-    </Modal>
-  )
-}

@@ -152,6 +152,9 @@ func (s *Service) Routes(r chi.Router) {
 		}
 	}
 	s.kinds["mappings"] = s.mappingsKind()
+	for name, k := range s.smallMasterKinds() {
+		s.kinds[name] = k
+	}
 	r.Get("/uploads/{kind}/sample", httpjson.Wrap(s.sample))
 	r.Get("/uploads/{kind}/export", httpjson.Wrap(s.export))
 	r.Get("/uploads/{kind}/workbook", httpjson.Wrap(s.workbook))

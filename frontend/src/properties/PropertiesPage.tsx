@@ -14,18 +14,21 @@ import { Modal } from '../ui/Modal'
 import { Pill } from '../ui/Pill'
 import { PHASE, usePhase } from '../releasephase/phase'
 import { useAction } from '../ui/useAction'
+import { useScreen } from '../screenaccess/screen'
 
 const KIND: Record<string, string> = { live: 'Live', warehouse: 'Warehouse', preopening: 'Pre-opening', corporate: 'Corporate office' }
 
 export function PropertiesPage() {
   const l = useLookups()
   const { hasRight, hasStep } = useSession()
+  const sc = useScreen('properties')
+  const bsc = useScreen('budgets')
   const bud = usePhase().on(PHASE.budgets) // F&B cost % feeds budgets, which open in phase 3
   const { data, reload } = useApi<Property[]>('/properties')
   const [edit, setEdit] = useState<Property | 'new' | null>(null)
   const [pct, setPct] = useState<Property | null>(null)
   const [upload, setUpload] = useState<'properties' | 'property_pct' | null>(null)
-  const ed = hasRight('masters')
+  const ed = sc.edit && hasRight('masters')
   const done = () => { reload(); refreshLookups() }
   return (
     <>
@@ -46,7 +49,7 @@ export function PropertiesPage() {
           { key: 'kind', label: 'Stage', render: (p) => p.kind === 'live' ? 'Live' : <Pill tone="warn">{KIND[p.kind]}</Pill>, csv: (p) => p.kind },
           { key: 'l1', label: 'Property Manager', render: (p) => p.l1_name || '—', csv: (p) => p.l1_name },
           { key: 'l2', label: 'Cluster Manager', render: (p) => p.l2_name || '—', csv: (p) => p.l2_name },
-          ...(bud ? [{ key: 'pct', label: 'Plan / IRD / Banquet cost %', render: (p: Property) => <>{p.plan_pct} / {p.ird_pct} / {p.banquet_pct}{(ed || hasStep('cc')) && <> <button className="link" onClick={() => setPct(p)}>Edit</button></>}</>, csv: (p: Property) => `${p.plan_pct}/${p.ird_pct}/${p.banquet_pct}` }] : []),
+          ...(bud ? [{ key: 'pct', label: 'Plan / IRD / Banquet cost %', render: (p: Property) => <>{p.plan_pct} / {p.ird_pct} / {p.banquet_pct}{(ed || (bsc.edit && hasStep('cc'))) && <> <button className="link" onClick={() => setPct(p)}>Edit</button></>}</>, csv: (p: Property) => `${p.plan_pct}/${p.ird_pct}/${p.banquet_pct}` }] : []),
           { key: 'status', label: 'Status', render: (p) => <ActiveToggle kind="property" id={p.id} name={p.name} active={p.active} reason={p.inactive_reason} onDone={done} />, csv: (p) => p.active ? 'Active' : 'Inactive' },
           { key: 'edit', label: '', render: (p) => ed ? <button className="link" onClick={() => setEdit(p)}>Edit</button> : null },
         ]} csvName="properties" />

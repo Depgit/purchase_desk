@@ -8,11 +8,13 @@ import { useApi } from '../api/useApi'
 import { useSession } from '../auth/session'
 import { DataTable } from '../ui/DataTable'
 import { col, placeFilters, search } from './columns'
+import { useScreen } from '../screenaccess/screen'
 
 export function RequestsPage() {
   const nav = useNavigate()
   const l = useLookups()
   const { me, hasRight } = useSession()
+  const sc = useScreen('requests')
   const [days, setDays] = useState(90)
   const fromChanged = useCallback((f: string) => setDays(daysBack(f)), [])
   const { data } = useApi<ListRow[]>(`/requests?kind=purchase&days=${days}`)
@@ -21,7 +23,7 @@ export function RequestsPage() {
   return (
     <>
       <div className="head"><div><h1>Purchase Requests</h1><p className="sub">Every request raised by the properties you can see. Open ones, and closed ones from the last 90 days.</p></div>
-        <div className="acts">{hasRight('raise') && <button className="btn" onClick={() => nav('/requests/new')}>+ New request</button>}</div></div>
+        <div className="acts">{sc.edit && hasRight('raise') && <button className="btn" onClick={() => nav('/requests/new')}>+ New request</button>}</div></div>
       <DataTable screen="requests" rows={data || []} rowKey={(r) => r.id} date={{ label: 'Raised', value: (r) => r.created_at, onFrom: fromChanged }} search={search} filters={[statusFilter, ...placeFilters(l)]} onOpen={(r) => nav('/documents/' + r.id)}
         columns={[col.number, col.date, col.property, col.category, col.items, col.vendor, col.requester, col.amount, col.status,
           { key: 'acts', label: '', render: (r) => r.requester_id === me?.id ? <span className="tools">

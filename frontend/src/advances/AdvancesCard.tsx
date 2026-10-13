@@ -1,67 +1,94 @@
-// The advances on one purchase order, on its document page: ask for an advance (whoever issues the PO), and the
-// Finance steps on each advance. Shown once the PO is issued.
-import { useEffect, useState } from 'react'
-import { fileUrl, get, upload } from '../api/client'
+// The advances on one purchase order, on its document page: a summary (PO value, asked, paid, left to adjust), each
+// advance with its status, how much of it is used and the next step, and the request form (whoever issues the PO),
+// which opens in the card with a live preview of what the vendor gets.
+import { useEffect, useRef, useState } from 'react'
+import { fileUrl, upload } from '../api/client'
 import type { Advance } from '../api/types'
 import { useApi } from '../api/useApi'
+import { useSession } from '../auth/session'
 import { day, inr } from '../format/format'
 import { Errors } from '../ui/Errors'
-import { Field } from '../ui/Field'
-import { Modal } from '../ui/Modal'
-import { Seg } from '../ui/Tabs'
 import { useAction } from '../ui/useAction'
 import { AdvanceActions, AdvanceStatus } from './AdvanceActions'
+import { AdvanceFields, advanceAmount, advanceBody, advanceProblem, newAdvance, type AdvanceDraft } from './AdvanceFields'
 
-interface ForDoc { advances: Advance[]; can_request: boolean; po_value: number; requested: number }
+interface ForDoc { advances: Advance[]; can_request: boolean; po_value: number; po_tds: number; requested: number; paid: number }
 
 export function AdvancesCard({ docId, poNumber, onDone }: { docId: number; poNumber: string; onDone: () => void }) {
   const { data, reload } = useApi<ForDoc>(`/documents/${docId}/advances`)
   const [asking, setAsking] = useState(false)
+  const { hasRight } = useSession()
+  // The card sits low on the page, so opening the request form brings it into view instead of opening off screen.
+  const card = useRef<HTMLElement>(null)
+  useEffect(() => { if (asking) card.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }) }, [asking])
   if (!data || (!data.advances.length && !data.can_request)) return null
+  // Advances are money matters: shown to whoever can ask for one, Finance, and anyone with a step on one, not the store.
+  if (!data.can_request && !hasRight('pay') && !hasRight('issue_po') && !data.advances.some((a) => a.actions.length)) return null
   const done = () => { reload(); onDone() }
+  const left = data.advances.reduce((t, a) => t + a.open, 0)
   return (
-    <section className="card flush">
-      <div className="shead" style={{ background: 'none', borderTop: 0 }}><div style={{ flex: 1 }}><h2>Advances</h2>
-        <p className="sub">PO value {inr(data.po_value)}{data.requested > 0 ? ` · advances asked ${inr(data.requested)}` : ''}. An advance is adjusted on the vendor's invoice at payment approval.</p></div>
-        {data.can_request && <button className="btn ghost" onClick={() => setAsking(true)}>Request advance</button>}</div>
-      {data.advances.length > 0 && <div className="scroll"><table>
-        <thead><tr><th>Advance</th><th className="r">Amount</th><th>Reason</th><th>Status</th><th>Paid</th><th className="r">Adjusted</th><th></th></tr></thead>
-        <tbody>{data.advances.map((a) => <tr key={a.id}>
-          <td className="id">{a.number}<br /><span className="hint">{a.requester} · {day(a.requested_at)}</span></td>
-          <td className="r">{inr(a.amount)}{a.pct ? <><br /><span className="hint">{a.pct}% of PO</span></> : null}{a.tds_amount > 0 ? <><br /><span className="hint">TDS {inr(a.tds_amount)}</span></> : null}</td>
-          <td>{a.reason}{a.note ? <><br /><span className="hint">{a.note}</span></> : null}{a.proforma_file_id ? <><br /><a className="link" href={fileUrl(a.proforma_file_id)} target="_blank" rel="noreferrer">Proforma</a></> : null}</td>
-          <td><AdvanceStatus a={a} />{a.decision_note ? <><br /><span className="hint">{a.decision_note}</span></> : null}</td>
-          <td>{a.paid_on ? <>{day(a.paid_on)}<br /><span className="hint">{a.payment_ref}</span></> : '—'}</td>
-          <td className="r">{a.adjusted ? inr(a.adjusted) : '—'}{a.refunded ? <><br /><span className="hint">refunded {inr(a.refunded)}</span></> : null}</td>
-          <td className="r"><AdvanceActions a={a} onDone={done} /></td></tr>)}</tbody></table></div>}
-      {asking && <RequestModal docId={docId} poNumber={poNumber} poValue={data.po_value} asked={data.requested} onClose={() => setAsking(false)} onDone={() => { setAsking(false); done() }} />}
+    <section ref={card} className={'card' + (asking ? ' act' : '')}>
+      {asking ? <RequestForm docId={docId} poNumber={poNumber} d={data} onCancel={() => setAsking(false)} onDone={() => { setAsking(false); done() }} /> : <>
+        <div className="phead"><div><h2>Advance to vendor</h2>
+          <p className="sub">{data.advances.length ? `Paid advances are adjusted on the vendor's invoice when Finance approves its payment.` : `${poNumber} is on Advance terms. Ask Finance for a further advance if the vendor needs one.`}</p></div>
+          {data.can_request && <button className="btn small" onClick={() => setAsking(true)}>Ask for a further advance</button>}</div>
+        {data.advances.length > 0 && <>
+          <div className="stats">
+            <div className="stat"><span>PO value</span><b>{inr(data.po_value)}</b></div>
+            <div className="stat"><span>Advance asked</span><b>{inr(data.requested)}</b></div>
+            <div className="stat"><span>Paid</span><b>{inr(data.paid)}</b></div>
+            <div className={'stat' + (left > 0.005 ? ' warn' : '')}><span>Left to adjust</span><b>{inr(left)}</b></div>
+          </div>
+          {data.advances.map((a) => <AdvanceRow key={a.id} a={a} onDone={done} />)}</>}
+      </>}
     </section>
   )
 }
 
-function RequestModal({ docId, poNumber, poValue, asked, onClose, onDone }: { docId: number; poNumber: string; poValue: number; asked: number; onClose: () => void; onDone: () => void }) {
-  const act = useAction()
-  const [mode, setMode] = useState<'pct' | 'amount'>('pct')
-  const [val, setVal] = useState('50')
-  const [reason, setReason] = useState('')
-  const [reasons, setReasons] = useState<string[]>([])
-  const [note, setNote] = useState('')
-  const [file, setFile] = useState<File | null>(null)
-  useEffect(() => { get<Record<string, string[]>>('/pick-lists').then((l) => { setReasons(l.advance_reasons || []); setReason((l.advance_reasons || [])[0] || '') }).catch(() => {}) }, [])
-  const amount = mode === 'pct' ? Math.round(poValue * (+val || 0)) / 100 : +val || 0
+function AdvanceRow({ a, onDone }: { a: Advance; onDone: () => void }) {
+  const dead = a.status === 'REJECTED' || a.status === 'CANCELLED'
+  const used = a.adjusted + a.refunded
   return (
-    <Modal title={`Request an advance on ${poNumber}`} onClose={onClose}>
-      <p className="sub">PO value {inr(poValue)}{asked > 0 ? `, advances already asked ${inr(asked)}, so at most ${inr(Math.max(0, poValue - asked))} more` : ''}. Finance approves and pays it; it is then adjusted on the vendor's invoice.</p>
-      <div className="field"><span>Advance as</span><Seg value={mode} onChange={(m) => { setMode(m); setVal(m === 'pct' ? '50' : '') }} items={[['pct', '% of PO value'], ['amount', 'Amount (₹)']]} /></div>
-      <Field label={mode === 'pct' ? 'Percent of the PO value' : 'Amount including GST'} hint={mode === 'pct' ? `= ${inr(amount)}` : undefined}>
-        <input type="number" value={val} onChange={(e) => setVal(e.target.value)} /></Field>
-      <Field label="Reason"><select value={reason} onChange={(e) => setReason(e.target.value)}>{reasons.map((r) => <option key={r}>{r}</option>)}</select></Field>
-      <Field label={reason.startsWith('Other') ? 'Note (needed for Other)' : 'Note (optional)'}><textarea value={note} onChange={(e) => setNote(e.target.value)} /></Field>
-      <Field label="Vendor's proforma invoice or quotation (PDF or image)"><input type="file" accept="application/pdf,image/*" onChange={(e) => setFile(e.target.files?.[0] || null)} /></Field>
+    <div className="advrow" style={dead ? { opacity: 0.6 } : undefined}>
+      <div className="ahead"><div><b>{a.number}</b> <AdvanceStatus a={a} /></div>
+        <div className="amt">{inr(a.amount)}{a.pct ? <span className="hint"> · {a.pct}% of PO</span> : null}</div></div>
+      <div className="meta">
+        <span>{a.reason}{a.note ? ` · ${a.note}` : ''}</span>
+        <span>Asked by <b>{a.requester}</b> on {day(a.requested_at)}</span>
+        {a.tds_amount > 0 && <span>TDS <b>{inr(a.tds_amount)}</b> · vendor gets <b>{inr(a.pay_vendor)}</b></span>}
+        {a.paid_on && <span>Paid <b>{day(a.paid_on)}</b> · ref {a.payment_ref}</span>}
+        {a.proforma_file_id ? <a className="link" href={fileUrl(a.proforma_file_id)} target="_blank" rel="noreferrer">Proforma</a> : null}
+      </div>
+      {a.decision_note && <p className="hint" style={{ margin: 0 }}>{a.status === 'REJECTED' ? 'Rejected: ' : a.status === 'CANCELLED' ? 'Cancelled: ' : 'Note: '}{a.decision_note}</p>}
+      {a.status === 'PAID' && <div>
+        <div className="bar"><i style={{ width: `${Math.min(100, (used / a.amount) * 100)}%` }} /></div>
+        <p className="hint" style={{ margin: '4px 0 0' }}>{inr(a.adjusted)} adjusted on invoices{a.refunded ? ` · ${inr(a.refunded)} refunded` : ''} · <b>{inr(a.open)} left</b>{a.carry_forward && a.open > 0 ? ' · carried forward to the next invoices' : ''}</p></div>}
+      {a.actions.length > 0 && <AdvanceActions a={a} onDone={onDone} />}
+    </div>
+  )
+}
+
+function RequestForm({ docId, poNumber, d, onCancel, onDone }: { docId: number; poNumber: string; d: ForDoc; onCancel: () => void; onDone: () => void }) {
+  const act = useAction()
+  const room = Math.max(0, Math.round((d.po_value - d.requested) * 100) / 100)
+  const [adv, setAdv] = useState<AdvanceDraft>(() => ({ ...newAdvance(), val: room >= d.po_value / 2 ? '50' : '' }))
+  const problem = advanceProblem(adv, d.po_value, room)
+  const amount = advanceAmount(adv, d.po_value)
+  return (
+    <>
+      <div className="phead"><div><h2>Ask for a further advance on {poNumber}</h2>
+        <p className="sub">This PO is on Advance terms. Finance approves and pays it, and the vendor is emailed once it is paid. It is then adjusted on the vendor's invoice.</p></div></div>
+      <div className="stats">
+        <div className="stat"><span>PO value</span><b>{inr(d.po_value)}</b></div>
+        {d.requested > 0 && <div className="stat"><span>Already asked</span><b>{inr(d.requested)}</b></div>}
+        <div className="stat"><span>Can still ask</span><b>{inr(room)}</b></div>
+      </div>
+      <AdvanceFields a={adv} onChange={setAdv} poValue={d.po_value} room={room} poTDS={d.po_tds} asked={d.requested} poLabel={poNumber} />
       <Errors list={act.errors} />
-      <div className="btns"><button className="btn ghost" onClick={onClose}>Cancel</button>
-        <button className="btn" disabled={act.busy || amount <= 0} onClick={() => act.run(() => upload(`/documents/${docId}/advances`, mode === 'pct' ? { pct: +val, reason, note } : { amount: +val, reason, note }, { proforma: file }), (r: any) => { onDone(); return r.message })}>
-          Send to Finance</button></div>
-    </Modal>
+      <div className="btns"><button className="btn ghost" onClick={onCancel}>Cancel</button>
+        <button className="btn" disabled={act.busy || !!problem} title={problem || undefined}
+          onClick={() => act.run(() => upload(`/documents/${docId}/advances`, advanceBody(adv, d.po_value), { proforma: adv.file }), (r: any) => { onDone(); return r.message })}>
+          Send {amount > 0 ? inr(amount) : ''} to Finance</button></div>
+    </>
   )
 }

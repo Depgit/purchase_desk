@@ -151,6 +151,24 @@ func rulesFor(kind string) sheetRules {
 			{Column: "categories", PromptTitle: "Category limits", Prompt: "Blank for every category, or names from Ref - Categories separated by ;"},
 			{Column: "password", PromptTitle: "Password", Prompt: "Leave blank to keep the current password. A new user without one signs in with a one-time code."},
 		}}
+	case "cities":
+		return sheetRules{locked: []string{"city"}, rules: []spreadsheet.Validation{
+			{Column: "state_code", List: stateCodes(), ErrorTitle: "State code", Error: "Pick the 2-letter state code from the list, for example HR or DL."},
+		}}
+	case "clusters":
+		return sheetRules{locked: []string{"cluster"}, rules: []spreadsheet.Validation{
+			{Column: "city", Source: "{Cities.city}", ErrorTitle: "City not on the Cities sheet", Error: "Pick a city from the Cities sheet. A new city must be added there first."},
+			{Column: "cluster_manager_login", Source: "{Ref - Cluster Managers.login}", ErrorTitle: "Not a Cluster Manager", Error: "Pick a login from Ref - Cluster Managers, or leave it blank."},
+		}}
+	case "categories":
+		return sheetRules{locked: []string{"category"}, rules: []spreadsheet.Validation{
+			{Column: "fnb", List: []string{"yes", "no"}, PromptTitle: "Food and beverage", Prompt: "yes for F&B categories: their day budgets follow F&B sales.", ErrorTitle: "yes or no", Error: "Pick yes or no."},
+		}}
+	case "sub_categories":
+		return sheetRules{locked: []string{"code"}, rules: []spreadsheet.Validation{
+			{Column: "code", PromptTitle: "SKU code letters", Prompt: "2 letters for a new sub-category, for example LN: its SKU codes become LN-0001 onwards. Fixed once added."},
+			{Column: "category", Source: "{Categories.category}", ErrorTitle: "Category not on the Categories sheet", Error: "Pick a category from the Categories sheet. A new category must be added there first."},
+		}}
 	case "budgets":
 		return sheetRules{locked: []string{"property_code", "property_name", "month", "sub_category"}}
 	case "property_pct":
@@ -210,3 +228,6 @@ func listsSheet(ctx context.Context, q database.Q) (spreadsheet.Sheet, error) {
 	}
 	return sh, nil
 }
+
+// stateCodes lists the 2-letter state codes, for the Cities sheet's dropdown.
+func stateCodes() []string { return indiantax.StateCodes() }

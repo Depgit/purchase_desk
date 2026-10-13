@@ -21,6 +21,7 @@ import (
 	"purchasedesk/internal/httpjson"
 	"purchasedesk/internal/indiantax"
 	"purchasedesk/internal/money"
+	"purchasedesk/internal/screens"
 	"purchasedesk/internal/textclean"
 	"purchasedesk/internal/uploadedfiles"
 )
@@ -166,6 +167,13 @@ func (s *Service) create(w http.ResponseWriter, r *http.Request) error {
 	}
 	if len(errs) > 0 {
 		return httpjson.Invalid(errs)
+	}
+	screen := map[string]string{"amc": "bills_amc"}[section]
+	if screen == "" {
+		screen = "bills_utility"
+	}
+	if u.Level(screen, in.PropertyID, clusterID) < screens.Edit {
+		return httpjson.Forbidden("Your role can only view %s at %s, not enter them.", screens.Label(screen), propName)
 	}
 	g := u.Can("", access.Raise, in.PropertyID, clusterID, nil)
 	if g == nil {

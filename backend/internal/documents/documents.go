@@ -112,6 +112,7 @@ type Doc struct {
 	DeliverBy     string     `json:"deliver_by"`
 	PaymentTerms  string     `json:"payment_terms"`
 	ClosedShort   bool       `json:"po_closed_short"`
+	AdvanceHold   string     `json:"advance_hold_po"` // set while the PO waits for Finance to approve its advance: the PO number it will get
 	IsTransfer    bool       `json:"is_transfer"`
 	DispatchedAt  *time.Time `json:"dispatched_at"`
 	WaitUntil     string     `json:"wait_until"`
@@ -165,7 +166,7 @@ const selectDoc = `SELECT d.id, d.number, d.kind, d.property_id, p.name, p.kind,
 	d.requester_id, ru.name, coalesce(ru.mobile,''), d.requester_step, d.status, d.route_steps, d.step_idx,
 	d.event_reason, d.event_note, d.routed_reason, d.routed_note, d.cm_approved_at, d.preop_user_id, coalesce(pu.name,''),
 	d.return_reason, d.return_note, d.modified_note, d.modified_by, d.modified_at, d.approved_at,
-	coalesce(d.po_number,''), d.po_date, coalesce(d.deliver_by::text,''), d.payment_terms, d.po_closed_short,
+	coalesce(d.po_number,''), d.po_date, coalesce(d.deliver_by::text,''), d.payment_terms, d.po_closed_short, coalesce(d.advance_hold_po,''),
 	d.is_transfer, d.dispatched_at, coalesce(d.wait_until::text,''), d.wait_note,
 	d.bill_type_id, coalesce(bt.name,''), coalesce(bt.section,''), coalesce(to_char(d.period_start,'YYYY-MM'),''), coalesce(d.months,0), d.remark, d.created_at,
 	d.parent_id, d.transfer_received_at, d.department_id, coalesce(cd.name,''), d.corp_l1_user_id, coalesce(u1.name,''), d.corp_l2_user_id, coalesce(u2.name,''),
@@ -186,7 +187,7 @@ func scanDoc(row pgx.Row) (*Doc, error) {
 		&d.RequesterID, &d.Requester, &d.RequesterMob, &d.RequesterStep, &d.Status, &d.RouteSteps, &d.StepIdx,
 		&d.EventReason, &d.EventNote, &d.RoutedReason, &d.RoutedNote, &d.CMApprovedAt, &d.PreopUserID, &d.PreopUser,
 		&d.ReturnReason, &d.ReturnNote, &d.ModifiedNote, &d.ModifiedBy, &d.ModifiedAt, &d.ApprovedAt,
-		&d.PONumber, &d.PODate, &d.DeliverBy, &d.PaymentTerms, &d.ClosedShort,
+		&d.PONumber, &d.PODate, &d.DeliverBy, &d.PaymentTerms, &d.ClosedShort, &d.AdvanceHold,
 		&d.IsTransfer, &d.DispatchedAt, &d.WaitUntil, &d.WaitNote,
 		&d.BillTypeID, &d.BillType, &d.BillSection, &d.PeriodStart, &d.Months, &d.Remark, &d.CreatedAt,
 		&d.ParentID, &d.TransferRecv, &d.DepartmentID, &d.Department, &d.CorpL1, &d.CorpL1Name, &d.CorpL2, &d.CorpL2Name,
@@ -352,6 +353,9 @@ func (d *Doc) Owner() string {
 	case Returned:
 		return "requester"
 	case Approved:
+		if d.AdvanceHold != "" {
+			return "finance" // the PO waits for Finance to approve its advance
+		}
 		if d.Kind == "purchase" || d.Kind == "corp_purchase" {
 			return "purchase"
 		}
@@ -403,6 +407,9 @@ func (d *Doc) StatusLabel() string {
 	case Approved:
 		if d.IsBill() {
 			return "Approved, with Finance"
+		}
+		if d.AdvanceHold != "" {
+			return "PO waiting for advance approval"
 		}
 		return "Approved, PO pending"
 	case POIssued:
@@ -493,4 +500,28 @@ func CloseIfPaid(ctx context.Context, q database.Q, docID int64) error {
 		AND EXISTS (SELECT 1 FROM invoice i WHERE i.document_id=d.id AND i.status='PAID')
 		AND NOT EXISTS (SELECT 1 FROM invoice i WHERE i.document_id=d.id AND i.status NOT IN ('PAID','VOID'))`, docID)
 	return err
+}
+
+// ReleaseHeldPO issues a PO that was waiting for Finance to approve its advance: it takes the number it was held
+// under. It returns that number, or "" when the document was not on hold.
+func ReleaseHeldPO(ctx context.Context, q database.Q, docID int64) (string, error) {
+	var po string
+	err := q.QueryRow(ctx, `UPDATE document SET status='PO_ISSUED', po_number=advance_hold_po, po_date=now(), advance_hold_po=NULL, updated_at=now()
+		WHERE id=$1 AND status='APPROVED' AND advance_hold_po IS NOT NULL RETURNING po_number`, docID).Scan(&po)
+	if err == pgx.ErrNoRows {
+		return "", nil
+	}
+	return po, err
+}
+
+// ClearHeldPO takes a request off advance hold when its advance is rejected or cancelled: it stays approved, for
+// Purchase to issue the PO again. It returns the number the PO had been held under, or "".
+func ClearHeldPO(ctx context.Context, q database.Q, docID int64) (string, error) {
+	var po string
+	err := q.QueryRow(ctx, `UPDATE document d SET advance_hold_po=NULL, updated_at=now() FROM (SELECT advance_hold_po FROM document WHERE id=$1) o
+		WHERE d.id=$1 AND d.advance_hold_po IS NOT NULL RETURNING o.advance_hold_po`, docID).Scan(&po)
+	if err == pgx.ErrNoRows {
+		return "", nil
+	}
+	return po, err
 }

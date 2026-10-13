@@ -53,8 +53,13 @@ func (s *Service) setActive(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 	if kind == "role" {
-		if err := access.NeedAdmin(p); err != nil {
-			return err
+		if !p.ManagesRoles() {
+			return httpjson.Forbidden("Only the System Admin, or a role allowed to manage roles, can switch roles on or off.")
+		}
+		var step string
+		_ = s.DB.QueryRow(r.Context(), `SELECT step FROM role WHERE id=$1`, id).Scan(&step)
+		if step == "admin" {
+			return httpjson.Bad("The System Admin role always stays active.")
 		}
 	} else if kind == "user" {
 		if err := users.Manages(r.Context(), s.DB, p, id); err != nil { // the Admin, or whoever added this user

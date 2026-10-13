@@ -12,12 +12,14 @@ import { Pill } from '../ui/Pill'
 import { Tabs } from '../ui/Tabs'
 import { useAction } from '../ui/useAction'
 import { useToast } from '../ui/Toast'
+import { useScreen } from '../screenaccess/screen'
 
 interface Dept { id: number; name: string; l1_user_id: number; l1: string; l2_user_id: number; l2: string; backup_user_id: number | null; backup: string; active: boolean; open_requests: number }
 interface Head { id: number; name: string; active: boolean; used: number }
 
 export function CorporateSetupPage() {
   const { hasRight, me, hasStep } = useSession()
+  const sc = useScreen('corporate_setup')
   const [tab, setTab] = useState<'mx' | 'eh' | 'ru'>('mx')
   const deps = useApi<Dept[]>('/corporate/departments')
   const heads = useApi<Head[]>('/corporate/expense-heads')
@@ -28,8 +30,8 @@ export function CorporateSetupPage() {
   const [l1Only, setL1Only] = useState<number | null>(null)
   const toast = useToast()
   useEffect(() => { get('/settings').then((s: any) => setL1Only(s.corp_l1_only_below)) }, [])
-  const ed = hasRight('masters')
-  const canMap = me?.is_admin || hasStep('finance')
+  const ed = sc.edit && hasRight('masters')
+  const canMap = me?.is_admin || (sc.edit && hasStep('finance'))
   return (
     <>
       <div className="head"><div><h1>Corporate Setup</h1><p className="sub">Approvers for each department and the expense heads used instead of SKUs. A change applies to new requests; open requests keep the approvers they started with.</p></div>

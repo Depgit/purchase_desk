@@ -2,16 +2,23 @@
 import { useState } from 'react'
 import { get, post } from '../api/client'
 import { useSession } from '../auth/session'
+import type { ScreenKey } from '../screenaccess/screen'
 import { Modal } from './Modal'
 import { Pill } from './Pill'
 import { useAction } from './useAction'
 import { Errors } from './Errors'
 
+// The screen each master kind belongs to; view only there hides the switch (the server checks the same).
+const SCREEN: Record<string, ScreenKey> = { city: 'cities', cluster: 'cities', property: 'properties', sub_category: 'item_setup', category: 'item_setup',
+  brand: 'item_setup', pack_size: 'item_setup', sku: 'items', vendor: 'vendors', bill_type: 'bill_types', mapping: 'vendor_mapping',
+  department: 'corporate_setup', expense_head: 'corporate_setup', partner: 'warehouse' }
+
 export function ActiveToggle({ kind, id, name, active, reason, onDone, canEdit }: {
   kind: string; id: number; name: string; active: boolean; reason?: string; onDone: () => void; canEdit?: boolean
 }) {
   const { hasRight, me } = useSession()
-  const editable = canEdit ?? (kind === 'user' || kind === 'role' ? !!me?.is_admin : hasRight('masters'))
+  const screen = SCREEN[kind]
+  const editable = canEdit ?? (kind === 'user' || kind === 'role' ? !!me?.is_admin : hasRight('masters') && (!!me?.is_admin || !screen || me?.screens?.[screen] === 'edit'))
   const [ask, setAsk] = useState<string | null>(null)
   const [why, setWhy] = useState('')
   const a = useAction()

@@ -11,17 +11,19 @@ import { Field } from '../ui/Field'
 import { Modal } from '../ui/Modal'
 import { Pill } from '../ui/Pill'
 import { useAction } from '../ui/useAction'
+import { useScreen } from '../screenaccess/screen'
 
 interface BT { id: number; name: string; section: string; default_gst: number; active: boolean; vendors: string[]; usable_vendors: number; bills: number }
 
 export function BillTypesPage() {
   const { hasRight } = useSession()
+  const sc = useScreen('bill_types')
   const { data, reload } = useApi<BT[]>('/bill-types')
   const [edit, setEdit] = useState<BT | 'new' | null>(null)
   return (
     <>
       <div className="head"><div><h1>Bill Types</h1><p className="sub">A bill can be raised only for an active type with at least one verified vendor. Vendors tick their bill types under Vendors.</p></div>
-        <div className="acts">{hasRight('masters') && <button className="btn" onClick={() => setEdit('new')}>+ Add bill type</button>}</div></div>
+        <div className="acts">{(sc.edit && hasRight('masters')) && <button className="btn" onClick={() => setEdit('new')}>+ Add bill type</button>}</div></div>
       <DataTable screen="bill-types" rows={data || []} rowKey={(b) => b.id} dim={(b) => !b.active} search={(b) => b.name + ' ' + b.vendors.join(' ')}
         filters={[{ id: 's', label: 'Section', options: [['', 'Utility and AMC'], ['utility', 'Utility'], ['amc', 'Maintenance AMC']], test: (b, v) => b.section === v }]}
         columns={[
@@ -31,7 +33,7 @@ export function BillTypesPage() {
           { key: 'vendors', label: 'Vendors', render: (b) => b.vendors.length ? <>{b.vendors.join(', ')}{b.usable_vendors === 0 && <> <Pill tone="warn">none verified</Pill></>}</> : <Pill tone="bad">No vendor yet</Pill>, csv: (b) => b.vendors.join('; ') },
           { key: 'bills', label: 'Bills raised', right: true, render: (b) => b.bills, sort: (b) => b.bills, csv: (b) => b.bills },
           { key: 'status', label: 'Status', render: (b) => <ActiveToggle kind="bill_type" id={b.id} name={b.name} active={b.active} onDone={reload} />, csv: (b) => b.active ? 'Active' : 'Inactive' },
-          { key: 'edit', label: '', render: (b) => hasRight('masters') ? <button className="link" onClick={() => setEdit(b)}>Edit</button> : null },
+          { key: 'edit', label: '', render: (b) => (sc.edit && hasRight('masters')) ? <button className="link" onClick={() => setEdit(b)}>Edit</button> : null },
         ]} csvName="bill-types" />
       {edit && <BTModal b={edit === 'new' ? null : edit} onClose={() => setEdit(null)} onDone={() => { setEdit(null); reload(); refreshLookups() }} />}
     </>

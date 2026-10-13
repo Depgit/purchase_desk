@@ -28,6 +28,7 @@ import (
 	"purchasedesk/internal/messaging"
 	"purchasedesk/internal/money"
 	"purchasedesk/internal/releasephase"
+	"purchasedesk/internal/screens"
 	"purchasedesk/internal/textclean"
 	"purchasedesk/internal/vendormapping"
 )
@@ -170,8 +171,60 @@ func (s *Service) form(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
+	often, last, err := s.history(r.Context(), p.ID)
+	if err != nil {
+		return err
+	}
 	return httpjson.OK(w, map[string]any{"property_id": p.ID, "property": p.Name, "property_kind": p.Kind, "items": allowed, "budget": bud,
-		"preop_members": members, "event_reasons": lists["event_reasons"], "settings": st})
+		"preop_members": members, "event_reasons": lists["event_reasons"], "settings": st, "often": often, "last": last})
+}
+
+type lastLine struct {
+	SKUID int64   `json:"sku_id"`
+	Qty   float64 `json:"qty"`
+}
+
+// lastOrder is the latest submission at a property (every request split off it), for "Repeat last order".
+type lastOrder struct {
+	Numbers []string   `json:"numbers"`
+	Date    time.Time  `json:"date"`
+	Lines   []lastLine `json:"lines"`
+}
+
+// history gives the items most often ordered at a property in the last 45 days, most frequent first, and its latest
+// submission (nil when there is none). Rejected and cancelled requests do not count.
+func (s *Service) history(ctx context.Context, propertyID int64) ([]int64, *lastOrder, error) {
+	rows, err := s.DB.Query(ctx, `SELECT l.sku_id FROM document_line l JOIN document d ON d.id=l.document_id
+		WHERE d.kind='purchase' AND d.property_id=$1 AND l.sku_id IS NOT NULL AND d.status NOT IN ('REJECTED','CANCELLED') AND d.created_at > now() - interval '45 days'
+		GROUP BY l.sku_id ORDER BY count(*) DESC, max(d.created_at) DESC LIMIT 24`, propertyID)
+	if err != nil {
+		return nil, nil, err
+	}
+	often, err := pgx.CollectRows(rows, pgx.RowTo[int64])
+	if err != nil {
+		return nil, nil, err
+	}
+	var last lastOrder
+	err = s.DB.QueryRow(ctx, `SELECT array_agg(d.number ORDER BY d.number), max(d.created_at) FROM document d
+		WHERE d.kind='purchase' AND d.property_id=$1 AND d.status NOT IN ('REJECTED','CANCELLED') AND d.parent_id IS NULL
+		AND d.created_at=(SELECT max(created_at) FROM document WHERE kind='purchase' AND property_id=$1 AND parent_id IS NULL AND status NOT IN ('REJECTED','CANCELLED'))`, propertyID).
+		Scan(&last.Numbers, &last.Date)
+	if err != nil || len(last.Numbers) == 0 {
+		return often, nil, nil
+	}
+	rows, err = s.DB.Query(ctx, `SELECT l.sku_id, sum(coalesce(l.original_qty, l.qty))::float8 FROM document_line l JOIN document d ON d.id=l.document_id
+		WHERE d.number = ANY($1) AND l.sku_id IS NOT NULL GROUP BY l.sku_id ORDER BY min(l.id)`, last.Numbers)
+	if err != nil {
+		return nil, nil, err
+	}
+	last.Lines, err = pgx.CollectRows(rows, func(row pgx.CollectableRow) (lastLine, error) {
+		var x lastLine
+		return x, row.Scan(&x.SKUID, &x.Qty)
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	return often, &last, nil
 }
 
 type lineIn struct {
@@ -217,6 +270,9 @@ func (s *Service) prepare(ctx context.Context, u *access.User, in createIn) (*pr
 	}
 	if !p.Active {
 		return nil, httpjson.Bad("%s is inactive. No new request can be raised for it.", p.Name)
+	}
+	if u.Level("requests", p.ID, p.ClusterID) < screens.Edit {
+		return nil, httpjson.Forbidden("Your role can only view Purchase Requests at %s, not raise them.", p.Name)
 	}
 	if len(in.Lines) == 0 {
 		return nil, httpjson.Bad("Add at least one item.")
@@ -406,6 +462,45 @@ func (s *Service) create(w http.ResponseWriter, r *http.Request) error {
 		msg = fmt.Sprintf("%d requests sent, one per vendor: %s", len(created), strings.Join(created, ", "))
 	}
 	return httpjson.OK(w, map[string]any{"numbers": created, "ids": ids, "message": msg})
+}
+
+// onScreens keeps only the actions whose screen the user may edit at the document's property: screen levels win
+// over rights, so a button never shows for a step the server would refuse (see screenguard).
+func onScreens(u *access.User, d *documents.Doc, actions []string) []string {
+	corp, bill := d.IsCorp(), d.Kind == "bill"
+	billScreen := "bills_utility"
+	if d.BillSection == "amc" {
+		billScreen = "bills_amc"
+	}
+	pick := func(purchase, corpScreen, billSc string) []string {
+		switch {
+		case corp:
+			return []string{corpScreen}
+		case bill:
+			return []string{billSc}
+		}
+		return []string{purchase}
+	}
+	need := map[string][]string{
+		"approve": pick("approvals", "corporate", "approvals"), "return": pick("approvals", "corporate", "approvals"),
+		"reject": pick("approvals", "corporate", "approvals"), "route": {"approvals"}, "preop_approver": {"requests"},
+		"resubmit": pick("requests", "corporate", billScreen), "cancel": pick("requests", "corporate", billScreen),
+		"issue_po": {"purchase_orders"}, "dispatch": {"warehouse"}, "receive": pick("goods_receipts", "corporate", "goods_receipts"),
+		"reject_balance": {"goods_receipts", "purchase_orders"}, "receive_transfer": {"goods_receipts"}, "edit": {"requests"},
+	}
+	if corp {
+		need["reject_balance"] = []string{"corporate", "purchase_orders"}
+	}
+	out := []string{}
+	for _, a := range actions {
+		for _, sc := range need[a] {
+			if u.Level(sc, d.PropertyID, d.ClusterID) >= screens.Edit {
+				out = append(out, a)
+				break
+			}
+		}
+	}
+	return out
 }
 
 // Editable reports whether the requester can still change everything on a purchase request: nobody has approved it
@@ -899,7 +994,7 @@ func (s *Service) detail(w http.ResponseWriter, r *http.Request) error {
 			actions = append(actions, "resubmit", "cancel")
 		}
 	case documents.Approved:
-		if (d.Kind == "purchase" || d.Kind == "corp_purchase") && documents.CanAct(u, d, "purchase", access.IssuePO) != nil {
+		if (d.Kind == "purchase" || d.Kind == "corp_purchase") && d.AdvanceHold == "" && documents.CanAct(u, d, "purchase", access.IssuePO) != nil {
 			actions = append(actions, "issue_po")
 		}
 	case documents.POIssued:
@@ -921,6 +1016,7 @@ func (s *Service) detail(w http.ResponseWriter, r *http.Request) error {
 	if Editable(u, d) {
 		actions = append(actions, "edit")
 	}
+	actions = onScreens(u, d, actions)
 	// A request is split into one PR per vendor when it is raised. The others from the same submission share its requester,
 	// property and created_at (one transaction), so each PR can show where the rest of the order went.
 	type sibling struct {

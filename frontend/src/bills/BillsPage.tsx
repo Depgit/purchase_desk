@@ -9,12 +9,15 @@ import { inr, month, daysBack } from '../format/format'
 import { DataTable } from '../ui/DataTable'
 import { Pill, statusTone } from '../ui/Pill'
 import { placeFilters } from '../requests/columns'
+import { useScreen } from '../screenaccess/screen'
+import { DraftList } from '../formdrafts/drafts'
 
 export function BillsPage() {
   const { section = 'utility' } = useParams()
   const nav = useNavigate()
   const l = useLookups()
   const { hasRight } = useSession()
+  const sc = useScreen(section === 'amc' ? 'bills_amc' : 'bills_utility')
   const [days, setDays] = useState(90)
   const fromChanged = useCallback((f: string) => setDays(daysBack(f)), [])
   const { data } = useApi<ListRow[]>(`/requests?kind=bill&section=${section}&days=${days}`)
@@ -23,7 +26,8 @@ export function BillsPage() {
     <>
       <div className="head"><div><h1>{amc ? 'AMC Bills' : 'Utility Bills'}</h1>
         <p className="sub">{amc ? 'Maintenance contracts billed for several months.' : 'Monthly utility bills.'} The Cluster Manager approves, then Finance pays.</p></div>
-        <div className="acts">{hasRight('raise') && <button className="btn" onClick={() => nav('/bills/new/' + section)}>+ New {amc ? 'AMC' : 'utility'} bill</button>}</div></div>
+        <div className="acts">{sc.edit && hasRight('raise') && <button className="btn" onClick={() => nav('/bills/new/' + section)}>+ New {amc ? 'AMC' : 'utility'} bill</button>}</div></div>
+      {sc.edit && <DraftList form="bill" label={`Your ${amc ? 'AMC' : 'utility'} bill drafts`} only={(d) => d.fields.section === section} onOpen={(d) => nav(`/bills/new/${section}?draft=${d.id}`)} />}
       <DataTable screen={'bills-' + section} rows={data || []} rowKey={(r) => r.id} date={{ label: 'Raised', value: (r) => r.created_at, onFrom: fromChanged }} onOpen={(r) => nav('/documents/' + r.id)} filters={placeFilters(l).slice(0, 2)}
         search={(r) => [r.number, r.bill_type, r.property, r.vendor].join(' ')}
         columns={[

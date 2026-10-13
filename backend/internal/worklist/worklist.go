@@ -10,6 +10,7 @@ import (
 	"purchasedesk/internal/access"
 	"purchasedesk/internal/documents"
 	"purchasedesk/internal/httpjson"
+	"purchasedesk/internal/screens"
 )
 
 type Service struct {
@@ -55,7 +56,7 @@ func (s *Service) counts(w http.ResponseWriter, r *http.Request) error {
 				}
 			}
 		case documents.Approved:
-			if (d.Kind == "purchase" || d.Kind == "corp_purchase") && documents.CanAct(u, d, "purchase", access.IssuePO) != nil {
+			if (d.Kind == "purchase" || d.Kind == "corp_purchase") && d.AdvanceHold == "" && documents.CanAct(u, d, "purchase", access.IssuePO) != nil {
 				c["purchase_orders"]++
 			}
 		case documents.POIssued:
@@ -119,6 +120,12 @@ func (s *Service) counts(w http.ResponseWriter, r *http.Request) error {
 		var n int
 		_ = s.DB.QueryRow(r.Context(), `SELECT count(*) FROM vendor WHERE active AND NOT bank_verified AND vendor_type<>'warehouse'`).Scan(&n)
 		c["vendors"] = n
+	}
+	// A badge counts work the user can do: drop screens their roles may not change.
+	for k := range c {
+		if u.Overall(k) < screens.Edit {
+			delete(c, k)
+		}
 	}
 	return httpjson.OK(w, c)
 }

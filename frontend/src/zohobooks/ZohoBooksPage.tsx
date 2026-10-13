@@ -15,6 +15,7 @@ import { Tabs } from '../ui/Tabs'
 import { useAction } from '../ui/useAction'
 import { SearchSelect } from '../ui/SearchSelect'
 import { useToast } from '../ui/Toast'
+import { useScreen } from '../screenaccess/screen'
 
 interface Opt { id: string; name: string; code: string; type: string; pct: number; specification: string; extra: string; active: boolean; tag_id: string }
 interface Lists { accounts: Opt[]; taxes: Opt[]; tags: Opt[]; tag_options: Opt[]; locations: Opt[]; contacts: Opt[] }
@@ -42,6 +43,7 @@ export function ZohoBooksPage() {
   const lists = useApi<Lists>('/zoho/lists')
   const maps = useApi<Maps>('/zoho/mappings')
   const { hasStep } = useSession()
+  const sc = useScreen('zoho')
   const a = useAction()
   const reloadAll = () => { conn.reload(); lists.reload(); maps.reload() }
   const m = maps.data
@@ -59,7 +61,7 @@ export function ZohoBooksPage() {
       <div className="head"><div><h1>Zoho Books</h1><p className="sub">Everything a bill needs before it can go to Zoho. A bill with a gap is held back and says what is missing. Purchase Desk only creates records in Zoho; it never edits or deletes them.</p></div>
         <div className="acts">{EXPORT[tab] && <button className="btn ghost" disabled={a.busy} title={'Reads the ' + EXPORT[tab]![1] + ' from Zoho now and downloads every record'}
             onClick={() => a.run(() => download('/zoho/export/' + EXPORT[tab]![0], 'zoho-' + EXPORT[tab]![0] + '.xlsx'), () => 'Downloaded the ' + EXPORT[tab]![1] + ' from Zoho')}>{a.busy ? 'Reading from Zoho…' : 'Download from Zoho (Excel)'}</button>}
-          {hasStep('finance') && <button className="btn ghost" disabled={a.busy} onClick={() => a.run(() => post('/zoho/sync'), (r: any) => { reloadAll(); return r.message })}>Sync now</button>}</div></div>
+          {(sc.edit && hasStep('finance')) && <button className="btn ghost" disabled={a.busy} onClick={() => a.run(() => post('/zoho/sync'), (r: any) => { reloadAll(); return r.message })}>Sync now</button>}</div></div>
       <Errors list={a.errors} />
       <div className="tiles">{tile('prop', 'Properties with a reporting tag', 'prop')}{tile('acc', 'Sub-categories with an account', 'acc')}{tile('bt', 'Bill types with an account', 'acc')}{tile('tax', 'GST rates with a tax code', 'tax')}{tile('ven', 'Vendors linked', 'ven')}</div>
       <Tabs value={tab} onChange={setTab} items={[['conn', 'Connection'], ['prop', 'Properties'], ['acc', 'Accounts'], ['tax', 'Taxes'], ['ven', 'Vendors'], ['items', 'Items'], ['queue', 'Push queue'], ['journal', 'Warehouse journal'], ['map', 'Field map']]} />
@@ -380,6 +382,7 @@ function Journals() {
   const [show, setShow] = useState<Journal | null>(null)
   const a = useAction()
   const { hasStep } = useSession()
+  const sc = useScreen('zoho')
   const when = (t: string) => dateTime(t)
   return (
     <>
@@ -392,7 +395,7 @@ function Journals() {
           <td>{j.parts.length ? j.parts.map((p) => <div key={p.number}><Pill tone="ok">{p.number}</Pill> {inr(p.amount)}<br /><span className="hint">{when(p.from)} to {when(p.to)}{p.automatic ? ' · posted at month end' : ''}</span></div>) : '—'}</td>
           <td className="r">{j.transfers}</td><td className="r">{inr(j.expense)}</td><td className="r">{j.pilferage ? inr(j.pilferage) : '—'}</td><td className="r">{inr(j.total)}<br /><span className="hint">since {when(j.from)}</span></td>
           <td>{!j.total ? <Pill tone="ok">{j.parts.length ? 'Up to date' : 'Nothing yet'}</Pill> : j.problems.length ? <><Pill tone="bad">Held</Pill><br /><span className="hint">{j.problems.join('; ')}</span></> : <Pill tone={j.month_over ? 'warn' : ''}>{j.month_over ? 'Posts automatically' : 'Waiting for month end'}</Pill>}</td>
-          <td className="r"><button className="link" onClick={() => setShow(j)}>Preview</button>{hasStep('finance') && j.total > 0 && !j.problems.length && <> · <button className="link" disabled={a.busy}
+          <td className="r"><button className="link" onClick={() => setShow(j)}>Preview</button>{(sc.edit && hasStep('finance')) && j.total > 0 && !j.problems.length && <> · <button className="link" disabled={a.busy}
             onClick={() => a.run(() => post('/zoho/journals', { property_id: j.property_id, month }), (r: any) => { reload(); return r.message })}>{j.month_over ? 'Post' : 'Post now'}</button></>}</td></tr>)}</tbody></table></div>
         {data && !data.length && <p className="empty">No warehouse transfers received this month.</p>}</section>
       {show && <Modal title={`Warehouse journal for ${show.property} · ${show.month}`} onClose={() => setShow(null)} wide>

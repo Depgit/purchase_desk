@@ -85,9 +85,11 @@ func init() {
 		"po_grn": {"PO against GRN, item by item", "Ordered and received quantity for every item on every PO: short and excess receipts", "Purchase flow",
 			[]Column{c("po", "PO"), c("property", "Property"), c("vendor", "Vendor"), c("sku", "SKU"), c("item", "Item"), cr("ordered", "Ordered"), cr("received", "Received"), cr("short", "Short"),
 				cr("rate", "Rate"), cr("ord_value", "Ordered value"), cr("rcv_value", "Received value"), c("closed", "Closed short")}, poGRN},
-		"register": {"Purchase register", "One row per item line", "Purchase flow",
-			[]Column{c("req", "Request"), c("po", "PO"), c("date", "Date"), c("property", "Property"), c("cluster", "Cluster"), c("category", "Category"), c("sub", "Sub-category"), c("sku", "SKU"), c("item", "Item"),
-				c("unit", "Unit"), cr("qty", "Quantity"), cr("orig", "Original quantity"), cr("rate", "Rate ex GST"), cr("gst", "GST %"), cr("amount", "Amount incl. GST"), c("vendor", "Vendor"), c("by", "Raised by"), c("status", "Status")}, register},
+		"register": {"Purchase register", "One row per item line bought from a vendor, with its PR, PO, GRN, invoice and voucher numbers (warehouse transfers are left out)", "Purchase flow",
+			[]Column{c("req", "PR No."), c("po", "PO No."), c("grn", "GRN No."), c("invoice", "Invoice No."), c("voucher", "Voucher"), c("inv_date", "Invoice date"), c("date", "Date"),
+				c("property", "Property"), c("cluster", "Cluster"), c("category", "Category"), c("sub", "Sub-category"), c("sku", "SKU"), c("item", "Item"),
+				c("unit", "Unit"), cr("qty", "Quantity"), cr("orig", "Original quantity"), cr("received", "Received quantity"), cr("rate", "Rate ex GST"), cr("gst", "GST %"), cr("amount", "Amount incl. GST"),
+				c("vendor", "Vendor"), c("by", "Raised by"), c("status", "Status")}, register},
 		"budget": {"Budget against actual", "By property and sub-category, for month to date, last month, 3 months, 6 months or financial year", "Budget",
 			[]Column{c("property", "Property"), c("cluster", "Cluster"), c("category", "Category"), c("sub", "Sub-category"), c("period", "Period"), cr("budget", "Budget"), cr("spent", "Approved spend"),
 				cr("var", "Over or under"), cr("pct", "Achievement %"), c("status", "Status")}, budgetVsActual},
@@ -240,12 +242,19 @@ func poGRN(ctx context.Context, s *Service, f Filter) ([][]any, []int64, error) 
 
 func register(ctx context.Context, s *Service, f Filter) ([][]any, []int64, error) {
 	w, a := place(f, 3)
-	rows, err := s.DB.Query(ctx, `SELECT d.number, coalesce(d.po_number,''), d.created_at, p.name, k.name, cat.name, sc.name, k2.code, concat_ws(' ', b.name, k2.item_name), ps.name,
-		l.qty, l.original_qty, l.rate, l.gst_pct, `+lineValue+`, v.legal_name, u.name, `+stageSQL+`, d.id
+	// A line received over several deliveries lists each GRN with its invoice and voucher, in delivery order.
+	rows, err := s.DB.Query(ctx, `SELECT d.number, coalesce(d.po_number,''), coalesce(r.grns,''), coalesce(r.invoices,''), coalesce(r.vouchers,''), coalesce(r.inv_dates,''), d.created_at,
+		p.name, k.name, cat.name, sc.name, k2.code, concat_ws(' ', b.name, k2.item_name), ps.name,
+		l.qty, l.original_qty, coalesce(r.received,0), l.rate, l.gst_pct, `+lineValue+`, v.legal_name, u.name, `+stageSQL+`, d.id
 		FROM document_line l JOIN document d ON d.id=l.document_id JOIN sku k2 ON k2.id=l.sku_id LEFT JOIN brand b ON b.id=k2.brand_id JOIN pack_size ps ON ps.id=k2.pack_size_id
 		JOIN sub_category sc ON sc.id=k2.sub_category_id JOIN category cat ON cat.id=sc.category_id JOIN vendor v ON v.id=d.vendor_id JOIN app_user u ON u.id=d.requester_id`+placeJoin+`
-		WHERE d.kind='purchase' AND `+dateCol(f)+` >= $1 AND `+dateCol(f)+` < $2::date + 1`+w+` ORDER BY d.created_at DESC, l.id`, append([]any{f.From, f.To}, a...)...)
-	return collect(rows, err, 18)
+		LEFT JOIN LATERAL (SELECT string_agg(g.number, ', ' ORDER BY g.delivery_no) AS grns, sum(gl.qty) AS received,
+			string_agg(i.invoice_number, ', ' ORDER BY g.delivery_no) AS invoices, string_agg(i.voucher_number, ', ' ORDER BY g.delivery_no) AS vouchers,
+			string_agg(to_char(i.invoice_date, 'DD Mon YYYY'), ', ' ORDER BY g.delivery_no) AS inv_dates
+			FROM goods_receipt_line gl JOIN goods_receipt g ON g.id=gl.goods_receipt_id AND NOT g.voided
+			LEFT JOIN invoice i ON i.goods_receipt_id=g.id AND i.status<>'VOID' WHERE gl.line_id=l.id AND gl.qty>0) r ON TRUE
+		WHERE d.kind='purchase' AND NOT d.is_transfer AND `+dateCol(f)+` >= $1 AND `+dateCol(f)+` < $2::date + 1`+w+` ORDER BY d.created_at DESC, l.id`, append([]any{f.From, f.To}, a...)...)
+	return collect(rows, err, 23)
 }
 
 // months returns the budget months for a period, newest last, and whether the last is the current month to date.
@@ -574,9 +583,30 @@ func (s *Service) Run(ctx context.Context, key string, f Filter) (*Result, error
 	return &Result{Key: key, Title: d.title, Use: d.use, Group: d.group, Columns: d.cols, Rows: rows, DocIDs: ids}, nil
 }
 
+// Item is a report's key, title and group, for the role editor's report list.
+type Item struct {
+	Key   string `json:"key"`
+	Title string `json:"title"`
+	Group string `json:"group"`
+}
+
+// List gives every report, in order.
+func List() []Item {
+	out := []Item{}
+	for _, k := range order {
+		out = append(out, Item{k, defs[k].title, defs[k].group})
+	}
+	return out
+}
+
+// catalogue lists the reports the user's roles include (role.reports).
 func (s *Service) catalogue(w http.ResponseWriter, r *http.Request) error {
+	u := access.From(r)
 	out := []map[string]string{}
 	for _, k := range order {
+		if !u.SeesReport(k) {
+			continue
+		}
 		d := defs[k]
 		out = append(out, map[string]string{"key": k, "title": d.title, "use": d.use, "group": d.group})
 	}
@@ -584,6 +614,9 @@ func (s *Service) catalogue(w http.ResponseWriter, r *http.Request) error {
 }
 
 func (s *Service) one(w http.ResponseWriter, r *http.Request) error {
+	if !access.From(r).SeesReport(chi.URLParam(r, "key")) {
+		return httpjson.Forbidden("This report is not given to your role. Ask the System Admin to add it under Users & Rights, Roles.")
+	}
 	f, err := s.filter(r)
 	if err != nil {
 		return err
@@ -604,7 +637,11 @@ func (s *Service) pack(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 	all := []*Result{}
+	u := access.From(r)
 	for _, k := range order {
+		if !u.SeesReport(k) {
+			continue
+		}
 		res, err := s.Run(r.Context(), k, f)
 		if err != nil {
 			return err

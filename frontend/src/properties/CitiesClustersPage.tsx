@@ -8,20 +8,24 @@ import { Errors } from '../ui/Errors'
 import { Field } from '../ui/Field'
 import { Modal } from '../ui/Modal'
 import { useAction } from '../ui/useAction'
+import { useScreen } from '../screenaccess/screen'
+import { UploadModal } from '../bulkupload/UploadModal'
 
 type Cl = Lookups['clusters'][number]
 
 export function CitiesClustersPage() {
   const l = useLookups()
   const { hasRight } = useSession()
+  const sc = useScreen('cities')
   const [city, setCity] = useState<Lookups['cities'][number] | 'new' | null>(null)
   const [cl, setCl] = useState<Cl | 'new' | null>(null)
-  const ed = hasRight('masters')
+  const [upload, setUpload] = useState(false)
+  const ed = sc.edit && hasRight('masters')
   const count = (c: number) => (l?.properties || []).filter((p) => p.cluster_id === c).length
   return (
     <>
       <div className="head"><div><h1>Cities &amp; Clusters</h1><p className="sub">The cluster sets the Cluster Manager. City and cluster are the filters used in approvals, reports and budgets. The city's state code decides CGST + SGST or IGST.</p></div>
-        <div className="acts">{ed && <><button className="btn ghost" onClick={() => setCity('new')}>+ Add city</button><button className="btn" onClick={() => setCl('new')}>+ Add cluster</button></>}</div></div>
+        <div className="acts">{ed && <>{hasRight('upload') && <button className="btn ghost" onClick={() => setUpload(true)}>Bulk upload / edit</button>}<button className="btn ghost" onClick={() => setCity('new')}>+ Add city</button><button className="btn" onClick={() => setCl('new')}>+ Add cluster</button></>}</div></div>
       <div className="cols">
         <section className="card flush"><h2>Clusters</h2><div className="scroll"><table>
           <thead><tr><th>Cluster</th><th>City</th><th>Cluster Manager</th><th className="r">Properties</th><th>Status</th><th></th></tr></thead>
@@ -33,6 +37,7 @@ export function CitiesClustersPage() {
           <thead><tr><th>City</th><th>State</th><th></th></tr></thead>
           <tbody>{l?.cities.map((c) => <tr key={c.id}><td className="id">{c.name}</td><td>{c.state_code}</td><td className="r">{ed && <button className="link" onClick={() => setCity(c)}>Edit</button>}</td></tr>)}</tbody></table></div></section>
       </div>
+      {upload && <UploadModal kind="clusters" title="Bulk upload or edit cities and clusters" onClose={() => setUpload(false)} onDone={refreshLookups} />}
       {city && <CityModal c={city === 'new' ? null : city} onClose={() => setCity(null)} />}
       {cl && <ClusterModal c={cl === 'new' ? null : cl} onClose={() => setCl(null)} />}
     </>

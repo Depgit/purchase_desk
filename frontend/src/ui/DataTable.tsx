@@ -67,6 +67,8 @@ interface Props<T> {
   dim?: (r: T) => boolean
   empty?: string
   pageSize?: number
+  /** Sort used until the person clicks a heading (their choice is saved), for example ['sku', 1] for SKU code A to Z. */
+  defaultSort?: [string, number]
 }
 
 interface Pref { cols?: string[]; sort?: [string, number] }
@@ -116,11 +118,12 @@ export function DataTable<T>(p: Props<T>) {
       const s = q.toLowerCase()
       rows = rows.filter((r) => p.search!(r).toLowerCase().includes(s))
     }
-    if (pref.sort) {
-      const c = p.columns.find((x) => x.key === pref.sort![0])
+    const sort = pref.sort || p.defaultSort
+    if (sort) {
+      const c = p.columns.find((x) => x.key === sort[0])
       if (c) {
         const val = (r: T) => (c.sort ? c.sort(r) : c.csv ? c.csv(r) : '')
-        const dir = pref.sort[1]
+        const dir = sort[1]
         rows = [...rows].sort((a, b) => {
           const x = val(a), y = val(b)
           return (typeof x === 'number' && typeof y === 'number' ? x - y : String(x).localeCompare(String(y), 'en', { numeric: true })) * dir
@@ -128,7 +131,7 @@ export function DataTable<T>(p: Props<T>) {
       }
     }
     return rows
-  }, [p.rows, p.filters, p.search, p.columns, p.date, range, from, to, fv, q, pref.sort])
+  }, [p.rows, p.filters, p.search, p.columns, p.date, range, from, to, fv, q, pref.sort, p.defaultSort])
 
   const pages = Math.max(1, Math.ceil(filtered.length / size))
   const pg = Math.min(page, pages - 1)
@@ -183,8 +186,8 @@ export function DataTable<T>(p: Props<T>) {
               }} /></th>}
               {shown.map((c) => (
                 <th key={c.key} className={c.right ? 'r' : ''}>
-                  {c.label ? <button className="thb" onClick={() => savePref({ ...pref, sort: pref.sort && pref.sort[0] === c.key ? [c.key, -pref.sort[1]] : [c.key, 1] })}>
-                    {c.label}{pref.sort?.[0] === c.key ? (pref.sort[1] > 0 ? ' ▲' : ' ▼') : ''}</button> : null}
+                  {c.label ? <button className="thb" onClick={() => { const cur = pref.sort || p.defaultSort; savePref({ ...pref, sort: cur && cur[0] === c.key ? [c.key, -cur[1]] : [c.key, 1] }) }}>
+                    {c.label}{(pref.sort || p.defaultSort)?.[0] === c.key ? ((pref.sort || p.defaultSort)![1] > 0 ? ' ▲' : ' ▼') : ''}</button> : null}
                 </th>
               ))}
             </tr></thead>

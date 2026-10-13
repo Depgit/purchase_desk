@@ -13,6 +13,7 @@ import { Seg } from '../ui/Tabs'
 import { useAction } from '../ui/useAction'
 import { PHASE, usePhase } from '../releasephase/phase'
 import { ReasonModal, type ReasonKind } from './ReasonModal'
+import { useScreen } from '../screenaccess/screen'
 
 type GroupBy = 'property' | 'city' | 'cluster' | 'category' | 'sub' | 'vendor' | 'none'
 const GB: [GroupBy, string][] = [['property', 'Property'], ['city', 'City'], ['cluster', 'Cluster'], ['category', 'Category'], ['sub', 'Sub-category'], ['vendor', 'Vendor'], ['none', 'One list']]
@@ -39,6 +40,7 @@ function withEdits(d: Doc, e?: Record<number, number>) {
 
 export function ApprovalsPage() {
   const { hasStep, me } = useSession()
+  const sc = useScreen('approvals')
   const bud = usePhase().on(PHASE.budgets) // budget columns and filters open with budgets in phase 3
   const l = useLookups()
   const { data, reload, loading } = useApi<Doc[]>('/approvals')
@@ -83,6 +85,7 @@ export function ApprovalsPage() {
   const ok = shown.filter((d) => !d.flagged), flagged = shown.filter((d) => d.flagged)
   const selDocs = (data || []).filter((d) => sel.has(d.id))
 
+  if (hasStep('l2', 'cc', 'preop') && !sc.edit) return <><h1>Approvals</h1><p className="note">Your role can only view Approvals, so it cannot approve here. Requests waiting for approval show under Purchase Requests.</p></>
   if (!hasStep('l2', 'cc', 'preop')) return <><h1>Approvals</h1><p className="note">Approval rights belong to the Cluster Manager, the Cost Controller and the Pre-opening Team.</p></>
 
   async function bulk(action: string, ids: number[], reasonText = '', note = '') {

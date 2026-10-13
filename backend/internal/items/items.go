@@ -69,22 +69,55 @@ func (s *Service) listCategories(w http.ResponseWriter, r *http.Request) error {
 	return httpjson.OK(w, out)
 }
 
+// CategoryInput is a category from the form or a bulk upload. IsFB marks food and beverage (budgets from F&B sales).
+type CategoryInput struct {
+	Name string `json:"name"`
+	IsFB bool   `json:"is_fb"`
+}
+
+// ValidateCategory tidies a category and lists what is wrong with it; id is the category being changed (0 for new).
+func ValidateCategory(ctx context.Context, q database.Q, in *CategoryInput, id int64) []string {
+	in.Name = textclean.Clean(in.Name)
+	errs := []string{}
+	if len(in.Name) < 3 || strings.ContainsAny(in.Name, `<>",`) {
+		errs = append(errs, "Enter the category name, without commas.")
+	}
+	var dup bool
+	_ = q.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM category WHERE norm_key(name)=norm_key($1) AND id<>$2)`, in.Name, id).Scan(&dup)
+	if dup {
+		errs = append(errs, "This category already exists.")
+	}
+	return errs
+}
+
+// SaveCategory adds a checked category (id 0) or changes its name and F&B flag, and logs it.
+func SaveCategory(ctx context.Context, q database.Q, u *access.User, id int64, in CategoryInput) (int64, error) {
+	if id == 0 {
+		if err := q.QueryRow(ctx, `INSERT INTO category(name,is_fb,created_by) VALUES ($1,$2,$3) RETURNING id`, in.Name, in.IsFB, u.ID).Scan(&id); err != nil {
+			return 0, err
+		}
+		return id, auditlog.Write(ctx, q, u, "Items", "Category added", in.Name, "")
+	}
+	var old string
+	var oldFB bool
+	if err := q.QueryRow(ctx, `SELECT name, is_fb FROM category WHERE id=$1`, id).Scan(&old, &oldFB); err != nil {
+		return 0, httpjson.NotFound("Category")
+	}
+	if _, err := q.Exec(ctx, `UPDATE category SET name=$2, is_fb=$3 WHERE id=$1`, id, in.Name, in.IsFB); err != nil {
+		return 0, err
+	}
+	return id, auditlog.Write(ctx, q, u, "Items", "Category edited", in.Name, fmt.Sprintf("%s, F&B %v → %s, F&B %v", old, oldFB, in.Name, in.IsFB))
+}
+
 // saveCategory adds a category, or edits its name and F&B flag (PUT /categories/{id}).
 func (s *Service) saveCategory(w http.ResponseWriter, r *http.Request) error {
 	u := access.From(r)
 	if err := access.NeedRight(u, access.Masters, "edit masters"); err != nil {
 		return err
 	}
-	var in struct {
-		Name string `json:"name"`
-		IsFB bool   `json:"is_fb"`
-	}
+	var in CategoryInput
 	if err := httpjson.Decode(r, &in); err != nil {
 		return err
-	}
-	in.Name = textclean.Clean(in.Name)
-	if len(in.Name) < 3 || strings.ContainsAny(in.Name, `<>",`) {
-		return httpjson.Bad("Enter the category name, without commas.")
 	}
 	id := int64(0)
 	if chi.URLParam(r, "id") != "" {
@@ -93,27 +126,13 @@ func (s *Service) saveCategory(w http.ResponseWriter, r *http.Request) error {
 			return err
 		}
 	}
-	var dup bool
-	_ = s.DB.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM category WHERE norm_key(name)=norm_key($1) AND id<>$2)`, in.Name, id).Scan(&dup)
-	if dup {
-		return httpjson.Bad("This category already exists.")
+	if errs := ValidateCategory(r.Context(), s.DB, &in, id); len(errs) > 0 {
+		return httpjson.Invalid(errs)
 	}
-	if id != 0 {
-		var old string
-		var oldFB bool
-		if err := s.DB.QueryRow(r.Context(), `SELECT name, is_fb FROM category WHERE id=$1`, id).Scan(&old, &oldFB); err != nil {
-			return httpjson.NotFound("Category")
-		}
-		if _, err := s.DB.Exec(r.Context(), `UPDATE category SET name=$2, is_fb=$3 WHERE id=$1`, id, in.Name, in.IsFB); err != nil {
-			return err
-		}
-		_ = auditlog.Write(r.Context(), s.DB, u, "Items", "Category edited", in.Name, fmt.Sprintf("%s, F&B %v → %s, F&B %v", old, oldFB, in.Name, in.IsFB))
-		return httpjson.OK(w, map[string]int64{"id": id})
-	}
-	if err := s.DB.QueryRow(r.Context(), `INSERT INTO category(name,is_fb,created_by) VALUES ($1,$2,$3) RETURNING id`, in.Name, in.IsFB, u.ID).Scan(&id); err != nil {
+	id, err := SaveCategory(r.Context(), s.DB, u, id, in)
+	if err != nil {
 		return err
 	}
-	_ = auditlog.Write(r.Context(), s.DB, u, "Items", "Category added", in.Name, "")
 	return httpjson.OK(w, map[string]int64{"id": id})
 }
 
@@ -148,20 +167,86 @@ func (s *Service) listSubCategories(w http.ResponseWriter, r *http.Request) erro
 
 var reserved = map[string]bool{"PO": true, "PR": true, "WT": true, "BR": true, "GR": true}
 
+// SubCategoryInput is a sub-category from the form or a bulk upload. Code is the 2 letters that start its SKU codes;
+// it is set when the sub-category is added and never changes.
+type SubCategoryInput struct {
+	Name       string `json:"name"`
+	CategoryID int64  `json:"category_id"`
+	Code       string `json:"code"`
+}
+
+// ValidateSubCategory tidies a sub-category and lists what is wrong with it; id is the one being changed (0 for new).
+// On a change the code is ignored, and category 0 keeps the category on file.
+func ValidateSubCategory(ctx context.Context, q database.Q, in *SubCategoryInput, id int64) []string {
+	in.Name, in.Code = textclean.Clean(in.Name), textclean.Upper(in.Code)
+	errs := []string{}
+	if len(in.Name) < 3 || strings.ContainsAny(in.Name, `<>",`) {
+		errs = append(errs, "Enter the sub-category name, without commas.")
+	}
+	var dup bool
+	_ = q.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM sub_category WHERE norm_key(name)=norm_key($1) AND id<>$2)`, in.Name, id).Scan(&dup)
+	if dup {
+		errs = append(errs, "A sub-category with this name already exists.")
+	}
+	if in.CategoryID != 0 || id == 0 {
+		var ok bool
+		_ = q.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM category WHERE id=$1)`, in.CategoryID).Scan(&ok)
+		if !ok {
+			errs = append(errs, "Choose a category from the list.")
+		}
+	}
+	if id != 0 {
+		return errs
+	}
+	switch {
+	case len(in.Code) != 2 || strings.Trim(in.Code, "ABCDEFGHIJKLMNOPQRSTUVWXYZ") != "":
+		errs = append(errs, "SKU code letters must be exactly 2 letters.")
+	case reserved[in.Code]:
+		errs = append(errs, "These letters are used for document numbers. Choose another pair.")
+	default:
+		var used string
+		_ = q.QueryRow(ctx, `SELECT name FROM sub_category WHERE code=$1`, in.Code).Scan(&used)
+		if used != "" {
+			errs = append(errs, fmt.Sprintf("These letters are already used by %s. Choose another pair.", used))
+		}
+	}
+	return errs
+}
+
+// SaveSubCategory adds a checked sub-category (id 0) or changes its name and category, and logs it.
+func SaveSubCategory(ctx context.Context, q database.Q, u *access.User, id int64, in SubCategoryInput) (int64, error) {
+	if id == 0 {
+		if err := q.QueryRow(ctx, `INSERT INTO sub_category(name,category_id,code,created_by) VALUES ($1,$2,$3,$4) RETURNING id`, in.Name, in.CategoryID, in.Code, u.ID).Scan(&id); err != nil {
+			return 0, err
+		}
+		return id, auditlog.Write(ctx, q, u, "Items", "Sub-category added", in.Name, "code "+in.Code)
+	}
+	// The 2-letter code is fixed once SKUs carry it; the name and the category can change.
+	var old, oldCat string
+	var catID int64
+	if err := q.QueryRow(ctx, `SELECT s.name, s.category_id, c.name FROM sub_category s JOIN category c ON c.id=s.category_id WHERE s.id=$1`, id).Scan(&old, &catID, &oldCat); err != nil {
+		return 0, httpjson.NotFound("Sub-category")
+	}
+	if in.CategoryID != 0 {
+		catID = in.CategoryID
+	}
+	if _, err := q.Exec(ctx, `UPDATE sub_category SET name=$2, category_id=$3 WHERE id=$1`, id, in.Name, catID); err != nil {
+		return 0, err
+	}
+	var newCat string
+	_ = q.QueryRow(ctx, `SELECT name FROM category WHERE id=$1`, catID).Scan(&newCat)
+	return id, auditlog.Write(ctx, q, u, "Items", "Sub-category edited", in.Name, old+" ("+oldCat+") → "+in.Name+" ("+newCat+")")
+}
+
 func (s *Service) saveSubCategory(w http.ResponseWriter, r *http.Request) error {
 	u := access.From(r)
 	if err := access.NeedRight(u, access.Masters, "edit masters"); err != nil {
 		return err
 	}
-	var in struct {
-		Name       string `json:"name"`
-		CategoryID int64  `json:"category_id"`
-		Code       string `json:"code"`
-	}
+	var in SubCategoryInput
 	if err := httpjson.Decode(r, &in); err != nil {
 		return err
 	}
-	in.Name, in.Code = textclean.Clean(in.Name), textclean.Upper(in.Code)
 	id := int64(0)
 	if chi.URLParam(r, "id") != "" {
 		var err error
@@ -169,52 +254,13 @@ func (s *Service) saveSubCategory(w http.ResponseWriter, r *http.Request) error 
 			return err
 		}
 	}
-	if len(in.Name) < 3 || strings.ContainsAny(in.Name, `<>",`) {
-		return httpjson.Bad("Enter the sub-category name, without commas.")
+	if errs := ValidateSubCategory(r.Context(), s.DB, &in, id); len(errs) > 0 {
+		return httpjson.Invalid(errs)
 	}
-	var dup bool
-	_ = s.DB.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM sub_category WHERE norm_key(name)=norm_key($1) AND id<>$2)`, in.Name, id).Scan(&dup)
-	if dup {
-		return httpjson.Bad("A sub-category with this name already exists.")
-	}
-	if id != 0 {
-		// The 2-letter code is fixed once SKUs carry it; the name and the category can change.
-		var old, oldCat string
-		var catID int64
-		if err := s.DB.QueryRow(r.Context(), `SELECT s.name, s.category_id, c.name FROM sub_category s JOIN category c ON c.id=s.category_id WHERE s.id=$1`, id).Scan(&old, &catID, &oldCat); err != nil {
-			return httpjson.NotFound("Sub-category")
-		}
-		if in.CategoryID != 0 && in.CategoryID != catID {
-			var ok bool
-			_ = s.DB.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM category WHERE id=$1)`, in.CategoryID).Scan(&ok)
-			if !ok {
-				return httpjson.Bad("Choose a category from the list.")
-			}
-			catID = in.CategoryID
-		}
-		if _, err := s.DB.Exec(r.Context(), `UPDATE sub_category SET name=$2, category_id=$3 WHERE id=$1`, id, in.Name, catID); err != nil {
-			return err
-		}
-		var newCat string
-		_ = s.DB.QueryRow(r.Context(), `SELECT name FROM category WHERE id=$1`, catID).Scan(&newCat)
-		_ = auditlog.Write(r.Context(), s.DB, u, "Items", "Sub-category edited", in.Name, old+" ("+oldCat+") → "+in.Name+" ("+newCat+")")
-		return httpjson.OK(w, map[string]int64{"id": id})
-	}
-	if len(in.Code) != 2 || strings.Trim(in.Code, "ABCDEFGHIJKLMNOPQRSTUVWXYZ") != "" {
-		return httpjson.Bad("SKU code letters must be exactly 2 letters.")
-	}
-	if reserved[in.Code] {
-		return httpjson.Bad("These letters are used for document numbers. Choose another pair.")
-	}
-	var used string
-	_ = s.DB.QueryRow(r.Context(), `SELECT name FROM sub_category WHERE code=$1`, in.Code).Scan(&used)
-	if used != "" {
-		return httpjson.Bad("These letters are already used by %s. Choose another pair.", used)
-	}
-	if err := s.DB.QueryRow(r.Context(), `INSERT INTO sub_category(name,category_id,code,created_by) VALUES ($1,$2,$3,$4) RETURNING id`, in.Name, in.CategoryID, in.Code, u.ID).Scan(&id); err != nil {
+	id, err := SaveSubCategory(r.Context(), s.DB, u, id, in)
+	if err != nil {
 		return err
 	}
-	_ = auditlog.Write(r.Context(), s.DB, u, "Items", "Sub-category added", in.Name, "code "+in.Code)
 	return httpjson.OK(w, map[string]int64{"id": id})
 }
 

@@ -11,6 +11,7 @@ import (
 
 	"purchasedesk/internal/httpjson"
 	"purchasedesk/internal/releasephase"
+	"purchasedesk/internal/screens"
 	"purchasedesk/internal/sessiontoken"
 	"purchasedesk/internal/textclean"
 )
@@ -42,6 +43,13 @@ type Grant struct {
 	ClusterIDs  []int64  `json:"cluster_ids"`
 	PropertyIDs []int64  `json:"property_ids"`
 	CategoryIDs []int64  `json:"category_ids"`
+	// Screens is the role's level on every screen (screens.None, View or Edit), set on the role or its starting level.
+	Screens   map[string]int `json:"screens"`
+	Reports   []string       `json:"-"` // nil: every report
+	CanUsers  bool           `json:"-"`
+	UserRoles []int64        `json:"-"`
+	UserScope string         `json:"-"`
+	CanRoles  bool           `json:"-"`
 }
 
 type User struct {
@@ -52,9 +60,14 @@ type User struct {
 	Department string  `json:"department"`
 	Grants     []Grant `json:"roles"`
 	IsAdmin    bool    `json:"is_admin"`
-	// CreatableRoles are the roles the System Admin lets this user give when adding users (see AddsUsers).
-	CreatableRoles []int64 `json:"creatable_roles"`
-	Phase          int     `json:"phase"` // release phase switched on (RELEASE_PHASE), so screens show only what is open
+	// Adding users and managing roles come from the user's roles (role.can_users, role.can_roles).
+	AddsUsersOn    bool              `json:"adds_users"`
+	CreatableRoles []int64           `json:"user_roles"`     // roles this user may give when adding users
+	UserScopeAny   bool              `json:"user_scope_any"` // may add users at any property, not only their own
+	ManagesRolesOn bool              `json:"manages_roles"`
+	ScreenLevels   map[string]string `json:"screens"` // highest level on each screen across the user's roles
+	ReportKeys     []string          `json:"reports"` // reports the user sees; null for every report
+	Phase          int               `json:"phase"`   // release phase switched on (RELEASE_PHASE), so screens show only what is open
 
 	visLoaded bool
 	visAll    bool
@@ -85,9 +98,47 @@ func (u *User) HasStep(step string) bool {
 	return false
 }
 
-// AddsUsers reports whether the user may add users: the System Admin, or someone the Admin gave creatable roles.
+// AddsUsers reports whether the user may add users: the System Admin, or a role with the create-users right.
 func (u *User) AddsUsers() bool {
-	return u.IsAdmin || len(u.CreatableRoles) > 0
+	return u.IsAdmin || u.AddsUsersOn
+}
+
+// ManagesRoles reports whether the user may create and edit roles: the System Admin, or a role the Admin allowed.
+func (u *User) ManagesRoles() bool {
+	return u.IsAdmin || u.ManagesRolesOn
+}
+
+// Level is the user's level on a screen at one property: the highest level among the roles that cover it.
+func (u *User) Level(screen string, propID, clusterID int64) int {
+	if u.IsAdmin {
+		return screens.Edit
+	}
+	best := screens.None
+	for _, g := range u.Grants {
+		if l := g.Screens[screen]; l > best && covers(g, propID, clusterID, nil) {
+			best = l
+		}
+	}
+	return best
+}
+
+// Overall is the user's highest level on a screen at any property; it decides whether the screen opens at all.
+func (u *User) Overall(screen string) int {
+	if u.IsAdmin {
+		return screens.Edit
+	}
+	best := screens.None
+	for _, g := range u.Grants {
+		if l := g.Screens[screen]; l > best {
+			best = l
+		}
+	}
+	return best
+}
+
+// SeesReport reports whether one of the user's roles includes a report.
+func (u *User) SeesReport(key string) bool {
+	return u.ReportKeys == nil || textclean.Contains(u.ReportKeys, key)
 }
 
 func (u *User) RoleName() string {
@@ -168,14 +219,14 @@ type Guard struct {
 func (g *Guard) Load(ctx context.Context, userID int64) (*User, error) {
 	u := &User{Phase: releasephase.Current()}
 	var active bool
-	err := g.DB.QueryRow(ctx, `SELECT u.id, u.name, coalesce(u.email::text,''), coalesce(u.mobile,''), u.department, u.active,
-		coalesce((SELECT array_agg(r.id ORDER BY r.id) FROM role r WHERE r.id = ANY(u.creatable_role_ids) AND r.active AND r.step<>'admin'),'{}')
+	err := g.DB.QueryRow(ctx, `SELECT u.id, u.name, coalesce(u.email::text,''), coalesce(u.mobile,''), u.department, u.active
 		FROM app_user u WHERE u.id=$1`, userID).
-		Scan(&u.ID, &u.Name, &u.Email, &u.Mobile, &u.Department, &active, &u.CreatableRoles)
+		Scan(&u.ID, &u.Name, &u.Email, &u.Mobile, &u.Department, &active)
 	if err != nil || !active {
 		return nil, httpjson.Unauthorized("Your session has ended. Please sign in again.")
 	}
-	rows, err := g.DB.Query(ctx, `SELECT r.id, r.code, r.name, r.step, r.rights, ur.scope, ur.cluster_ids, ur.property_ids, ur.category_ids
+	rows, err := g.DB.Query(ctx, `SELECT r.id, r.code, r.name, r.step, r.rights, ur.scope, ur.cluster_ids, ur.property_ids, ur.category_ids,
+		r.screens, r.reports, r.can_users, r.user_role_ids, r.user_scope, r.can_roles
 		FROM user_role ur JOIN role r ON r.id=ur.role_id WHERE ur.user_id=$1 AND r.active ORDER BY r.id`, userID)
 	if err != nil {
 		return nil, err
@@ -183,15 +234,55 @@ func (g *Guard) Load(ctx context.Context, userID int64) (*User, error) {
 	defer rows.Close()
 	for rows.Next() {
 		var gr Grant
-		if err := rows.Scan(&gr.RoleID, &gr.Code, &gr.Name, &gr.Step, &gr.Rights, &gr.Scope, &gr.ClusterIDs, &gr.PropertyIDs, &gr.CategoryIDs); err != nil {
+		var set map[string]string
+		if err := rows.Scan(&gr.RoleID, &gr.Code, &gr.Name, &gr.Step, &gr.Rights, &gr.Scope, &gr.ClusterIDs, &gr.PropertyIDs, &gr.CategoryIDs,
+			&set, &gr.Reports, &gr.CanUsers, &gr.UserRoles, &gr.UserScope, &gr.CanRoles); err != nil {
 			return nil, err
 		}
 		if gr.Step == "admin" {
 			u.IsAdmin = true
 		}
+		gr.Screens = screens.Effective(set, gr.Rights, gr.Step, gr.CanUsers, gr.CanRoles)
 		u.Grants = append(u.Grants, gr)
 	}
-	return u, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	u.summarize()
+	return u, nil
+}
+
+// summarize works out what the user's roles give together, for /me and the checks: the highest level per screen,
+// the reports, and the user and role rights.
+func (u *User) summarize() {
+	u.ScreenLevels = map[string]string{}
+	for _, s := range screens.All {
+		u.ScreenLevels[s.Key] = screens.LevelName[u.Overall(s.Key)]
+	}
+	u.CreatableRoles = []int64{}
+	if u.IsAdmin {
+		u.AddsUsersOn, u.ManagesRolesOn, u.UserScopeAny, u.ReportKeys = true, true, true, nil
+		return
+	}
+	reports, all := []string{}, false
+	for _, g := range u.Grants {
+		if g.Reports == nil {
+			all = true
+		}
+		reports = append(reports, g.Reports...)
+		if g.CanUsers {
+			u.AddsUsersOn = true
+			u.CreatableRoles = append(u.CreatableRoles, g.UserRoles...)
+			u.UserScopeAny = u.UserScopeAny || g.UserScope == "any"
+		}
+		u.ManagesRolesOn = u.ManagesRolesOn || g.CanRoles
+	}
+	u.CreatableRoles = textclean.Uniq(u.CreatableRoles)
+	if all {
+		u.ReportKeys = nil
+	} else {
+		u.ReportKeys = textclean.Uniq(reports)
+	}
 }
 
 // Visible returns the properties the user may see, or all=true.

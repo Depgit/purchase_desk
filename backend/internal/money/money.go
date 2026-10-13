@@ -49,7 +49,10 @@ func TermsDays(t string) int {
 // October (1st to 31st) is due on 15 November.
 const Next15th = "15th of next month"
 
-var PaymentTerms = []string{"Net 15", "Net 30", "Net 45", Next15th, "Advance"}
+// Advance is the payment term under which the vendor is paid an advance, asked for when the PO is issued.
+const Advance = "Advance"
+
+var PaymentTerms = []string{"Net 15", "Net 30", "Net 45", Next15th, Advance}
 
 // DueDate is when an invoice dated on day falls due under the payment terms. "Net N" adds N days,
 // "15th of next month" gives the 15th of the following month, and "Advance" or anything else is the invoice date.

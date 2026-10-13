@@ -235,7 +235,7 @@ func (s *Service) listRates(w http.ResponseWriter, r *http.Request) error {
 		r.valid_from::text, r.valid_to::text, `+rateStatusSQL+`, (r.valid_to - current_date), r.created_at
 		FROM rate_card r JOIN vendor v ON v.id=r.vendor_id JOIN sku k ON k.id=r.sku_id LEFT JOIN brand b ON b.id=k.brand_id JOIN pack_size ps ON ps.id=k.pack_size_id
 		JOIN sub_category sc ON sc.id=k.sub_category_id JOIN category c ON c.id=sc.category_id
-		WHERE ($1=0 OR r.vendor_id=$1) ORDER BY v.legal_name, k.code, r.valid_from DESC, r.id DESC`, vid)
+		WHERE ($1=0 OR r.vendor_id=$1) ORDER BY k.code, v.legal_name, r.valid_from DESC, r.id DESC`, vid)
 	if err != nil {
 		return err
 	}

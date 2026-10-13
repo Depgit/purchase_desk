@@ -16,6 +16,7 @@ import { Tabs } from '../ui/Tabs'
 import { useAction } from '../ui/useAction'
 import type { Vendor } from '../vendors/VendorForm'
 import type { SKU } from '../items/ItemsPage'
+import { useScreen } from '../screenaccess/screen'
 
 interface Mapping {
   id: number; vendor_id: number; vendor: string; vendor_usable: boolean; level: 'sku' | 'sc'; sku_id: number | null; sku_code: string; item: string
@@ -59,11 +60,12 @@ function propsText(m: Mapping, l: ReturnType<typeof useLookups>) {
 function Mappings({ level }: { level: 'sc' | 'sku' }) {
   const l = useLookups()
   const { hasRight } = useSession()
+  const sc = useScreen('vendor_mapping')
   const { data, reload } = useApi<Mapping[]>('/mappings?level=' + level)
   const [edit, setEdit] = useState<Mapping | 'new' | null>(null)
   const [upload, setUpload] = useState(false)
   const a = useAction()
-  const ed = hasRight('masters')
+  const ed = sc.edit && hasRight('masters')
   return (
     <>
       <DataTable screen={'mappings-' + level} rows={data || []} rowKey={(m) => m.id} dim={(m) => !m.active}
@@ -125,18 +127,19 @@ function MappingModal({ level, m, onClose, onDone }: { level: 'sc' | 'sku'; m: M
 
 function Rates() {
   const { hasRight } = useSession()
+  const sc = useScreen('vendor_mapping')
   const { data, reload } = useApi<Rate[]>('/rates')
   const vendors = useApi<Vendor[]>('/vendors')
   const l = useLookups()
   const [add, setAdd] = useState(false)
   const [fmt, setFmt] = useState(false)
   const [upload, setUpload] = useState(false)
-  const ed = hasRight('masters')
+  const ed = sc.edit && hasRight('masters')
   const tone = (s: string) => s === 'Active' ? 'ok' : s === 'Expiring soon' ? 'warn' : s === 'Expired' ? 'bad' : s === 'Superseded' ? 'off' : ''
   return (
     <>
       <p className="note"><b>Three steps for a vendor price list:</b> 1. Download the rate format for the vendor. 2. The vendor fills the new rate and validity against each SKU. 3. Bulk upload: every row is checked, and only clean rows are saved.</p>
-      <DataTable screen="rates" rows={data || []} rowKey={(r) => r.id} date={{ label: 'Valid from', value: (r) => r.valid_from }} dim={(r) => r.status === 'Superseded'} search={(r) => [r.vendor, r.sku_code, r.item].join(' ')}
+      <DataTable screen="rates" rows={data || []} rowKey={(r) => r.id} defaultSort={['sku', 1]} date={{ label: 'Valid from', value: (r) => r.valid_from }} dim={(r) => r.status === 'Superseded'} search={(r) => [r.vendor, r.sku_code, r.item].join(' ')}
         actions={<><button className="btn ghost" onClick={() => setFmt(true)}>Rate format</button>{ed && <>{hasRight('upload') && <button className="btn ghost" onClick={() => setUpload(true)}>Bulk upload / edit rates</button>}<button className="btn" onClick={() => setAdd(true)}>+ Add rate</button></>}</>}
         filters={[
           { id: 'v', label: 'Vendor', options: [['', 'All vendors'], ...(vendors.data || []).filter((v) => v.vendor_type === 'goods' || v.vendor_type === 'warehouse').map((v) => [String(v.id), v.legal_name] as [string, string])], test: (r, v) => String(r.vendor_id) === v },
@@ -144,14 +147,14 @@ function Rates() {
           { id: 'cat', label: 'Category', options: [['', 'All categories'], ...(l?.categories || []).map((c) => [c.name, c.name] as [string, string])], test: (r, v) => r.category === v },
         ]}
         columns={[
+          { key: 'sku', label: 'SKU', render: (r) => <span className="nowrap">{r.sku_code}</span>, sort: (r) => r.sku_code, csv: (r) => r.sku_code },
           { key: 'vendor', label: 'Vendor', render: (r) => r.vendor, csv: (r) => r.vendor },
-          { key: 'sku', label: 'SKU', render: (r) => r.sku_code, csv: (r) => r.sku_code },
           { key: 'item', label: 'Item', render: (r) => <>{r.item} <span className="hint">{r.pack_size}</span></>, csv: (r) => r.item },
           { key: 'sub', label: 'Sub-category', render: (r) => r.sub_category, csv: (r) => r.sub_category },
           { key: 'rate', label: 'Rate ex GST', right: true, render: (r) => inr(r.rate), sort: (r) => r.rate, csv: (r) => r.rate },
           { key: 'gst', label: 'GST', right: true, render: (r) => r.gst_pct + '%', csv: (r) => r.gst_pct },
-          { key: 'from', label: 'Valid from', render: (r) => r.valid_from, csv: (r) => r.valid_from },
-          { key: 'to', label: 'Valid to', render: (r) => r.valid_to, csv: (r) => r.valid_to },
+          { key: 'from', label: 'Valid from', render: (r) => <span className="nowrap">{r.valid_from}</span>, csv: (r) => r.valid_from },
+          { key: 'to', label: 'Valid to', render: (r) => <span className="nowrap">{r.valid_to}</span>, csv: (r) => r.valid_to },
           { key: 'status', label: 'Status', render: (r) => <Pill tone={tone(r.status) as any}>{r.status}</Pill>, csv: (r) => r.status },
         ]} csvName="vendor-rates" />
       {add && <RateModal onClose={() => setAdd(false)} onDone={() => { setAdd(false); reload() }} />}

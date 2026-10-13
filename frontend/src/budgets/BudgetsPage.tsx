@@ -9,6 +9,7 @@ import { inr, thisMonth } from '../format/format'
 import { Pill } from '../ui/Pill'
 import { Seg, Tabs } from '../ui/Tabs'
 import { useToast } from '../ui/Toast'
+import { useScreen } from '../screenaccess/screen'
 
 interface Over { property_id: number; code: string; property: string; cluster: string; month_budget: number; budget_to_date: number; spent: number; left: number; pace: string; tone: string; categories: { category: string; pace: string; tone: string; ratio: number }[] }
 interface SubDetail { sub_category_id: number; sub_category: string; category: string; is_fb: boolean; month_budget: number; budget_to_date: number; spent: number; pace: string; tone: string; weeks: { from: number; to: number; budget: number; spent: number }[]; day_budget: number[]; day_spent: number[] }
@@ -18,12 +19,13 @@ interface FB { property_id: number; property: string; cluster: string; plan_sale
 export function BudgetsPage() {
   const l = useLookups()
   const { hasStep, hasRight } = useSession()
+  const sc = useScreen('budgets')
   const [tab, setTab] = useState<'all' | 'one' | 'fb'>('all')
   const [m, setM] = useState(thisMonth())
   const [cl, setCl] = useState('')
   const [pid, setPid] = useState(0)
   const [upload, setUpload] = useState<'budgets' | 'fb_sales' | null>(null)
-  const canEdit = hasStep('cc')
+  const canEdit = sc.edit && hasStep('cc')
   const live = (l?.properties || []).filter((p) => p.active && p.kind === 'live')
   useEffect(() => { if (!pid && live.length) setPid(live[0].id) }, [live, pid])
   return (

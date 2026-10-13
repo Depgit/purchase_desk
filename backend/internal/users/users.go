@@ -1,7 +1,8 @@
 // Package users manages who can sign in, their roles, and each role's property and category scope.
 // It also manages roles: a role is a named bundle of rights that sits at one step in the flow.
-// The System Admin manages every user, and can let a user add users of chosen roles (creatable roles): that user then
-// sees, edits and deactivates only the users they added, with those roles, inside their own property access.
+// The System Admin manages every user. A role can carry the create-users right (roles.go): people in it add users,
+// giving only the roles the role allows, inside their own properties or at any property, and they see, edit and
+// deactivate only the users they added. The access-by-property grid (accessgrid.go) changes a user's role per property.
 package users
 
 import (
@@ -34,9 +35,8 @@ func (s *Service) Routes(r chi.Router) {
 	r.Get("/users", httpjson.Wrap(s.list))
 	r.Post("/users", httpjson.Wrap(s.save))
 	r.Put("/users/{id}", httpjson.Wrap(s.save))
-	r.Get("/roles", httpjson.Wrap(s.listRoles))
-	r.Post("/roles", httpjson.Wrap(s.saveRole))
-	r.Put("/roles/{id}", httpjson.Wrap(s.saveRole))
+	s.roleRoutes(r)
+	s.gridRoutes(r)
 }
 
 type RoleGrant struct {
@@ -58,14 +58,13 @@ type User struct {
 	HasPwd     bool        `json:"has_password"`
 	Active     bool        `json:"active"`
 	Roles      []RoleGrant `json:"roles"`
-	Creatable  []int64     `json:"creatable_roles"` // roles this user may give when adding users; set by the System Admin
 	CreatedBy  int64       `json:"created_by"`
 	CanEdit    bool        `json:"can_edit"` // the viewer may edit or deactivate this user
 }
 
 func (s *Service) load(ctx context.Context, where string, args ...any) ([]User, error) {
 	rows, err := s.DB.Query(ctx, `SELECT u.id, u.name, coalesce(u.email::text,''), coalesce(u.mobile,''), u.department, u.password_hash IS NOT NULL, u.active,
-		u.creatable_role_ids, coalesce(u.created_by,0)
+		coalesce(u.created_by,0)
 		FROM app_user u `+where+` ORDER BY u.name`, args...)
 	if err != nil {
 		return nil, err
@@ -73,7 +72,7 @@ func (s *Service) load(ctx context.Context, where string, args ...any) ([]User, 
 	out, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (User, error) {
 		var x User
 		x.Roles = []RoleGrant{}
-		return x, row.Scan(&x.ID, &x.Name, &x.Email, &x.Mobile, &x.Department, &x.HasPwd, &x.Active, &x.Creatable, &x.CreatedBy)
+		return x, row.Scan(&x.ID, &x.Name, &x.Email, &x.Mobile, &x.Department, &x.HasPwd, &x.Active, &x.CreatedBy)
 	})
 	if err != nil {
 		return nil, err
@@ -170,8 +169,6 @@ type UserInput struct {
 	Department string      `json:"department"`
 	Password   string      `json:"password"`
 	Roles      []RoleGrant `json:"roles"`
-	// Creatable are the roles this user may give when adding users. nil keeps what is on file (an upload row).
-	Creatable *[]int64 `json:"creatable_roles"`
 }
 
 // ValidateUser tidies the input and returns every problem. id is the user being edited, or 0; selfID is the Admin doing it.
@@ -243,15 +240,6 @@ func ValidateUser(ctx context.Context, q database.Q, in *UserInput, id, selfID i
 	if id != 0 && id == selfID && !hasAdmin {
 		errs = append(errs, "You cannot remove your own System Admin role.")
 	}
-	if in.Creatable != nil {
-		ids := textclean.Uniq(*in.Creatable)
-		var bad bool
-		_ = q.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM unnest($1::bigint[]) x LEFT JOIN role r ON r.id=x WHERE r.id IS NULL OR NOT r.active OR r.step='admin')`, ids).Scan(&bad)
-		if bad {
-			errs = append(errs, "The roles this user may add must be active roles other than System Admin.")
-		}
-		in.Creatable = &ids
-	}
 	return errs
 }
 
@@ -301,18 +289,6 @@ func SaveUser(ctx context.Context, tx pgx.Tx, u *access.User, id int64, in UserI
 	if hash != nil {
 		detail += " · password set"
 	}
-	if in.Creatable != nil {
-		var before []int64
-		_ = tx.QueryRow(ctx, `SELECT creatable_role_ids FROM app_user WHERE id=$1`, id).Scan(&before)
-		if _, err := tx.Exec(ctx, `UPDATE app_user SET creatable_role_ids=$2 WHERE id=$1`, id, *in.Creatable); err != nil {
-			return 0, err
-		}
-		if len(before) > 0 || len(*in.Creatable) > 0 {
-			var can string
-			_ = tx.QueryRow(ctx, `SELECT coalesce(string_agg(name, ', ' ORDER BY id),'') FROM role WHERE id = ANY($1)`, *in.Creatable).Scan(&can)
-			detail += " · may add users: " + textclean.Default(can, "none")
-		}
-	}
 	return id, auditlog.Write(ctx, tx, u, "Users", act, in.Name, detail)
 }
 
@@ -337,10 +313,6 @@ func (s *Service) save(w http.ResponseWriter, r *http.Request) error {
 	}
 	errs := ValidateUser(r.Context(), s.DB, &in, id, u.ID)
 	if !u.IsAdmin {
-		if in.Creatable != nil && len(*in.Creatable) > 0 {
-			return httpjson.Forbidden("Only the System Admin can let a user add users.")
-		}
-		in.Creatable = nil
 		errs = append(errs, s.delegateLimits(r.Context(), u, in.Roles)...)
 	}
 	if len(errs) > 0 {
@@ -357,9 +329,9 @@ func (s *Service) save(w http.ResponseWriter, r *http.Request) error {
 	return httpjson.OK(w, map[string]int64{"id": id})
 }
 
-// delegateLimits checks the roles a non-Admin gives: only roles the Admin allowed them, and property access inside
-// their own (all properties only if they have all; a cluster only if they hold that cluster; named properties only
-// ones they can see).
+// delegateLimits checks the roles a non-Admin gives: only the roles their role allows, and, unless their role may add
+// users at any property, property access inside their own (all properties only if they have all; a cluster only if
+// they hold that cluster; named properties only ones they can see).
 func (s *Service) delegateLimits(ctx context.Context, u *access.User, roles []RoleGrant) []string {
 	errs := []string{}
 	all, visible, err := s.Guard.Visible(ctx, u)
@@ -381,7 +353,7 @@ func (s *Service) delegateLimits(ctx context.Context, u *access.User, roles []Ro
 			errs = append(errs, fmt.Sprintf("You cannot give the role %s. You may add users as: %s.", textclean.Default(name, "chosen"), can))
 			continue
 		}
-		if all {
+		if all || u.UserScopeAny {
 			continue
 		}
 		switch g.Scope {
@@ -404,109 +376,4 @@ func (s *Service) delegateLimits(ctx context.Context, u *access.User, roles []Ro
 		}
 	}
 	return errs
-}
-
-type Role struct {
-	ID       int64    `json:"id"`
-	Code     string   `json:"code"`
-	Name     string   `json:"name"`
-	Step     string   `json:"step"`
-	Rights   []string `json:"rights"`
-	IsCustom bool     `json:"is_custom"`
-	Active   bool     `json:"active"`
-	Users    int      `json:"users"`
-}
-
-func (s *Service) listRoles(w http.ResponseWriter, r *http.Request) error {
-	rows, err := s.DB.Query(r.Context(), `SELECT r.id, r.code, r.name, r.step, r.rights, r.is_custom, r.active,
-		(SELECT count(*) FROM user_role ur JOIN app_user u ON u.id=ur.user_id WHERE ur.role_id=r.id AND u.active) FROM role r ORDER BY r.id`)
-	if err != nil {
-		return err
-	}
-	out, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (Role, error) {
-		var x Role
-		return x, row.Scan(&x.ID, &x.Code, &x.Name, &x.Step, &x.Rights, &x.IsCustom, &x.Active, &x.Users)
-	})
-	if err != nil {
-		return err
-	}
-	shown := out[:0]
-	for _, x := range out {
-		if releasephase.RoleOn(x.Step) { // roles of later phases stay hidden until RELEASE_PHASE reaches them
-			shown = append(shown, x)
-		}
-	}
-	return httpjson.OK(w, shown)
-}
-
-func (s *Service) saveRole(w http.ResponseWriter, r *http.Request) error {
-	u := access.From(r)
-	if err := access.NeedAdmin(u); err != nil {
-		return err
-	}
-	var in struct {
-		Name   string   `json:"name"`
-		Step   string   `json:"step"`
-		Rights []string `json:"rights"`
-	}
-	if err := httpjson.Decode(r, &in); err != nil {
-		return err
-	}
-	in.Name = textclean.Clean(in.Name)
-	rights := []string{}
-	for _, x := range in.Rights {
-		if !textclean.Contains(access.AllRights, x) {
-			return httpjson.Bad("Unknown right %s.", x)
-		}
-		rights = append(rights, x)
-	}
-	rights = textclean.Uniq(rights)
-	if !textclean.Contains(access.Steps, in.Step) || in.Step == "admin" {
-		return httpjson.Bad("Choose where the role works in the flow.")
-	}
-	id := int64(0)
-	if chi.URLParam(r, "id") != "" {
-		var err error
-		if id, err = httpjson.ID(r, "id"); err != nil {
-			return err
-		}
-		var code, step string
-		var custom bool
-		if err := s.DB.QueryRow(r.Context(), `SELECT code, step, is_custom FROM role WHERE id=$1`, id).Scan(&code, &step, &custom); err != nil {
-			return err
-		}
-		if step == "admin" {
-			return httpjson.Bad("The System Admin always has every right.")
-		}
-		if !custom {
-			in.Step = step // standard roles keep their place in the flow
-		}
-		if in.Name == "" {
-			_ = s.DB.QueryRow(r.Context(), `SELECT name FROM role WHERE id=$1`, id).Scan(&in.Name)
-		}
-		if _, err := s.DB.Exec(r.Context(), `UPDATE role SET name=$2, step=$3, rights=$4 WHERE id=$1`, id, in.Name, in.Step, rights); err != nil {
-			return err
-		}
-		_ = auditlog.Write(r.Context(), s.DB, u, "Users", "Role rights changed", in.Name, strings.Join(rights, ", "))
-		return httpjson.OK(w, map[string]int64{"id": id})
-	}
-	if len(in.Name) < 3 {
-		return httpjson.Bad("Enter the role name.")
-	}
-	if len(rights) == 0 && in.Step != "" {
-		return httpjson.Bad(`Tick at least one right, or choose "No step in the flow".`)
-	}
-	var dup bool
-	_ = s.DB.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM role WHERE norm_key(name)=norm_key($1))`, in.Name).Scan(&dup)
-	if dup {
-		return httpjson.Bad("A role with this name already exists.")
-	}
-	var n int
-	_ = s.DB.QueryRow(r.Context(), `SELECT count(*)+1 FROM role WHERE is_custom`).Scan(&n)
-	if err := s.DB.QueryRow(r.Context(), `INSERT INTO role(code,name,step,rights,is_custom,created_by) VALUES ($1,$2,$3,$4,TRUE,$5) RETURNING id`,
-		fmt.Sprintf("custom%d", n), in.Name, in.Step, rights, u.ID).Scan(&id); err != nil {
-		return err
-	}
-	_ = auditlog.Write(r.Context(), s.DB, u, "Users", "Role created", in.Name, "works as "+textclean.Default(in.Step, "view only")+" · "+strings.Join(rights, ", "))
-	return httpjson.OK(w, map[string]int64{"id": id})
 }

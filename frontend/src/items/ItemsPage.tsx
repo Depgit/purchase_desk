@@ -11,6 +11,7 @@ import { Errors } from '../ui/Errors'
 import { Checks, Field } from '../ui/Field'
 import { Modal } from '../ui/Modal'
 import { useAction } from '../ui/useAction'
+import { useScreen } from '../screenaccess/screen'
 
 export interface SKU {
   id: number; code: string; sub_category_id: number; sub_category: string; category_id: number; category: string; brand_id: number; brand: string
@@ -21,10 +22,11 @@ export interface SKU {
 export function ItemsPage() {
   const l = useLookups()
   const { hasRight } = useSession()
+  const sc = useScreen('items')
   const { data, reload } = useApi<SKU[]>('/skus')
   const [edit, setEdit] = useState<SKU | 'new' | null>(null)
   const [upload, setUpload] = useState(false)
-  const ed = hasRight('masters')
+  const ed = sc.edit && hasRight('masters')
   const scope = (s: SKU) => s.scope === 'all' ? 'All properties' : [...s.cluster_ids.map((c) => l?.clusters.find((x) => x.id === c)?.name + ' cluster'), s.property_ids.length ? `${s.property_ids.length} properties` : ''].filter(Boolean).join(' + ')
   return (
     <>

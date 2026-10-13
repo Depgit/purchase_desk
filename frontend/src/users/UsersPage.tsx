@@ -1,6 +1,7 @@
-// Who can sign in, with which roles, for which properties and categories; and the rights each role carries.
-// The System Admin manages everyone and can let a user add users of chosen roles; such a user sees and edits only
-// the users they added, with those roles, inside their own property access (the server checks the same).
+// Users & Rights, in three tabs. People: who can sign in, with which roles, for which properties and categories.
+// Roles: each role's action rights, screen levels, reports and special rights (RolesTab). Access by property: people
+// against properties, with the role each holds there (AccessGrid). A role with the create-users right adds users,
+// giving only the roles it allows, and sees and edits only the users it added; the server checks the same.
 import { useState } from 'react'
 import { post, put } from '../api/client'
 import { refreshLookups, useLookups } from '../api/lookups'
@@ -13,40 +14,44 @@ import { Errors } from '../ui/Errors'
 import { Checks, Field } from '../ui/Field'
 import { Modal } from '../ui/Modal'
 import { Pill } from '../ui/Pill'
+import { Tabs } from '../ui/Tabs'
 import { useAction } from '../ui/useAction'
-import { useToast } from '../ui/Toast'
+import { AccessGrid } from './AccessGrid'
+import { RolesTab } from './RolesTab'
 
 interface RoleGrant { role_id: number; role_name?: string; step?: string; scope: string; cluster_ids: number[]; property_ids: number[]; category_ids: number[] }
 interface User { id: number; name: string; email: string; mobile: string; department: string; has_password: boolean; active: boolean; roles: RoleGrant[]
-  creatable_roles: number[]; created_by: number; can_edit: boolean }
+  created_by: number; can_edit: boolean }
 
-const RIGHTS: [string, string][] = [['raise', 'Raise request or bill'], ['approve', 'Approve'], ['issue_po', 'Issue PO'], ['receive', 'Receive or dispatch goods'], ['match', 'Match invoice'], ['pay', 'Payment and Zoho'], ['masters', 'Edit masters'], ['upload', 'Upload opening and bulk data']]
-const STEPS: [string, string][] = [['cc', 'Cost Controller: approves requests'], ['l2', 'Cluster Manager: approves event requests and bills'], ['preop', 'Pre-opening Team: approves warehouse and pre-opening orders'],
-  ['purchase', 'Purchase Team: issues POs'], ['store', 'Receiving / Store: receives goods'], ['wh', 'Warehouse Manager: dispatches and receives'], ['ap', 'Accounts Payable: matches invoices'],
-  ['finance', 'Finance: approves payment'], ['staff', 'Property staff: raises requests'], ['l1', 'Property Manager: raises requests'], ['', 'No step in the flow: view and reports only']]
+type Tab = 'people' | 'roles' | 'access'
 
 export function UsersPage() {
+  const [tab, setTab] = useState<Tab>('people')
+  return (
+    <>
+      <div className="head"><div><h1>Users &amp; Rights</h1><p className="sub">People sign in with email or mobile. A role says what someone can do and see: its action rights, a level on every screen (no access, view or edit) and its reports. Access by property says where.</p></div></div>
+      <Tabs value={tab} onChange={setTab} items={[['people', 'People'], ['roles', 'Roles'], ['access', 'Access by property']]} />
+      {tab === 'people' && <People />}
+      {tab === 'roles' && <RolesTab />}
+      {tab === 'access' && <AccessGrid />}
+    </>
+  )
+}
+
+function People() {
   const { me } = useSession()
   const l = useLookups()
   const { data, reload } = useApi<User[]>('/users')
   const [edit, setEdit] = useState<User | 'new' | null>(null)
-  const [newRole, setNewRole] = useState(false)
   const [upload, setUpload] = useState(false)
-  const toast = useToast()
   const admin = !!me?.is_admin
-  const mine = me?.creatable_roles || []
-  const adds = admin || mine.length > 0
+  const adds = admin || !!me?.adds_users
   const roleNames = (ids: number[]) => ids.map((id) => l?.roles.find((r) => r.id === id)?.name).filter(Boolean).join(', ')
   const scopeText = (g: RoleGrant) => g.scope === 'all' ? 'All properties' : g.scope === 'clusters' ? g.cluster_ids.map((c) => l?.clusters.find((x) => x.id === c)?.name).join(', ') : g.property_ids.map((p) => l?.properties.find((x) => x.id === p)?.code).join(', ')
-  const toggleRight = async (r: { id: number; name: string; step: string; rights: string[] }, right: string) => {
-    const rights = r.rights.includes(right) ? r.rights.filter((x) => x !== right) : [...r.rights, right]
-    try { await put('/roles/' + r.id, { name: r.name, step: r.step, rights }); toast(`${r.name}: ${right} ${rights.includes(right) ? 'allowed' : 'removed'}`); refreshLookups() } catch (e: any) { toast(e.message, true) }
-  }
   return (
     <>
-      <div className="head"><div><h1>Users &amp; Rights</h1><p className="sub">Users sign in with email or mobile. A user can hold several roles, each with its own property and category scope. Nobody is deleted; inactive users cannot sign in.</p>
-        {!admin && mine.length > 0 && <p className="note">You can add users as {roleNames(mine)}, for the properties you have access to. You can edit or deactivate only the users you added.</p>}</div>
-        <div className="acts">{admin && <button className="btn ghost" onClick={() => setUpload(true)}>Bulk upload / edit users</button>}{adds && <button className="btn" onClick={() => setEdit('new')}>+ Add user</button>}</div></div>
+      {!admin && adds && <p className="note">Your role lets you add people as {roleNames(me?.user_roles || []) || 'no role yet'}, {me?.user_scope_any ? 'at any property' : 'for the properties you have access to'}. You can edit or deactivate only the people you added.</p>}
+      <div className="tools" style={{ justifyContent: 'flex-end' }}>{admin && <button className="btn ghost" onClick={() => setUpload(true)}>Bulk upload / edit users</button>}{adds && <button className="btn" onClick={() => setEdit('new')}>+ Add user</button>}</div>
       <DataTable screen="users" rows={data || []} rowKey={(u) => u.id} dim={(u) => !u.active} search={(u) => [u.name, u.email, u.mobile, u.department, ...u.roles.map((r) => r.role_name || '')].join(' ')}
         filters={[{ id: 'role', label: 'Role', multi: true, options: [['', 'All roles'], ...(l?.roles || []).map((r) => [String(r.id), r.name] as [string, string])], test: (u, v) => u.roles.some((g) => String(g.role_id) === v) }]}
         columns={[
@@ -55,20 +60,11 @@ export function UsersPage() {
           { key: 'dep', label: 'Department', render: (u) => u.department, csv: (u) => u.department },
           { key: 'roles', label: 'Roles and access', render: (u) => u.roles.map((g) => <div key={g.role_id}>{g.role_name} <span className="hint">· {scopeText(g)}{g.category_ids.length ? ' · ' + g.category_ids.map((c) => l?.categories.find((x) => x.id === c)?.name).join(', ') : ''}</span></div>),
             csv: (u) => u.roles.map((g) => g.role_name).join(' + ') },
-          { key: 'adds', label: 'Can add users as', render: (u) => roleNames(u.creatable_roles) || '—', csv: (u) => roleNames(u.creatable_roles) },
           { key: 'pwd', label: 'Password', render: (u) => u.has_password ? 'Set' : <Pill tone="warn">Code only</Pill> },
           { key: 'status', label: 'Status', render: (u) => <ActiveToggle kind="user" id={u.id} name={u.name} active={u.active} onDone={reload} canEdit={u.can_edit && u.id !== me?.id} />, csv: (u) => u.active ? 'Active' : 'Inactive' },
           { key: 'edit', label: '', render: (u) => u.can_edit ? <button className="link" onClick={() => setEdit(u)}>Edit</button> : null },
         ]} csvName="users" />
-      <section className="card flush"><div className="shead" style={{ background: 'none', borderTop: 0 }}><div style={{ flex: 1 }}><h2>Rights by role</h2>
-        <p className="sub">{admin ? 'Tick or untick a right and it applies at once. A right works only at the step the role sits at.' : 'Only the System Admin can change rights or create roles.'}</p></div>
-        {admin && <button className="btn" onClick={() => setNewRole(true)}>+ Create role</button>}</div>
-        <div className="scroll"><table><thead><tr><th>Role</th><th>Step</th>{RIGHTS.map(([, n]) => <th key={n}>{n}</th>)}<th className="r">Users</th><th></th></tr></thead>
-          <tbody>{(l?.roles || []).map((r) => <tr key={r.id} className={r.active ? '' : 'dim'}><td className="id">{r.name}{r.is_custom && <> <Pill>Custom</Pill></>}</td><td>{r.step || '—'}</td>
-            {RIGHTS.map(([k]) => <td key={k}>{admin && r.step !== 'admin' ? <input type="checkbox" checked={r.rights.includes(k)} onChange={() => toggleRight(r, k)} aria-label={`${r.name}: ${k}`} /> : r.rights.includes(k) ? <Pill tone="ok">Yes</Pill> : <span className="sub">—</span>}</td>)}
-            <td className="r">{r.users}</td><td>{r.is_custom && <ActiveToggle kind="role" id={r.id} name={r.name} active={r.active} onDone={refreshLookups} />}</td></tr>)}</tbody></table></div></section>
       {edit && <UserModal u={edit === 'new' ? null : edit} onClose={() => setEdit(null)} onDone={() => { setEdit(null); reload(); refreshLookups() }} />}
-      {newRole && <RoleModal onClose={() => setNewRole(false)} />}
       {upload && <UploadModal kind="users" title="Bulk upload or edit users" onClose={() => setUpload(false)} onDone={() => { reload(); refreshLookups() }} />}
     </>
   )
@@ -78,18 +74,18 @@ function UserModal({ u, onClose, onDone }: { u: User | null; onClose: () => void
   const l = useLookups()
   const { me } = useSession()
   const admin = !!me?.is_admin
-  // Someone the Admin lets add users gives only their allowed roles, and only property access inside their own.
-  const mine = me?.creatable_roles || []
+  // Someone whose role adds users gives only the roles it allows, and property access inside their own unless their
+  // role allows any property.
+  const mine = me?.user_roles || []
   const roleOpts = (l?.roles || []).filter((r) => r.active && (admin || mine.includes(r.id) || u?.roles.some((g) => g.role_id === r.id)))
-  const myAll = admin || !!me?.roles.some((g) => g.scope === 'all')
+  const myAll = admin || !!me?.user_scope_any || !!me?.roles.some((g) => g.scope === 'all')
   const myClusters = me?.roles.filter((g) => g.scope === 'clusters').flatMap((g) => g.cluster_ids) || []
   const myProps = me?.roles.filter((g) => g.scope === 'properties').flatMap((g) => g.property_ids) || []
   const clusterOpts = (l?.clusters || []).filter((c) => myAll || myClusters.includes(c.id))
   const propOpts = (l?.properties || []).filter((p) => p.active && (myAll || myClusters.includes(p.cluster_id) || myProps.includes(p.id)))
   const firstRole = admin ? l?.roles.find((r) => r.code === 'staff')?.id : roleOpts[0]?.id
   const [f, setF] = useState({ name: u?.name || '', email: u?.email || '', mobile: u?.mobile || '', department: u?.department || '', password: '',
-    roles: u?.roles.map((g) => ({ ...g })) || [{ role_id: firstRole || 0, scope: 'properties', cluster_ids: [], property_ids: [], category_ids: [] } as RoleGrant],
-    creatable_roles: u?.creatable_roles || [] })
+    roles: u?.roles.map((g) => ({ ...g })) || [{ role_id: firstRole || 0, scope: 'properties', cluster_ids: [], property_ids: [], category_ids: [] } as RoleGrant] })
   const a = useAction()
   const setRole = (i: number, patch: Partial<RoleGrant>) => setF({ ...f, roles: f.roles.map((g, j) => j === i ? { ...g, ...patch } : g) })
   return (
@@ -103,6 +99,7 @@ function UserModal({ u, onClose, onDone }: { u: User | null; onClose: () => void
           <input type="password" autoComplete="new-password" value={f.password} onChange={(e) => setF({ ...f, password: e.target.value })} /></Field>
       </div>
       <h3>Roles</h3>
+      <p className="hint">Each role has its own property access. To give a different role at another property, add another role here, or use Access by property.</p>
       {f.roles.map((g, i) => (
         <div key={i} className="xpbox">
           <div className="grid2">
@@ -117,32 +114,9 @@ function UserModal({ u, onClose, onDone }: { u: User | null; onClose: () => void
           {f.roles.length > 1 && <div><button className="link" onClick={() => setF({ ...f, roles: f.roles.filter((_, j) => j !== i) })}>Remove this role</button></div>}
         </div>))}
       <div><button className="btn ghost" onClick={() => setF({ ...f, roles: [...f.roles, { role_id: roleOpts[0]?.id || 0, scope: myAll ? 'all' : 'properties', cluster_ids: [], property_ids: [], category_ids: [] }] })}>+ Add another role</button></div>
-      {admin && <><h3>Can add users</h3>
-        <div className="field"><span>Roles this user may give when adding users (leave all unticked if they should not add users)</span>
-          <Checks value={f.creatable_roles} onChange={(v) => setF({ ...f, creatable_roles: v })} options={(l?.roles || []).filter((r) => r.active && r.step !== 'admin').map((r) => [r.id, r.name])} />
-          <span className="hint">They then see an Add user button with only these roles, for properties inside their own access, and can edit or deactivate only the users they add.</span></div></>}
       <Errors list={a.errors} />
       <div className="btns"><button className="btn ghost" onClick={onClose}>Cancel</button>
-        <button className="btn" disabled={a.busy} onClick={() => {
-          const body = admin ? f : { ...f, creatable_roles: undefined }
-          a.run(() => u ? put('/users/' + u.id, body) : post('/users', body), () => { onDone(); return 'User saved' })
-        }}>Save user</button></div>
-    </Modal>
-  )
-}
-
-function RoleModal({ onClose }: { onClose: () => void }) {
-  const [f, setF] = useState({ name: '', step: 'cc', rights: ['approve'] })
-  const a = useAction()
-  return (
-    <Modal title="Create role" onClose={onClose}>
-      <p className="sub">Give the role a name, say where it sits in the flow, and tick its rights.</p>
-      <Field label="Role name"><input value={f.name} onChange={(e) => setF({ ...f, name: e.target.value })} placeholder="e.g. Regional Cost Controller" /></Field>
-      <Field label="Works in the flow as" hint="Decides which documents wait for this role."><select value={f.step} onChange={(e) => setF({ ...f, step: e.target.value })}>{STEPS.map(([k, v]) => <option key={k} value={k}>{v}</option>)}</select></Field>
-      <div className="field"><span>Rights</span><Checks value={f.rights} onChange={(v) => setF({ ...f, rights: v })} options={RIGHTS} /></div>
-      <Errors list={a.errors} />
-      <div className="btns"><button className="btn ghost" onClick={onClose}>Cancel</button>
-        <button className="btn" disabled={a.busy} onClick={() => a.run(() => post('/roles', f), () => { refreshLookups(); onClose(); return f.name + ' created' })}>Create role</button></div>
+        <button className="btn" disabled={a.busy} onClick={() => a.run(() => u ? put('/users/' + u.id, f) : post('/users', f), () => { onDone(); return 'User saved' })}>Save user</button></div>
     </Modal>
   )
 }

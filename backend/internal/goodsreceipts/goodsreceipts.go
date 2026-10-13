@@ -188,14 +188,17 @@ func (s *Service) receive(w http.ResponseWriter, r *http.Request) error {
 		if _, err := tx.Exec(r.Context(), `UPDATE document SET status=$2, updated_at=now() WHERE id=$1`, id, status); err != nil {
 			return err
 		}
-		if status == documents.Received {
-			if err := advances.CancelUnpaid(r.Context(), tx, u, id, d.Number, "Nothing more is due on "+d.PONumber); err != nil {
-				return err
-			}
-		}
 		msg = grn + " saved, invoice " + in.InvoiceNumber + " entered as voucher " + voucher
 		if status == documents.POIssued {
 			msg += ". Balance stays open on " + d.PONumber
+		}
+		// An advance on this PO that Finance has not settled stays with Finance: the invoice's payment approval waits for it.
+		wait, err := advances.Waiting(r.Context(), tx, []int64{id})
+		if err != nil {
+			return err
+		}
+		if w := wait[id]; len(w) > 0 {
+			msg += ". " + strings.Join(w, "; ") + ": this invoice's payment waits for Finance to settle it"
 		}
 		return auditlog.Doc(r.Context(), tx, u, g.Name, d.ID, d.Number, "Purchases", fmt.Sprintf("Goods received (%s, delivery %d, invoice %s, voucher %s)", grn, deliveryNo, in.InvoiceNumber, voucher), note)
 	})

@@ -1,5 +1,6 @@
 // The list of screens and their addresses.
-import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom'
+import type { ReactNode } from 'react'
+import { BrowserRouter, Navigate, Route, Routes, useParams } from 'react-router-dom'
 import { ActivityLogPage } from '../activitylog/ActivityLogPage'
 import { ApprovalsPage } from '../approvals/ApprovalsPage'
 import { LoginPage } from '../auth/LoginPage'
@@ -38,6 +39,7 @@ import { VendorSheetsPage } from '../vendorsheets/VendorSheetsPage'
 import { ReportsPage } from '../reports/ReportsPage'
 import { MyWorkPage } from '../mywork/MyWorkPage'
 import { PHASE, PhaseGate, usePhase } from '../releasephase/phase'
+import { ScreenGate } from '../screenaccess/screen'
 
 function Screens() {
   const { me, ready } = useSession()
@@ -47,39 +49,39 @@ function Screens() {
     <Shell>
       <Routes>
         <Route path="/" element={<Home />} />
-        <Route path="/approvals" element={<ApprovalsPage />} />
-        <Route path="/requests" element={<RequestsPage />} />
-        <Route path="/requests/new" element={<NewRequestPage />} />
-        <Route path="/requests/:id/edit" element={<NewRequestPage />} />
+        <Route path="/approvals" element={<ScreenGate screen="approvals"><ApprovalsPage /></ScreenGate>} />
+        <Route path="/requests" element={<ScreenGate screen="requests"><RequestsPage /></ScreenGate>} />
+        <Route path="/requests/new" element={<ScreenGate screen="requests"><NewRequestPage /></ScreenGate>} />
+        <Route path="/requests/:id/edit" element={<ScreenGate screen="requests"><NewRequestPage /></ScreenGate>} />
         <Route path="/documents/:id" element={<DocumentPage />} />
-        <Route path="/purchase-orders" element={<PurchaseOrdersPage />} />
-        <Route path="/goods-receipts" element={<GoodsReceiptsPage />} />
-        <Route path="/invoices" element={<InvoicesPage />} />
+        <Route path="/purchase-orders" element={<ScreenGate screen="purchase_orders"><PurchaseOrdersPage /></ScreenGate>} />
+        <Route path="/goods-receipts" element={<ScreenGate screen="goods_receipts"><GoodsReceiptsPage /></ScreenGate>} />
+        <Route path="/invoices" element={<ScreenGate screen="invoices"><InvoicesPage /></ScreenGate>} />
         <Route path="/invoices/:id" element={<InvoicePage />} />
-        <Route path="/payments" element={<PaymentsPage />} />
-        <Route path="/bills/new/:section" element={<PhaseGate phase={PHASE.bills}><NewBillPage /></PhaseGate>} />
-        <Route path="/bills/:section" element={<PhaseGate phase={PHASE.bills}><BillsPage /></PhaseGate>} />
-        <Route path="/vendors" element={<VendorsPage />} />
-        <Route path="/vendors/new" element={<VendorForm />} />
-        <Route path="/vendors/:id/edit" element={<VendorForm />} />
-        <Route path="/items" element={<ItemsPage />} />
-        <Route path="/vendor-mapping" element={<VendorMappingPage />} />
-        <Route path="/settings/properties" element={<PropertiesPage />} />
-        <Route path="/settings/cities" element={<CitiesClustersPage />} />
-        <Route path="/settings/budgets" element={<PhaseGate phase={PHASE.budgets}><BudgetsPage /></PhaseGate>} />
-        <Route path="/settings/bill-types" element={<PhaseGate phase={PHASE.bills}><BillTypesPage /></PhaseGate>} />
-        <Route path="/settings/item-setup" element={<ItemSetupPage />} />
-        <Route path="/settings/users" element={<UsersPage />} />
-        <Route path="/settings/flow" element={<FlowSettingsPage />} />
-        <Route path="/settings/templates" element={<TemplatesPage />} />
-        <Route path="/settings/zoho" element={<PhaseGate phase={PHASE.zoho}><ZohoBooksPage /></PhaseGate>} />
-        <Route path="/settings/activity" element={<ActivityLogPage />} />
-        <Route path="/corporate" element={<PhaseGate phase={PHASE.corporate}><CorporatePage /></PhaseGate>} />
-        <Route path="/corporate/new/:kind" element={<PhaseGate phase={PHASE.corporate}><NewCorporatePage /></PhaseGate>} />
-        <Route path="/settings/corporate" element={<PhaseGate phase={PHASE.corporate}><CorporateSetupPage /></PhaseGate>} />
-        <Route path="/warehouse" element={<PhaseGate phase={PHASE.warehouse}><WarehousePage /></PhaseGate>} />
-        <Route path="/vendor-sheets" element={<PhaseGate phase={PHASE.sheets}><VendorSheetsPage /></PhaseGate>} />
-        <Route path="/reports" element={<PhaseGate phase={PHASE.reports}><ReportsPage /></PhaseGate>} />
+        <Route path="/payments" element={<ScreenGate screen="payments"><PaymentsPage /></ScreenGate>} />
+        <Route path="/bills/new/:section" element={<BillsGate><PhaseGate phase={PHASE.bills}><NewBillPage /></PhaseGate></BillsGate>} />
+        <Route path="/bills/:section" element={<BillsGate><PhaseGate phase={PHASE.bills}><BillsPage /></PhaseGate></BillsGate>} />
+        <Route path="/vendors" element={<ScreenGate screen="vendors"><VendorsPage /></ScreenGate>} />
+        <Route path="/vendors/new" element={<ScreenGate screen="vendors"><VendorForm /></ScreenGate>} />
+        <Route path="/vendors/:id/edit" element={<ScreenGate screen="vendors"><VendorForm /></ScreenGate>} />
+        <Route path="/items" element={<ScreenGate screen="items"><ItemsPage /></ScreenGate>} />
+        <Route path="/vendor-mapping" element={<ScreenGate screen="vendor_mapping"><VendorMappingPage /></ScreenGate>} />
+        <Route path="/settings/properties" element={<ScreenGate screen="properties"><PropertiesPage /></ScreenGate>} />
+        <Route path="/settings/cities" element={<ScreenGate screen="cities"><CitiesClustersPage /></ScreenGate>} />
+        <Route path="/settings/budgets" element={<ScreenGate screen="budgets"><PhaseGate phase={PHASE.budgets}><BudgetsPage /></PhaseGate></ScreenGate>} />
+        <Route path="/settings/bill-types" element={<ScreenGate screen="bill_types"><PhaseGate phase={PHASE.bills}><BillTypesPage /></PhaseGate></ScreenGate>} />
+        <Route path="/settings/item-setup" element={<ScreenGate screen="item_setup"><ItemSetupPage /></ScreenGate>} />
+        <Route path="/settings/users" element={<ScreenGate screen="users"><UsersPage /></ScreenGate>} />
+        <Route path="/settings/flow" element={<ScreenGate screen="flow"><FlowSettingsPage /></ScreenGate>} />
+        <Route path="/settings/templates" element={<ScreenGate screen="templates"><TemplatesPage /></ScreenGate>} />
+        <Route path="/settings/zoho" element={<ScreenGate screen="zoho"><PhaseGate phase={PHASE.zoho}><ZohoBooksPage /></PhaseGate></ScreenGate>} />
+        <Route path="/settings/activity" element={<ScreenGate screen="activity"><ActivityLogPage /></ScreenGate>} />
+        <Route path="/corporate" element={<ScreenGate screen="corporate"><PhaseGate phase={PHASE.corporate}><CorporatePage /></PhaseGate></ScreenGate>} />
+        <Route path="/corporate/new/:kind" element={<ScreenGate screen="corporate"><PhaseGate phase={PHASE.corporate}><NewCorporatePage /></PhaseGate></ScreenGate>} />
+        <Route path="/settings/corporate" element={<ScreenGate screen="corporate_setup"><PhaseGate phase={PHASE.corporate}><CorporateSetupPage /></PhaseGate></ScreenGate>} />
+        <Route path="/warehouse" element={<ScreenGate screen="warehouse"><PhaseGate phase={PHASE.warehouse}><WarehousePage /></PhaseGate></ScreenGate>} />
+        <Route path="/vendor-sheets" element={<ScreenGate screen="vendor_sheets"><PhaseGate phase={PHASE.sheets}><VendorSheetsPage /></PhaseGate></ScreenGate>} />
+        <Route path="/reports" element={<ScreenGate screen="reports"><PhaseGate phase={PHASE.reports}><ReportsPage /></PhaseGate></ScreenGate>} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
     </Shell>
@@ -102,4 +104,10 @@ export function App() {
 function Home() {
   const { on } = usePhase()
   return on(PHASE.dashboard) ? <DashboardPage /> : <MyWorkPage />
+}
+
+// Utility and AMC bills are two screens on one route; the section in the address says which.
+function BillsGate({ children }: { children: ReactNode }) {
+  const { section } = useParams()
+  return <ScreenGate screen={section === 'amc' ? 'bills_amc' : 'bills_utility'}>{children}</ScreenGate>
 }

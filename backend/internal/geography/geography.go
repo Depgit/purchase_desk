@@ -16,6 +16,7 @@ import (
 	"purchasedesk/internal/auditlog"
 	"purchasedesk/internal/database"
 	"purchasedesk/internal/httpjson"
+	"purchasedesk/internal/indiantax"
 	"purchasedesk/internal/releasephase"
 	"purchasedesk/internal/textclean"
 )
@@ -64,24 +65,52 @@ func (s *Service) listCities(w http.ResponseWriter, r *http.Request) error {
 	return httpjson.OK(w, out)
 }
 
+// CityInput is a city from the form or a bulk upload.
+type CityInput struct {
+	Name      string `json:"name"`
+	StateCode string `json:"state_code"`
+}
+
+// ValidateCity tidies a city and lists what is wrong with it; id is the city being changed (0 for a new one).
+func ValidateCity(ctx context.Context, q database.Q, in *CityInput, id int64) []string {
+	in.Name, in.StateCode = textclean.Clean(in.Name), strings.ToUpper(strings.TrimSpace(in.StateCode))
+	errs := []string{}
+	if len(in.Name) < 2 {
+		errs = append(errs, "Enter the city name.")
+	}
+	if indiantax.StateName(in.StateCode) == "" {
+		errs = append(errs, "Enter the 2-letter state code, for example HR or DL.")
+	}
+	var dup bool
+	_ = q.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM city WHERE norm_key(name)=norm_key($1) AND id<>$2)`, in.Name, id).Scan(&dup)
+	if dup {
+		errs = append(errs, "This city already exists.")
+	}
+	return errs
+}
+
+// SaveCity adds a checked city (id 0) or changes one, and logs it.
+func SaveCity(ctx context.Context, q database.Q, u *access.User, id int64, in CityInput) (int64, error) {
+	if id == 0 {
+		if err := q.QueryRow(ctx, `INSERT INTO city(name,state_code,created_by) VALUES ($1,$2,$3) RETURNING id`, in.Name, in.StateCode, u.ID).Scan(&id); err != nil {
+			return 0, err
+		}
+		return id, auditlog.Write(ctx, q, u, "Properties", "City added", in.Name, "State "+in.StateCode)
+	}
+	if _, err := q.Exec(ctx, `UPDATE city SET name=$2, state_code=$3 WHERE id=$1`, id, in.Name, in.StateCode); err != nil {
+		return 0, err
+	}
+	return id, auditlog.Write(ctx, q, u, "Properties", "City changed", in.Name, "State "+in.StateCode)
+}
+
 func (s *Service) saveCity(w http.ResponseWriter, r *http.Request) error {
 	p := access.From(r)
 	if err := access.NeedRight(p, access.Masters, "edit masters"); err != nil {
 		return err
 	}
-	var in struct {
-		Name      string `json:"name"`
-		StateCode string `json:"state_code"`
-	}
+	var in CityInput
 	if err := httpjson.Decode(r, &in); err != nil {
 		return err
-	}
-	in.Name, in.StateCode = textclean.Clean(in.Name), strings.ToUpper(strings.TrimSpace(in.StateCode))
-	if len(in.Name) < 2 {
-		return httpjson.Bad("Enter the city name.")
-	}
-	if len(in.StateCode) != 2 {
-		return httpjson.Bad("Enter the 2-letter state code, for example HR or DL.")
 	}
 	id := int64(0)
 	if chi.URLParam(r, "id") != "" {
@@ -90,22 +119,12 @@ func (s *Service) saveCity(w http.ResponseWriter, r *http.Request) error {
 			return err
 		}
 	}
-	var dup bool
-	_ = s.DB.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM city WHERE norm_key(name)=norm_key($1) AND id<>$2)`, in.Name, id).Scan(&dup)
-	if dup {
-		return httpjson.Bad("This city already exists.")
+	if errs := ValidateCity(r.Context(), s.DB, &in, id); len(errs) > 0 {
+		return httpjson.Invalid(errs)
 	}
-	if id == 0 {
-		err := s.DB.QueryRow(r.Context(), `INSERT INTO city(name,state_code,created_by) VALUES ($1,$2,$3) RETURNING id`, in.Name, in.StateCode, p.ID).Scan(&id)
-		if err != nil {
-			return err
-		}
-		_ = auditlog.Write(r.Context(), s.DB, p, "Properties", "City added", in.Name, "State "+in.StateCode)
-	} else {
-		if _, err := s.DB.Exec(r.Context(), `UPDATE city SET name=$2, state_code=$3 WHERE id=$1`, id, in.Name, in.StateCode); err != nil {
-			return err
-		}
-		_ = auditlog.Write(r.Context(), s.DB, p, "Properties", "City changed", in.Name, "State "+in.StateCode)
+	id, err := SaveCity(r.Context(), s.DB, p, id, in)
+	if err != nil {
+		return err
 	}
 	return httpjson.OK(w, map[string]int64{"id": id})
 }
@@ -139,25 +158,64 @@ func (s *Service) listClusters(w http.ResponseWriter, r *http.Request) error {
 	return httpjson.OK(w, out)
 }
 
+// ClusterInput is a cluster from the form or a bulk upload. ManagerID is the Cluster Manager, nil when not set.
+type ClusterInput struct {
+	Name      string `json:"name"`
+	CityID    int64  `json:"city_id"`
+	ManagerID *int64 `json:"manager_id"`
+}
+
+// ValidateCluster tidies a cluster and lists what is wrong with it; id is the cluster being changed (0 for a new one).
+func ValidateCluster(ctx context.Context, q database.Q, in *ClusterInput, id int64) []string {
+	in.Name = textclean.Clean(in.Name)
+	if in.ManagerID != nil && *in.ManagerID == 0 {
+		in.ManagerID = nil
+	}
+	errs := []string{}
+	if len(in.Name) < 3 {
+		errs = append(errs, "Enter the cluster name.")
+	}
+	var dup, city bool
+	_ = q.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM cluster WHERE norm_key(name)=norm_key($1) AND id<>$2)`, in.Name, id).Scan(&dup)
+	if dup {
+		errs = append(errs, "A cluster with this name already exists.")
+	}
+	_ = q.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM city WHERE id=$1 AND active)`, in.CityID).Scan(&city)
+	if !city {
+		errs = append(errs, "Choose the cluster's city.")
+	}
+	if in.ManagerID != nil {
+		var ok bool
+		_ = q.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM user_role ur JOIN role r ON r.id=ur.role_id JOIN app_user u ON u.id=ur.user_id WHERE ur.user_id=$1 AND r.step='l2' AND u.active)`, *in.ManagerID).Scan(&ok)
+		if !ok {
+			errs = append(errs, "The Cluster Manager must be an active user with the Cluster Manager role.")
+		}
+	}
+	return errs
+}
+
+// SaveCluster adds a checked cluster (id 0) or changes one, and logs it.
+func SaveCluster(ctx context.Context, q database.Q, u *access.User, id int64, in ClusterInput) (int64, error) {
+	if id == 0 {
+		if err := q.QueryRow(ctx, `INSERT INTO cluster(name,city_id,manager_id,created_by) VALUES ($1,$2,$3,$4) RETURNING id`, in.Name, in.CityID, in.ManagerID, u.ID).Scan(&id); err != nil {
+			return 0, err
+		}
+		return id, auditlog.Write(ctx, q, u, "Properties", "Cluster added", in.Name, "")
+	}
+	if _, err := q.Exec(ctx, `UPDATE cluster SET name=$2, city_id=$3, manager_id=$4 WHERE id=$1`, id, in.Name, in.CityID, in.ManagerID); err != nil {
+		return 0, err
+	}
+	return id, auditlog.Write(ctx, q, u, "Properties", "Cluster changed", in.Name, "")
+}
+
 func (s *Service) saveCluster(w http.ResponseWriter, r *http.Request) error {
 	p := access.From(r)
 	if err := access.NeedRight(p, access.Masters, "edit masters"); err != nil {
 		return err
 	}
-	var in struct {
-		Name      string `json:"name"`
-		CityID    int64  `json:"city_id"`
-		ManagerID *int64 `json:"manager_id"`
-	}
+	var in ClusterInput
 	if err := httpjson.Decode(r, &in); err != nil {
 		return err
-	}
-	in.Name = textclean.Clean(in.Name)
-	if len(in.Name) < 3 {
-		return httpjson.Bad("Enter the cluster name.")
-	}
-	if in.ManagerID != nil && *in.ManagerID == 0 {
-		in.ManagerID = nil
 	}
 	id := int64(0)
 	if chi.URLParam(r, "id") != "" {
@@ -166,28 +224,12 @@ func (s *Service) saveCluster(w http.ResponseWriter, r *http.Request) error {
 			return err
 		}
 	}
-	var dup bool
-	_ = s.DB.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM cluster WHERE norm_key(name)=norm_key($1) AND id<>$2)`, in.Name, id).Scan(&dup)
-	if dup {
-		return httpjson.Bad("A cluster with this name already exists.")
+	if errs := ValidateCluster(r.Context(), s.DB, &in, id); len(errs) > 0 {
+		return httpjson.Invalid(errs)
 	}
-	if in.ManagerID != nil {
-		var ok bool
-		_ = s.DB.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM user_role ur JOIN role r ON r.id=ur.role_id WHERE ur.user_id=$1 AND r.step='l2')`, *in.ManagerID).Scan(&ok)
-		if !ok {
-			return httpjson.Bad("The Cluster Manager must be a user with the Cluster Manager role.")
-		}
-	}
-	if id == 0 {
-		if err := s.DB.QueryRow(r.Context(), `INSERT INTO cluster(name,city_id,manager_id,created_by) VALUES ($1,$2,$3,$4) RETURNING id`, in.Name, in.CityID, in.ManagerID, p.ID).Scan(&id); err != nil {
-			return err
-		}
-		_ = auditlog.Write(r.Context(), s.DB, p, "Properties", "Cluster added", in.Name, "")
-	} else {
-		if _, err := s.DB.Exec(r.Context(), `UPDATE cluster SET name=$2, city_id=$3, manager_id=$4 WHERE id=$1`, id, in.Name, in.CityID, in.ManagerID); err != nil {
-			return err
-		}
-		_ = auditlog.Write(r.Context(), s.DB, p, "Properties", "Cluster changed", in.Name, "")
+	id, err := SaveCluster(r.Context(), s.DB, p, id, in)
+	if err != nil {
+		return err
 	}
 	return httpjson.OK(w, map[string]int64{"id": id})
 }

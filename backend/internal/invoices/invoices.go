@@ -28,6 +28,7 @@ import (
 	"purchasedesk/internal/httpjson"
 	"purchasedesk/internal/money"
 	"purchasedesk/internal/releasephase"
+	"purchasedesk/internal/screens"
 	"purchasedesk/internal/textclean"
 )
 
@@ -92,6 +93,7 @@ type Invoice struct {
 	Difference    float64        `json:"difference"`
 	WithinTol     bool           `json:"within_tolerance"`
 	Held          []string       `json:"held"`
+	AdvanceWait   []string       `json:"advance_wait"`     // advances on the PO Finance has not settled: payment approval waits for them
 	TDS           float64        `json:"tds_amount"`       // tax deducted at source on service lines, on the value before GST
 	TDSSections   string         `json:"tds_sections"`     // the sections it falls under, for example "194C"
 	NetPayable    float64        `json:"net_payable"`      // what the vendor is paid: amount less TDS, less the advance adjusted
@@ -152,6 +154,7 @@ func scan(st flowsettings.Settings) func(pgx.CollectableRow) (Invoice, error) {
 		x.WithinTol = bill || abs(x.Difference) <= st.MatchTolPct/100*x.ReceivedValue
 		x.PayBy, x.MSMELimit = payBy(x, st)
 		x.Held = []string{}
+		x.AdvanceWait = []string{}
 		return x, nil
 	}
 }
@@ -205,6 +208,9 @@ func (s *Service) List(ctx context.Context, u *access.User, statuses []string, d
 	}
 	out, err := pgx.CollectRows(rows, scan(st))
 	if err != nil {
+		return nil, err
+	}
+	if err := withAdvanceWait(ctx, s.DB, out); err != nil {
 		return nil, err
 	}
 	if s.Held != nil {
@@ -273,8 +279,32 @@ func Load(ctx context.Context, q database.Q, id int64) (*Invoice, error) {
 	if err != nil {
 		return nil, err
 	}
-	x.AdvanceUses, err = advances.UsesForInvoice(ctx, q, id)
-	return &x, err
+	if x.AdvanceUses, err = advances.UsesForInvoice(ctx, q, id); err != nil {
+		return nil, err
+	}
+	one := []Invoice{x}
+	err = withAdvanceWait(ctx, q, one)
+	return &one[0], err
+}
+
+// withAdvanceWait marks invoices still before payment approval whose PO has an advance Finance has not settled.
+func withAdvanceWait(ctx context.Context, q database.Q, list []Invoice) error {
+	docs := []int64{}
+	for _, x := range list {
+		if x.Status == documents.InvReceived || x.Status == documents.InvMatched {
+			docs = append(docs, x.DocumentID)
+		}
+	}
+	wait, err := advances.Waiting(ctx, q, docs)
+	if err != nil {
+		return err
+	}
+	for i := range list {
+		if w := wait[list[i].DocumentID]; w != nil && (list[i].Status == documents.InvReceived || list[i].Status == documents.InvMatched) {
+			list[i].AdvanceWait = w
+		}
+	}
+	return nil
 }
 
 func (s *Service) get(w http.ResponseWriter, r *http.Request) error {
@@ -318,6 +348,10 @@ func lockInvoice(ctx context.Context, tx pgx.Tx, u *access.User, id int64, want,
 	g := u.Can(step, right, x.PropertyID, x.ClusterID, nil)
 	if g == nil {
 		return nil, nil, httpjson.Forbidden("This step belongs to %s.", documents.StepNames[step])
+	}
+	// Screen levels win over rights: matching needs edit on Invoices, payment on Payments, at the invoice's property.
+	if sc := map[string]string{access.Match: "invoices", access.Pay: "payments"}[right]; sc != "" && u.Level(sc, x.PropertyID, x.ClusterID) < screens.Edit {
+		return nil, nil, httpjson.Forbidden("Your role can only view %s at %s.", screens.Label(sc), x.Property)
 	}
 	return x, g, nil
 }
@@ -447,6 +481,16 @@ func approveOne(ctx context.Context, tx pgx.Tx, u *access.User, st flowsettings.
 	x, g, err := lockInvoice(ctx, tx, u, id, documents.InvMatched, "finance", access.Pay)
 	if err != nil {
 		return err
+	}
+	// An advance on the same PO that Finance has not paid yet must be settled first: once paid it is adjusted here;
+	// rejected or cancelled, it no longer holds the invoice. Otherwise the vendor could be paid twice.
+	wait, err := advances.Waiting(ctx, tx, []int64{x.DocumentID})
+	if err != nil {
+		return err
+	}
+	if w := wait[x.DocumentID]; len(w) > 0 {
+		return httpjson.Conflict("Invoice %s waits for the advance on %s: %s. Approve and pay the advance (Payments, Advances tab), or reject it, and then approve this payment.",
+			x.Number, x.PONumber, strings.Join(w, "; "))
 	}
 	adv, err := advances.Apply(ctx, tx, u, id, money.Round2(x.Amount-x.TDS), picks)
 	if err != nil {

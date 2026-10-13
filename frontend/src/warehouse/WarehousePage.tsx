@@ -17,6 +17,7 @@ import { Pill } from '../ui/Pill'
 import { useAction } from '../ui/useAction'
 import { useToast } from '../ui/Toast'
 import { ScheduleModal, type Partner } from './DispatchPanel'
+import { useScreen } from '../screenaccess/screen'
 
 interface Stock { sku_id: number; sku_code: string; item: string; brand: string; pack_size: string; sub_category: string; opening: number; purchased: number; issued: number; pilferage: number; in_transit: number; closing: number; min_level: number; rate: number; value: number; pilferage_value: number; status: string }
 type T = Doc & { status_label: string; short_lines: number; age_hours: number }
@@ -26,7 +27,8 @@ type Tab = 'stock' | 'dispatch' | 'schedule' | 'transit' | 'incoming' | 'moves' 
 export function WarehousePage() {
   const nav = useNavigate()
   const { hasStep, hasRight } = useSession()
-  const wh = hasStep('wh')
+  const sc = useScreen('warehouse')
+  const wh = sc.edit && hasStep('wh')
   const [tab, setTab] = useState<Tab>('stock')
   const stock = useApi<Stock[]>('/warehouse/stock')
   const tr = useApi<T[]>('/warehouse/transfers')

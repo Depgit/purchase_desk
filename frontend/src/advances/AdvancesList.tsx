@@ -20,15 +20,12 @@ export function AdvancesList({ onChange }: { onChange?: () => void }) {
       columns={[
         { key: 'no', label: 'Advance', render: (a) => a.number, csv: (a) => a.number },
         { key: 'po', label: 'PO', render: (a) => a.po_number, csv: (a) => a.po_number },
-        { key: 'vendor', label: 'Vendor', render: (a) => a.vendor, csv: (a) => a.vendor },
-        { key: 'property', label: 'Property', render: (a) => a.property, csv: (a) => a.property },
-        { key: 'amt', label: 'Advance', right: true, render: (a) => <>{inr(a.amount)}{a.pct ? <span className="hint"> · {a.pct}%</span> : null}</>, sort: (a) => a.amount, csv: (a) => a.amount },
-        { key: 'tds', label: 'TDS', right: true, render: (a) => a.tds_amount ? '− ' + inr(a.tds_amount) : '—', csv: (a) => a.tds_amount },
-        { key: 'pay', label: 'Pay the vendor', right: true, render: (a) => inr(a.pay_vendor), sort: (a) => a.pay_vendor, csv: (a) => a.pay_vendor },
-        { key: 'paid', label: 'Paid', render: (a) => a.paid_on ? <>{day(a.paid_on)} <span className="hint">{a.payment_ref}</span></> : '—', sort: (a) => a.paid_on, csv: (a) => a.paid_on ? `${a.paid_on} ${a.payment_ref}` : '' },
-        { key: 'adj', label: 'Adjusted', right: true, render: (a) => a.adjusted ? inr(a.adjusted) : '—', csv: (a) => a.adjusted },
-        { key: 'ref', label: 'Refunded', right: true, render: (a) => a.refunded ? inr(a.refunded) : '—', csv: (a) => a.refunded },
-        { key: 'open', label: 'Left to adjust', right: true, render: (a) => a.open ? inr(a.open) : '—', sort: (a) => a.open, csv: (a) => a.open },
+        { key: 'vendor', label: 'Vendor', render: (a) => <>{a.vendor}<br /><span className="hint">{a.property}</span></>, csv: (a) => `${a.vendor} · ${a.property}` },
+        { key: 'amt', label: 'Advance', right: true, render: (a) => <><span className="nowrap">{inr(a.amount)}</span>{a.pct ? <span className="hint"> · {a.pct}%</span> : null}
+          {a.tds_amount > 0 && <><br /><span className="hint nowrap">TDS {inr(a.tds_amount)} · vendor gets {inr(a.pay_vendor)}</span></>}</>, sort: (a) => a.amount, csv: (a) => a.amount },
+        { key: 'paid', label: 'Paid', render: (a) => a.paid_on ? <><span className="nowrap">{day(a.paid_on)}</span><br /><span className="hint">{a.payment_ref}</span></> : '—', sort: (a) => a.paid_on, csv: (a) => a.paid_on ? `${a.paid_on} ${a.payment_ref}` : '' },
+        { key: 'open', label: 'Used / left', right: true, render: (a) => a.status !== 'PAID' ? '—' : <><span className="nowrap"><b>{inr(a.open)}</b> left</span><br />
+          <span className="hint nowrap">{inr(a.adjusted)} adjusted{a.refunded ? ` · ${inr(a.refunded)} refunded` : ''}</span></>, sort: (a) => a.open, csv: (a) => a.open },
         { key: 'status', label: 'Status', render: (a) => <AdvanceStatus a={a} />, csv: (a) => a.status },
         { key: 'act', label: '', render: (a) => <span onClick={(e) => e.stopPropagation()}><AdvanceActions a={a} onDone={done} /></span> },
       ]} csvName="advances" />

@@ -55,21 +55,51 @@ var (
 		`SELECT t.name, o.name FROM zoho_tag_option o JOIN zoho_tag t ON t.tag_id=o.tag_id WHERE o.active AND t.active ORDER BY t.name, o.name`}
 )
 
+// The Vendor Mapping download carries every master a mapping depends on, read-only, so the file answers
+// "who supplies what, at which rate, where" on its own: vendors, items, current rates, properties, sub-categories and
+// clusters. Only the mapping sheet is uploaded.
+var (
+	refMapVendors = refSheet{"Ref - Vendors", []string{"vendor_code", "vendor_name", "vendor_type", "gstin", "city", "contact_person", "mobile", "email", "msme", "payment_terms", "supplies (sub-categories)", "bank_verified"},
+		`SELECT v.code, v.legal_name, v.vendor_type, coalesce(v.gstin,''), coalesce(v.city,''), coalesce(v.contact_person,''), coalesce(v.mobile,''), coalesce(v.email,''),
+		CASE WHEN v.msme THEN 'yes' ELSE 'no' END, v.payment_terms,
+		coalesce((SELECT string_agg(sc.name, '; ' ORDER BY sc.name) FROM vendor_sub_category x JOIN sub_category sc ON sc.id=x.sub_category_id WHERE x.vendor_id=v.id),''),
+		CASE WHEN v.bank_verified THEN 'yes' ELSE 'no' END
+		FROM vendor v WHERE v.active AND v.vendor_type IN ('goods','warehouse') ORDER BY v.code`}
+	refMapItems = refSheet{"Ref - Items", []string{"sku_code", "category", "sub_category", "brand", "item_name", "unit", "gst_percent", "hsn", "available_at", "tds_section"},
+		`SELECT k.code, c.name, sc.name, coalesce(b.name,''), k.item_name, ps.name, k.gst_pct::float8::text, k.hsn,
+		` + fmt.Sprintf(scopeSQL, "k.scope='all'", "k.cluster_ids", "k.property_ids") + `, coalesce(k.tds_section,'')
+		FROM sku k JOIN sub_category sc ON sc.id=k.sub_category_id JOIN category c ON c.id=sc.category_id LEFT JOIN brand b ON b.id=k.brand_id JOIN pack_size ps ON ps.id=k.pack_size_id
+		WHERE k.active ORDER BY k.code`}
+	refMapRates = refSheet{"Ref - Vendor rates", []string{"sku_code", "item", "unit", "vendor_code", "vendor_name", "rate_ex_gst", "gst_percent", "valid_from", "valid_to", "status"},
+		`SELECT k.code, concat_ws(' ', b.name, k.item_name), ps.name, v.code, v.legal_name, rc.rate::float8::text, rc.gst_pct::float8::text,
+		to_char(rc.valid_from,'YYYY-MM-DD'), to_char(rc.valid_to,'YYYY-MM-DD'),
+		CASE WHEN rc.valid_from > current_date THEN 'Starts later' WHEN rc.valid_to - current_date < 30 THEN 'Expiring soon' ELSE 'Active' END
+		FROM rate_card rc JOIN vendor v ON v.id=rc.vendor_id JOIN sku k ON k.id=rc.sku_id LEFT JOIN brand b ON b.id=k.brand_id JOIN pack_size ps ON ps.id=k.pack_size_id
+		WHERE NOT rc.superseded AND rc.valid_to >= current_date AND v.active AND k.active ORDER BY k.code, v.code, rc.valid_from`}
+	refMapProps = refSheet{"Ref - Properties", []string{"property_code", "document_code", "property", "cluster", "city", "stage", "property_manager"},
+		`SELECT p.code, coalesce(p.doc_code,''), p.name, k.name, c.name, p.kind, coalesce(u.name,'')
+		FROM property p JOIN cluster k ON k.id=p.cluster_id JOIN city c ON c.id=k.city_id LEFT JOIN app_user u ON u.id=p.l1_user_id WHERE p.active ORDER BY p.code`}
+)
+
 var bundles = map[string]bundle{
-	"mappings":     {edit: []string{"mappings"}, noReadme: true},
-	"rates":        {edit: []string{"vendors", "items", "rates"}, ref: []refSheet{refSubcats, refBrands, refPacks, refProps, refClusters}},
-	"items":        {edit: []string{"items"}, ref: []refSheet{refSubcats, refBrands, refPacks, refProps, refClusters}},
-	"vendors":      {edit: []string{"vendors"}, ref: []refSheet{refSubcats, refBillTypes}},
-	"properties":   {edit: []string{"properties"}, ref: []refSheet{refClusters, refPeople}},
-	"property_pct": {edit: []string{"property_pct"}},
-	"users":        {edit: []string{"users"}, ref: []refSheet{refRoles, refProps, refClusters, refCategories}},
-	"budgets":      {edit: []string{"budgets"}, ref: []refSheet{refSubcats}},
-	"zoho_tags":    {edit: []string{"zoho_tags"}, ref: []refSheet{refTagOptions}},
+	"mappings":       {edit: []string{"mappings"}, ref: []refSheet{refMapVendors, refMapItems, refMapRates, refMapProps, refSubcats, refClusters}, noReadme: true},
+	"rates":          {edit: []string{"vendors", "items", "rates"}, ref: []refSheet{refSubcats, refBrands, refPacks, refProps, refClusters}},
+	"items":          {edit: []string{"items"}, ref: []refSheet{refSubcats, refBrands, refPacks, refProps, refClusters}},
+	"vendors":        {edit: []string{"vendors"}, ref: []refSheet{refSubcats, refBillTypes}},
+	"properties":     {edit: []string{"properties"}, ref: []refSheet{refClusters, refPeople}},
+	"property_pct":   {edit: []string{"property_pct"}},
+	"users":          {edit: []string{"users"}, ref: []refSheet{refRoles, refProps, refClusters, refCategories}},
+	"budgets":        {edit: []string{"budgets"}, ref: []refSheet{refSubcats}},
+	"zoho_tags":      {edit: []string{"zoho_tags"}, ref: []refSheet{refTagOptions}},
+	"clusters":       {edit: []string{"cities", "clusters"}, ref: []refSheet{refManagers}},
+	"sub_categories": {edit: []string{"categories", "sub_categories"}},
 }
 
 // keys says, per list, which column ties a row to its record.
 var keys = map[string]string{"items": "sku_code", "properties": "property_code", "vendors": "vendor_code", "users": "email (or mobile), one row per role",
-	"mappings": "mapping_id (category must match the sub-category or SKU; to move a mapping to another category, pick one of that category's sub-categories)", "rates": "vendor_code + sku_code", "budgets": "property_code + month + sub_category", "property_pct": "property_code", "zoho_tags": "property_code"}
+	"mappings": "mapping_id (category must match the sub-category or SKU; to move a mapping to another category, pick one of that category's sub-categories)", "rates": "vendor_code + sku_code", "budgets": "property_code + month + sub_category", "property_pct": "property_code", "zoho_tags": "property_code",
+	"cities": "city (name; rename a city on the screen)", "clusters": "cluster (name; rename a cluster on the screen)", "categories": "category (name; rename a category on the screen)",
+	"sub_categories": "code (the 2 SKU-code letters, fixed once added)"}
 
 func (s *Service) workbook(w http.ResponseWriter, r *http.Request) error {
 	name := chi.URLParam(r, "kind")

@@ -10,7 +10,13 @@ import { Pill } from '../ui/Pill'
 import { useAction } from '../ui/useAction'
 
 // Uploads that can be downloaded with their current data, edited and uploaded back.
-const EDITABLE = new Set(['items', 'properties', 'vendors', 'users', 'mappings', 'rates', 'budgets', 'property_pct', 'zoho_tags'])
+const EDITABLE = new Set(['items', 'properties', 'vendors', 'users', 'mappings', 'rates', 'budgets', 'property_pct', 'zoho_tags', 'clusters', 'sub_categories'])
+
+// How rows tie to records, for lists that are not matched by a code column of their own.
+const MATCH: Record<string, string> = {
+  clusters: 'Cities and clusters are matched by name: a name already on file updates it, a new name is added. Rename them on this page. The Cities sheet is applied first, so a cluster can use a city added in the same file. A CSV file is read as clusters.',
+  sub_categories: 'Categories are matched by name (rename them on this page); sub-categories by their 2-letter code, so a row can rename a sub-category or move it to another category. A new code adds a sub-category whose SKU codes start with those letters. The Categories sheet is applied first. A CSV file is read as sub-categories.',
+}
 
 interface Row { sheet: string; line: number; values: Record<string, string>; ok: boolean; skip: boolean; message: string; object?: unknown }
 
@@ -28,8 +34,8 @@ async function readFile(f: File): Promise<Upload> {
 // What a result row is about: its key column, or its first few cells.
 function label(r: Row) {
   const v = r.values
-  const key = v.mapping_id || v.sku_code || v.vendor_code || v.property_code || v.email || v.mobile
-  const name = v.legal_name || v.item_name || v.property_name || v.name || v.sub_category || v.vendor_name || ''
+  const key = v.mapping_id || v.sku_code || v.vendor_code || v.property_code || v.email || v.mobile || v.code
+  const name = v.legal_name || v.item_name || v.property_name || v.name || v.sub_category || v.vendor_name || v.cluster || v.city || v.category || ''
   return [key, name].filter(Boolean).join(' · ') || Object.values(v).filter(Boolean).slice(0, 3).join(' · ')
 }
 
@@ -48,7 +54,7 @@ export function UploadModal({ kind, title, query = '', exportQuery = '', onClose
     <Modal title={title} wide onClose={onClose}>
       <p className="sub">Every row is checked before anything is saved, and only clean rows are imported. Extra columns are ignored.</p>
       {EDITABLE.has(kind) && <p className="note"><b>To edit in bulk:</b> download the current data (an Excel file with this list and the masters it uses, one sheet each), change what you need, save it and upload it here.
-        Rows with their key filled are updated, rows with the key blank are added, and rows you did not change are skipped. The file's "Read me" sheet lists the keys and what is locked.</p>}
+        {MATCH[kind] ? MATCH[kind] + ' Rows you did not change are skipped.' : 'Rows with their key filled are updated, rows with the key blank are added, and rows you did not change are skipped.'} The file's "Read me" sheet lists the keys and what is locked.</p>}
       <div className="tools">
         <label className="field" style={{ maxWidth: 360 }}><span>Choose a file (.xlsx or .csv)</span>
           <input type="file" accept=".xlsx,.csv,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" onChange={async (e) => { const f = e.target.files?.[0]; if (f) { setFile(await readFile(f)); setRows(null) } }} /></label>

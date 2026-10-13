@@ -2,7 +2,10 @@
 // and maps GST state codes, which decide CGST + SGST versus IGST.
 package indiantax
 
-import "regexp"
+import (
+	"regexp"
+	"sort"
+)
 
 var (
 	GSTIN  = regexp.MustCompile(`^\d{2}[A-Z]{5}\d{4}[A-Z][A-Z\d]Z[A-Z\d]$`)
@@ -42,6 +45,16 @@ var stateNames = map[string]string{
 	"JH": "Jharkhand", "OD": "Odisha", "CG": "Chhattisgarh", "MP": "Madhya Pradesh", "GJ": "Gujarat", "DN": "Dadra and Nagar Haveli and Daman and Diu",
 	"MH": "Maharashtra", "KA": "Karnataka", "GA": "Goa", "LD": "Lakshadweep", "KL": "Kerala", "TN": "Tamil Nadu", "PY": "Puducherry",
 	"AN": "Andaman and Nicobar Islands", "TS": "Telangana", "AP": "Andhra Pradesh", "LA": "Ladakh",
+}
+
+// StateCodes lists every two-letter state code, sorted.
+func StateCodes() []string {
+	out := make([]string, 0, len(stateNames))
+	for c := range stateNames {
+		out = append(out, c)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // StateName returns the state's name for a two-letter state code, for example "KA" gives "Karnataka".

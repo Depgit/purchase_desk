@@ -11,11 +11,13 @@ import { useApi } from '../api/useApi'
 import { day, inr } from '../format/format'
 import { DataTable } from '../ui/DataTable'
 import { Pill } from '../ui/Pill'
+import { useScreen } from '../screenaccess/screen'
 
 export function InvoicesPage() {
   const nav = useNavigate()
   const { hasStep } = useSession()
-  const ap = hasStep('ap')
+  const sc = useScreen('invoices')
+  const ap = sc.edit && hasStep('ap')
   const { data, reload } = useApi<Invoice[]>('/invoices')
   const rows = (data || []).filter((i) => i.kind === 'purchase' || i.kind === 'corp_purchase')
   const [sel, setSel] = useState<Set<string | number>>(new Set())

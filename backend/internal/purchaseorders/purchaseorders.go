@@ -4,6 +4,7 @@ package purchaseorders
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -15,6 +16,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"purchasedesk/internal/access"
+	"purchasedesk/internal/advances"
 	"purchasedesk/internal/auditlog"
 	"purchasedesk/internal/clock"
 	"purchasedesk/internal/documents"
@@ -22,12 +24,15 @@ import (
 	"purchasedesk/internal/httpjson"
 	"purchasedesk/internal/messaging"
 	"purchasedesk/internal/money"
+	"purchasedesk/internal/screens"
 	"purchasedesk/internal/textclean"
+	"purchasedesk/internal/uploadedfiles"
 )
 
 type Service struct {
 	DB       *pgxpool.Pool
 	Messages *messaging.Sender
+	Files    *uploadedfiles.Service
 }
 
 func (s *Service) Routes(r chi.Router) {
@@ -39,6 +44,7 @@ type issueIn struct {
 	Rates     map[int64]float64 `json:"rates"`
 	DeliverBy string            `json:"deliver_by"`
 	Terms     string            `json:"payment_terms"`
+	Advance   *advances.Ask     `json:"advance"` // needed with Advance terms: asked of Finance with the PO
 }
 
 func (s *Service) issue(w http.ResponseWriter, r *http.Request) error {
@@ -47,8 +53,20 @@ func (s *Service) issue(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
+	// JSON, or multipart (a data field plus the advance's proforma) when the PO is issued on Advance terms.
 	var in issueIn
-	if err := httpjson.Decode(r, &in); err != nil {
+	var proforma *uploadedfiles.File
+	if strings.HasPrefix(r.Header.Get("Content-Type"), "multipart/") {
+		if err := r.ParseMultipartForm(32 << 20); err != nil {
+			return httpjson.Bad("Could not read the form: %v", err)
+		}
+		if err := json.Unmarshal([]byte(r.FormValue("data")), &in); err != nil {
+			return httpjson.Bad("Could not read the form data.")
+		}
+		if proforma, err = advances.ReadProforma(r); err != nil {
+			return err
+		}
+	} else if err := httpjson.Decode(r, &in); err != nil {
 		return err
 	}
 	due, ok := clock.ParseDate(in.DeliverBy)
@@ -61,28 +79,56 @@ func (s *Service) issue(w http.ResponseWriter, r *http.Request) error {
 	if !textclean.Contains(money.PaymentTerms, in.Terms) {
 		return httpjson.Bad("Choose the payment terms.")
 	}
-	var po string
+	if in.Terms != money.Advance {
+		in.Advance = nil
+	} else if in.Advance == nil {
+		return httpjson.Bad("The payment terms are Advance: enter how much advance to ask Finance for.")
+	} else if err := in.Advance.Check(r.Context(), s.DB); err != nil {
+		return err
+	}
+	// On Advance terms the PO is prepared and held: it is raised and sent to the vendor only once Finance approves the
+	// advance (advances.decide releases it).
+	hold := in.Advance != nil
+	var po, adv string
 	err = pgx.BeginFunc(r.Context(), s.DB, func(tx pgx.Tx) error {
 		var err error
-		po, err = issueOne(r.Context(), tx, u, id, in.Rates, due, in.Terms, false)
+		if po, err = issueOne(r.Context(), tx, u, id, in.Rates, due, in.Terms, false, hold); err != nil || !hold {
+			return err
+		}
+		d, err := documents.Load(r.Context(), tx, id, true)
+		if err != nil {
+			return err
+		}
+		adv, err = advances.Create(r.Context(), tx, u, s.Files, d, *in.Advance, proforma)
 		return err
 	})
 	if err != nil {
 		return err
 	}
-	s.sendPO(u, id)
+	if hold {
+		return httpjson.OK(w, map[string]string{"message": adv + ". " + po + " goes to the vendor once Finance approves the advance.", "po_number": ""})
+	}
+	s.SendPO(u, id)
 	return httpjson.OK(w, map[string]string{"message": po + " sent to the vendor", "po_number": po})
 }
 
 // issueOne turns one approved request into a PO inside tx. Rates missing from the map keep the request's rate. terms ""
 // takes the vendor's own terms. In bulk, a request with estimated rates is refused: those rates need confirming first.
-func issueOne(ctx context.Context, tx pgx.Tx, u *access.User, id int64, rates map[int64]float64, due time.Time, terms string, bulk bool) (string, error) {
+// With hold the PO is prepared (rates, date, terms, its number reserved in advance_hold_po) but not issued: it waits
+// for Finance to approve its advance.
+func issueOne(ctx context.Context, tx pgx.Tx, u *access.User, id int64, rates map[int64]float64, due time.Time, terms string, bulk, hold bool) (string, error) {
 	d, err := documents.Load(ctx, tx, id, true)
 	if err != nil {
 		return "", err
 	}
 	if d.Status != documents.Approved || (d.Kind != "purchase" && d.Kind != "corp_purchase") {
 		return "", httpjson.Conflict("%s is not waiting for a PO.", d.Number)
+	}
+	if d.AdvanceHold != "" {
+		return "", httpjson.Conflict("%s is waiting for Finance to approve its advance. It goes to the vendor once approved; if Finance rejects the advance, issue it again.", d.AdvanceHold)
+	}
+	if u.Level("purchase_orders", d.PropertyID, d.ClusterID) < screens.Edit {
+		return "", httpjson.Forbidden("Your role can only view Purchase Orders at %s, so it cannot issue %s.", d.Property, d.Number)
 	}
 	g := documents.CanAct(u, d, "purchase", access.IssuePO)
 	if g == nil {
@@ -93,6 +139,9 @@ func issueOne(ctx context.Context, tx pgx.Tx, u *access.User, id int64, rates ma
 	}
 	if !textclean.Contains(money.PaymentTerms, terms) {
 		return "", httpjson.Bad("Choose the payment terms for %s. The vendor has none on record.", d.Number)
+	}
+	if bulk && terms == money.Advance {
+		return "", httpjson.Bad("%s is on Advance terms. Issue it on its own page, where the advance is asked with the PO.", d.Number)
 	}
 	changed := []string{}
 	for _, l := range d.Lines {
@@ -121,11 +170,24 @@ func issueOne(ctx context.Context, tx pgx.Tx, u *access.User, id int64, rates ma
 			return "", err
 		}
 	}
+	note := terms + ", deliver by " + due.Format("2 Jan")
+	if hold {
+		if _, err := tx.Exec(ctx, `UPDATE document SET advance_hold_po=$2, deliver_by=$3, payment_terms=$4, updated_at=now() WHERE id=$1`, id, po, due, terms); err != nil {
+			return "", err
+		}
+		if len(changed) > 0 {
+			note += ". Rate changed: " + strings.Join(changed, "; ")
+		}
+		module := "Purchases"
+		if d.IsCorp() {
+			module = "Corporate"
+		}
+		return po, auditlog.Doc(ctx, tx, u, g.Name, d.ID, d.Number, module, po+" prepared, waiting for Finance to approve the advance", note)
+	}
 	if _, err := tx.Exec(ctx, `UPDATE document SET status='PO_ISSUED', po_number=$2, po_date=now(), deliver_by=$3, payment_terms=$4, updated_at=now() WHERE id=$1`,
 		id, po, due, terms); err != nil {
 		return "", err
 	}
-	note := terms + ", deliver by " + due.Format("2 Jan")
 	if len(changed) > 0 {
 		note += ". Rate changed: " + strings.Join(changed, "; ")
 	}
@@ -175,7 +237,7 @@ func (s *Service) bulk(w http.ResponseWriter, r *http.Request) error {
 		var po string
 		err := pgx.BeginFunc(r.Context(), s.DB, func(tx pgx.Tx) error {
 			var err error
-			po, err = issueOne(r.Context(), tx, u, id, nil, due, in.Terms, true)
+			po, err = issueOne(r.Context(), tx, u, id, nil, due, in.Terms, true, false)
 			return err
 		})
 		if err != nil {
@@ -183,14 +245,14 @@ func (s *Service) bulk(w http.ResponseWriter, r *http.Request) error {
 			continue
 		}
 		done++
-		s.sendPO(u, id)
+		s.SendPO(u, id)
 		res = append(res, bulkResult{ID: id, OK: true, Message: po + " sent to the vendor"})
 	}
 	return httpjson.OK(w, map[string]any{"done": done, "failed": len(in.IDs) - done, "results": res})
 }
 
-// sendPO emails the PO to the vendor's address from onboarding, using the Admin's template.
-func (s *Service) sendPO(u *access.User, docID int64) {
+// SendPO emails the PO to the vendor's address from onboarding, using the Admin's template.
+func (s *Service) SendPO(u *access.User, docID int64) {
 	if s.Messages == nil {
 		return
 	}

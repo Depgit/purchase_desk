@@ -1,7 +1,7 @@
 // Finance: approve matched invoices and approved bills for payment, push them to Zoho Books, and follow payment.
 // The Advances tab holds vendor advances on issued POs: approve, pay, and follow what is left to adjust.
 import { useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, useSearchParams } from 'react-router-dom'
 import { post } from '../api/client'
 import type { Invoice } from '../api/types'
 import { useApi } from '../api/useApi'
@@ -17,6 +17,7 @@ import { BulkResults, type BulkResult } from '../ui/BulkResults'
 import { PHASE, usePhase } from '../releasephase/phase'
 import { Tabs } from '../ui/Tabs'
 import { AdvancesList } from '../advances/AdvancesList'
+import { useScreen } from '../screenaccess/screen'
 
 const LABEL: Record<string, [string, '' | 'ok' | 'warn' | 'bad']> = {
   MATCHED: ['Payment approval', ''], PAY_APPROVED: ['Ready for Zoho', ''], PUSHED: ['In Zoho, to be paid', 'warn'], PAID: ['Paid', 'ok'],
@@ -25,7 +26,8 @@ const LABEL: Record<string, [string, '' | 'ok' | 'warn' | 'bad']> = {
 export function PaymentsPage() {
   const nav = useNavigate()
   const { hasStep, me } = useSession()
-  const fin = hasStep('finance')
+  const sc = useScreen('payments')
+  const fin = sc.edit && hasStep('finance')
   const zoho = usePhase().on(PHASE.zoho) // before Zoho opens, payment ends at "payment approved" and is marked paid by hand
   const { data, reload } = useApi<Invoice[]>('/invoices?status=MATCHED,PAY_APPROVED,PUSHED,PAID')
   const [sel, setSel] = useState<Set<string | number>>(new Set())
@@ -33,11 +35,12 @@ export function PaymentsPage() {
   const [paid, setPaid] = useState<Invoice | null>(null)
   const [results, setResults] = useState<{ invoice_id: number; ok: boolean; message: string }[] | null>(null)
   const [approved, setApproved] = useState<BulkResult[] | null>(null)
-  const [tab, setTab] = useState<'invoices' | 'advances'>('invoices')
+  const [sp] = useSearchParams()
+  const [tab, setTab] = useState<'invoices' | 'advances'>(sp.get('tab') === 'advances' ? 'advances' : 'invoices')
   const a = useAction()
   const rows = data || []
   const picked = rows.filter((r) => sel.has(r.id))
-  const toApprove = picked.filter((r) => r.status === 'MATCHED').map((r) => r.id)
+  const toApprove = picked.filter((r) => r.status === 'MATCHED' && !r.advance_wait.length).map((r) => r.id)
   const toPush = picked.filter((r) => r.status === 'PAY_APPROVED').map((r) => r.id)
   const overdue = (r: Invoice) => r.status !== 'PAID' && r.pay_by && r.pay_by < new Date().toISOString().slice(0, 10)
   return (
@@ -57,7 +60,7 @@ export function PaymentsPage() {
       {approved && <BulkResults title="Last bulk payment approval" results={approved} label={(id) => rows.find((x) => x.id === id)?.invoice_number || String(id)} onClose={() => setApproved(null)} />}
       {results && <section className="card"><h2>Last push</h2>{results.map((r) => <p key={r.invoice_id}><Pill tone={r.ok ? 'ok' : 'bad'}>{r.ok ? 'Pushed' : 'Not pushed'}</Pill> {rows.find((x) => x.id === r.invoice_id)?.invoice_number}: {r.message}</p>)}</section>}
       <DataTable screen="payments" rows={rows} rowKey={(r) => r.id} date={{ label: 'Invoice date', value: (r) => r.invoice_date }} onOpen={(r) => nav('/invoices/' + r.id)}
-        selectable={fin ? (r) => r.status === 'MATCHED' || (zoho && r.status === 'PAY_APPROVED' && !r.held.length) : undefined} selected={sel} onSelect={setSel}
+        selectable={fin ? (r) => (r.status === 'MATCHED' && !r.advance_wait.length) || (zoho && r.status === 'PAY_APPROVED' && !r.held.length) : undefined} selected={sel} onSelect={setSel}
         search={(r) => [r.invoice_number, r.voucher_number, r.vendor, r.property, r.po_number, r.document_number, r.zoho_bill_id].join(' ')}
         filters={[{ id: 'st', label: 'Status', options: [['', 'All'], ['MATCHED', 'Payment approval'], ['PAY_APPROVED', zoho ? 'Ready for Zoho' : 'Payment approved'], ...(zoho ? [['HELD', 'Held from Zoho'], ['PUSHED', 'In Zoho, to be paid']] as [string, string][] : []), ['PAID', 'Paid'], ['MSME', 'MSME vendors'], ['LATE', 'Overdue']],
           test: (r, v) => v === 'HELD' ? r.held.length > 0 : v === 'MSME' ? r.vendor_msme : v === 'LATE' ? !!overdue(r) : r.status === v }]}
@@ -73,9 +76,10 @@ export function PaymentsPage() {
           { key: 'net', label: 'Net payable', right: true, render: (r) => inr(r.net_payable), sort: (r) => r.net_payable, csv: (r) => r.net_payable },
           { key: 'payby', label: 'Pay by', render: (r) => overdue(r) ? <Pill tone="bad">Overdue {day(r.pay_by)}</Pill> : day(r.pay_by), sort: (r) => r.pay_by, csv: (r) => r.pay_by },
           ...(zoho ? [{ key: 'zoho', label: 'Zoho bill', render: (r: Invoice) => r.zoho_bill_id || (r.held.length ? <Pill tone="bad">Held: {r.held[0]}{r.held.length > 1 ? ` +${r.held.length - 1}` : ''}</Pill> : '—'), csv: (r: Invoice) => r.zoho_bill_id }] : []),
-          { key: 'status', label: 'Status', render: (r) => <Pill tone={LABEL[r.status]?.[1] || ''}>{!zoho && r.status === 'PAY_APPROVED' ? 'Payment approved' : LABEL[r.status]?.[0] || r.status}</Pill>, csv: (r) => r.status },
+          { key: 'status', label: 'Status', render: (r) => <><Pill tone={LABEL[r.status]?.[1] || ''}>{!zoho && r.status === 'PAY_APPROVED' ? 'Payment approved' : LABEL[r.status]?.[0] || r.status}</Pill>
+            {r.advance_wait.length > 0 && <><br /><span title={r.advance_wait.join('; ')}><Pill tone="warn">Waiting for advance</Pill></span></>}</>, csv: (r) => r.advance_wait.length ? 'Waiting for advance' : r.status },
           { key: 'act', label: '', render: (r) => <span className="tools" style={{ flexWrap: 'nowrap' }}>
-            {fin && r.status === 'MATCHED' && <button className="btn ghost small" onClick={() => a.run(() => post(`/invoices/${r.id}/approve-payment`), (x: any) => { reload(); return x.message })}>Approve payment</button>}
+            {fin && r.status === 'MATCHED' && !r.advance_wait.length && <button className="btn ghost small" onClick={() => a.run(() => post(`/invoices/${r.id}/approve-payment`), (x: any) => { reload(); return x.message })}>Approve payment</button>}
             {zoho && r.status === 'PAY_APPROVED' && <button className="link" onClick={() => setPreview(r.id)}>Preview</button>}
             {me?.is_admin && (r.status === 'PUSHED' || (!zoho && r.status === 'PAY_APPROVED')) && <button className="link" onClick={() => setPaid(r)}>Mark paid</button>}</span> },
         ]} csvName="payments" /></>}
