@@ -318,10 +318,6 @@ func (s *Service) createNamed(w http.ResponseWriter, r *http.Request, table, lab
 	if err := httpjson.Decode(r, &in); err != nil {
 		return err
 	}
-	in.Name = textclean.Clean(in.Name)
-	if len(in.Name) < 2 || strings.ContainsAny(in.Name, `<>",`) {
-		return httpjson.Bad("Enter the %s, without commas.", strings.ToLower(label))
-	}
 	id := int64(0)
 	if chi.URLParam(r, "id") != "" {
 		var err error
@@ -329,15 +325,11 @@ func (s *Service) createNamed(w http.ResponseWriter, r *http.Request, table, lab
 			return err
 		}
 	}
-	var existing string
-	var active bool
-	_ = s.DB.QueryRow(r.Context(), fmt.Sprintf(`SELECT name, active FROM %s WHERE norm_key(name)=norm_key($1) AND id<>$2`, table), in.Name, id).Scan(&existing, &active)
-	if existing != "" {
-		if !active {
-			existing += " (inactive)"
-		}
-		return httpjson.Bad("This %s already exists as %s.", strings.ToLower(label), existing)
+	name, problem := CheckNamed(r.Context(), s.DB, table, label, in.Name, id)
+	if problem != "" {
+		return httpjson.Bad("%s", problem)
 	}
+	in.Name = name
 	if id != 0 {
 		var old string
 		if err := s.DB.QueryRow(r.Context(), fmt.Sprintf(`SELECT name FROM %s WHERE id=$1`, table), id).Scan(&old); err != nil {
@@ -356,11 +348,40 @@ func (s *Service) createNamed(w http.ResponseWriter, r *http.Request, table, lab
 		_ = auditlog.Write(r.Context(), s.DB, u, "Items", label+" renamed", in.Name, old+" → "+in.Name)
 		return httpjson.OK(w, map[string]int64{"id": id})
 	}
-	if err := s.DB.QueryRow(r.Context(), fmt.Sprintf(`INSERT INTO %s(name,created_by) VALUES ($1,$2) RETURNING id`, table), in.Name, u.ID).Scan(&id); err != nil {
+	id, err := AddNamed(r.Context(), s.DB, u, table, label, in.Name)
+	if err != nil {
 		return err
 	}
-	_ = auditlog.Write(r.Context(), s.DB, u, "Items", label+" added", in.Name, "")
 	return httpjson.OK(w, map[string]int64{"id": id})
+}
+
+// CheckNamed tidies a brand or pack size name (table brand or pack_size) and says why it cannot be used, or "" when
+// it can: too short, a comma or quote, or the same as another one apart from case, spaces and punctuation. id is the
+// record being renamed (0 for a new one).
+func CheckNamed(ctx context.Context, q database.Q, table, label, name string, id int64) (string, string) {
+	name = textclean.Clean(name)
+	if len(name) < 2 || strings.ContainsAny(name, `<>",`) {
+		return name, fmt.Sprintf("Enter the %s, without commas.", strings.ToLower(label))
+	}
+	var existing string
+	var active bool
+	_ = q.QueryRow(ctx, fmt.Sprintf(`SELECT name, active FROM %s WHERE norm_key(name)=norm_key($1) AND id<>$2`, table), name, id).Scan(&existing, &active)
+	if existing != "" {
+		if !active {
+			existing += " (inactive)"
+		}
+		return name, fmt.Sprintf("This %s already exists as %s.", strings.ToLower(label), existing)
+	}
+	return name, ""
+}
+
+// AddNamed adds a checked brand or pack size and logs it.
+func AddNamed(ctx context.Context, q database.Q, u *access.User, table, label, name string) (int64, error) {
+	var id int64
+	if err := q.QueryRow(ctx, fmt.Sprintf(`INSERT INTO %s(name,created_by) VALUES ($1,$2) RETURNING id`, table), name, u.ID).Scan(&id); err != nil {
+		return 0, err
+	}
+	return id, auditlog.Write(ctx, q, u, "Items", label+" added", name, "")
 }
 
 func (s *Service) createBrand(w http.ResponseWriter, r *http.Request) error {

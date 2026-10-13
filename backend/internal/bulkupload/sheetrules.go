@@ -164,6 +164,10 @@ func rulesFor(kind string) sheetRules {
 		return sheetRules{locked: []string{"category"}, rules: []spreadsheet.Validation{
 			{Column: "fnb", List: []string{"yes", "no"}, PromptTitle: "Food and beverage", Prompt: "yes for F&B categories: their day budgets follow F&B sales.", ErrorTitle: "yes or no", Error: "Pick yes or no."},
 		}}
+	case "pack_sizes":
+		return sheetRules{locked: []string{"pack_size"}, rules: []spreadsheet.Validation{
+			{Column: "pack_size", PromptTitle: "Pack size", Prompt: "Add new pack sizes in the empty rows, for example box of 100 or 1 kg pack. Existing ones are locked: rename them on the screen."},
+		}}
 	case "sub_categories":
 		return sheetRules{locked: []string{"code"}, rules: []spreadsheet.Validation{
 			{Column: "code", PromptTitle: "SKU code letters", Prompt: "2 letters for a new sub-category, for example LN: its SKU codes become LN-0001 onwards. Fixed once added."},

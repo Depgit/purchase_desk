@@ -10,11 +10,12 @@ import { Pill } from '../ui/Pill'
 import { useAction } from '../ui/useAction'
 
 // Uploads that can be downloaded with their current data, edited and uploaded back.
-const EDITABLE = new Set(['items', 'properties', 'vendors', 'users', 'mappings', 'rates', 'budgets', 'property_pct', 'zoho_tags', 'clusters', 'sub_categories'])
+const EDITABLE = new Set(['items', 'properties', 'vendors', 'users', 'mappings', 'rates', 'budgets', 'property_pct', 'zoho_tags', 'clusters', 'sub_categories', 'pack_sizes'])
 
 // How rows tie to records, for lists that are not matched by a code column of their own.
 const MATCH: Record<string, string> = {
   clusters: 'Cities and clusters are matched by name: a name already on file updates it, a new name is added. Rename them on this page. The Cities sheet is applied first, so a cluster can use a city added in the same file. A CSV file is read as clusters.',
+  pack_sizes: 'Pack sizes are matched by name: new names are added, and a name already in the list (in any spelling, for example Box of 500 and box-of-500) is refused as already there. Rename or deactivate one on this page.',
   sub_categories: 'Categories are matched by name (rename them on this page); sub-categories by their 2-letter code, so a row can rename a sub-category or move it to another category. A new code adds a sub-category whose SKU codes start with those letters. The Categories sheet is applied first. A CSV file is read as sub-categories.',
 }
 
@@ -35,7 +36,7 @@ async function readFile(f: File): Promise<Upload> {
 function label(r: Row) {
   const v = r.values
   const key = v.mapping_id || v.sku_code || v.vendor_code || v.property_code || v.email || v.mobile || v.code
-  const name = v.legal_name || v.item_name || v.property_name || v.name || v.sub_category || v.vendor_name || v.cluster || v.city || v.category || ''
+  const name = v.legal_name || v.item_name || v.property_name || v.name || v.sub_category || v.vendor_name || v.cluster || v.city || v.category || v.pack_size || ''
   return [key, name].filter(Boolean).join(' · ') || Object.values(v).filter(Boolean).slice(0, 3).join(' · ')
 }
 

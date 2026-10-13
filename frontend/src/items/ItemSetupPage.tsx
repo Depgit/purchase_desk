@@ -26,7 +26,7 @@ export function ItemSetupPage() {
   const l = useLookups()
   const [tab, setTab] = useState<Tab>('cat')
   const [add, setAdd] = useState<Kind | null>(null)
-  const [upload, setUpload] = useState(false)
+  const [upload, setUpload] = useState<'' | 'sub_categories' | 'pack_sizes'>('')
   const [edit, setEdit] = useState<{ kind: Kind; row: Row } | null>(null)
   const subs = useApi<{ id: number; name: string; code: string; category_id: number; category: string; skus: number; vendors: number; active: boolean }[]>('/sub-categories')
   const cats = useApi<{ id: number; name: string; is_fb: boolean; sub_categories: number; skus: number }[]>('/categories')
@@ -43,8 +43,8 @@ export function ItemSetupPage() {
   return (
     <>
       <div className="head"><div><h1>Item Setup</h1><p className="sub">Whatever is added here shows up in the Add item form and in the bulk upload checks.</p></div>
-        <div className="acts">{ed && (tab === 'cat' ? <>{hasRight('upload') && <button className="btn ghost" onClick={() => setUpload(true)}>Bulk upload / edit</button>}<button className="btn ghost" onClick={() => setAdd('category')}>+ Add category</button><button className="btn" onClick={() => setAdd('sub')}>+ Add sub-category</button></>
-          : tab === 'pack' ? <button className="btn" onClick={() => setAdd('pack')}>+ Add pack size</button> : <button className="btn" onClick={() => setAdd('brand')}>+ Add brand</button>)}</div></div>
+        <div className="acts">{ed && (tab === 'cat' ? <>{hasRight('upload') && <button className="btn ghost" onClick={() => setUpload('sub_categories')}>Bulk upload / edit</button>}<button className="btn ghost" onClick={() => setAdd('category')}>+ Add category</button><button className="btn" onClick={() => setAdd('sub')}>+ Add sub-category</button></>
+          : tab === 'pack' ? <>{hasRight('upload') && <button className="btn ghost" onClick={() => setUpload('pack_sizes')}>Bulk upload</button>}<button className="btn" onClick={() => setAdd('pack')}>+ Add pack size</button></> : <button className="btn" onClick={() => setAdd('brand')}>+ Add brand</button>)}</div></div>
       <Tabs value={tab} onChange={setTab} items={[['cat', 'Categories & sub-categories'], ['pack', 'Pack sizes'], ['brand', 'Brands']]} />
       {tab === 'cat' && <div className="cols">
         <section className="card flush"><h2>Sub-categories</h2><div className="scroll"><table>
@@ -58,7 +58,7 @@ export function ItemSetupPage() {
       </div>}
       {tab === 'pack' && named(packs.data, 'pack_size')}
       {tab === 'brand' && named(brands.data, 'brand')}
-      {upload && <UploadModal kind="sub_categories" title="Bulk upload or edit categories and sub-categories" onClose={() => setUpload(false)} onDone={reloadAll} />}
+      {upload && <UploadModal kind={upload} title={upload === 'pack_sizes' ? 'Bulk upload pack sizes' : 'Bulk upload or edit categories and sub-categories'} onClose={() => setUpload('')} onDone={reloadAll} />}
       {add && <AddModal kind={add} cats={l?.categories || []} onClose={() => setAdd(null)} onDone={() => { setAdd(null); reloadAll() }} />}
       {edit && <AddModal kind={edit.kind} row={edit.row} cats={l?.categories || []} onClose={() => setEdit(null)} onDone={() => { setEdit(null); reloadAll() }} />}
     </>

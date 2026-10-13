@@ -312,3 +312,33 @@ fieldset.plain{border:0;padding:0;margin:0;min-width:0;display:flex;flex-directi
   .cartbar{display:flex;position:sticky;bottom:10px;z-index:5;justify-content:space-between;align-items:center;gap:10px;background:var(--accent);color:var(--accent-ink);padding:14px 16px;border-radius:12px;margin-top:12px;font-weight:600}
   .cartbar a{color:inherit;font-weight:700}
 }
+/* Phones: normal-sized controls instead of the oversized 50px / 17px ones. Text in fields stays at 16px, the size
+   below which iPhone zooms the page in when a field is tapped. Kept last so it wins over the rules above. */
+@media (max-width:860px){
+  body{font-size:16px} h1{font-size:20px}
+  select,input,textarea{min-height:44px;font-size:16px}
+  .btn{min-height:44px;font-size:15px;padding:8px 14px}
+  .btn.small{min-height:34px;font-size:14px;padding:4px 10px}
+  .head .acts .btn{min-height:40px}
+  textarea.mono,.agrid td select{font-size:16px}
+  /* item picker: category tabs and chips scroll sideways in one row; compact tiles two to a row */
+  .ctabs,.chips{flex-wrap:nowrap;overflow-x:auto;scrollbar-width:none;-webkit-overflow-scrolling:touch;padding-bottom:2px}
+  .ctabs::-webkit-scrollbar,.chips::-webkit-scrollbar{display:none}
+  .ctab{flex:none;font-size:14px;min-height:38px;padding:6px 14px}
+  .chip{flex:none;font-size:13px;min-height:32px;padding:4px 12px}
+  .mgrid{gap:8px}
+  .mt-main{min-height:84px;padding:10px 10px 6px}
+  .mt-main b{font-size:14px} .mt-main span{font-size:12px} .mt-main .pr{font-size:14px}
+  .mt-q button{width:44px;height:40px;font-size:20px} .mt-q input{height:40px;min-height:40px;font-size:16px}
+  .mt-add{height:40px;font-size:14px}
+  .qs button{width:32px;height:32px} .qs input{width:52px;height:32px;min-height:32px;font-size:16px}
+  .cest{min-height:30px;font-size:16px}
+  .cartbar{padding:12px 14px}
+  /* top bar: buttons in one compact row, search below, and it scrolls away instead of covering a third of the screen */
+  .top{position:static;padding:8px 12px;gap:6px}
+  .top .sp{display:none}
+  .top .btn{min-height:36px;font-size:13px;padding:6px 10px}
+  .top input[type=search]{min-height:40px}
+  /* page tabs swipe sideways in one row */
+  .tabs{flex-wrap:nowrap;overflow-x:auto;scrollbar-width:none} .tabs::-webkit-scrollbar{display:none} .tabs button{flex:none;white-space:nowrap}
+}

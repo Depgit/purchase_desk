@@ -1,7 +1,8 @@
 package bulkupload
 
 // Bulk upload and edit of the small masters behind properties and items: cities and clusters (one workbook, cities
-// first so a new city can be used by a cluster on the next sheet), and categories and sub-categories (likewise).
+// first so a new city can be used by a cluster on the next sheet), categories and sub-categories (likewise), and pack
+// sizes (new ones are added; an existing one, in any spelling, is refused as already there; rename it on the screen).
 // Cities, clusters and categories are matched by name: a known name updates that record, a new name adds one; rename
 // them on their screen. Sub-categories are matched by their 2-letter SKU code, which never changes, so a row can
 // rename a sub-category or move it to another category. The same checks run as on the screens.
@@ -151,6 +152,35 @@ func (s *Service) smallMasterKinds() map[string]*kind {
 				for _, o := range objs {
 					e := o.(*editRow)
 					if _, err := items.SaveCategory(ctx, tx, x.u, e.id, e.obj.(items.CategoryInput)); err != nil {
+						return err
+					}
+				}
+				return nil
+			},
+		},
+		"pack_sizes": {
+			title: "Pack sizes", module: "Items", allowed: masters,
+			required: []string{"pack_size"},
+			sample:   "pack_size\nbox of 100\n1 kg pack\npiece\n",
+			keyOf:    key("pack_size"),
+			onSame:   seenAs("pack_size"),
+			export: func(ctx context.Context, q database.Q, r *http.Request) ([]string, [][]string, error) {
+				rows, err := rowsOf(ctx, q, `SELECT name FROM pack_size WHERE active ORDER BY name`)
+				return []string{"pack_size"}, rows, err
+			},
+			check: func(ctx context.Context, x *run, row csvfile.Row) result {
+				name, problem := items.CheckNamed(ctx, x.q, "pack_size", "Pack size", row.Get("pack_size"), 0)
+				if problem != "" {
+					return bad("%s", problem)
+				}
+				if x.dup(textclean.Key(name)) {
+					return bad("Duplicate row in the file")
+				}
+				return result{ok: true, msg: "New pack size", obj: name}
+			},
+			commit: func(ctx context.Context, tx pgx.Tx, x *run, objs []any) error {
+				for _, o := range objs {
+					if _, err := items.AddNamed(ctx, tx, x.u, "pack_size", "Pack size", o.(string)); err != nil {
 						return err
 					}
 				}

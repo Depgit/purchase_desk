@@ -98,7 +98,7 @@ var activeScreen = map[string]string{"city": "cities", "cluster": "cities", "pro
 var uploadScreens = map[string][]string{"items": {"items"}, "rates": {"vendor_mapping"}, "mappings": {"vendor_mapping"}, "budgets": {"budgets"},
 	"fb_sales": {"budgets"}, "property_pct": {"properties", "budgets"}, "properties": {"properties"}, "users": {"users"}, "vendors": {"vendors"},
 	"request_lines": {"requests"}, "zoho_tags": {"zoho"}, "warehouse_stock": {"warehouse"},
-	"cities": {"cities"}, "clusters": {"cities"}, "categories": {"item_setup"}, "sub_categories": {"item_setup"}}
+	"cities": {"cities"}, "clusters": {"cities"}, "categories": {"item_setup"}, "sub_categories": {"item_setup"}, "pack_sizes": {"item_setup"}}
 
 func seg(r *http.Request, i int) string {
 	p := strings.Split(strings.Trim(strings.TrimPrefix(r.URL.Path, "/api"), "/"), "/")
