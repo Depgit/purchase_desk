@@ -28,6 +28,12 @@ func Write(ctx context.Context, q database.Q, u *access.User, module, action, re
 	return err
 }
 
+// ByVendorActivity adds one line to the activity log for something a vendor did on the vendor portal (role "Vendor").
+func ByVendorActivity(ctx context.Context, q database.Q, vendor, module, action, record, details string) error {
+	_, err := q.Exec(ctx, `INSERT INTO activity_log (user_name,role_name,module,action,record,details) VALUES ($1,'Vendor',$2,$3,$4,$5)`, vendor, module, action, record, details)
+	return err
+}
+
 // Doc adds a line to a document's history and to the activity log.
 // roleName is the role the user acted as at this step; empty uses all their roles.
 func Doc(ctx context.Context, q database.Q, u *access.User, roleName string, docID int64, number, module, action, note string) error {

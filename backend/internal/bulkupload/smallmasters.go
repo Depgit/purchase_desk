@@ -45,6 +45,7 @@ func yesNo(v string) (bool, bool) {
 
 func (s *Service) smallMasterKinds() map[string]*kind {
 	masters := func(u *access.User) bool { return hasUpload(u) && u.HasRight(access.Masters) }
+	catalog := func(u *access.User) bool { return hasUpload(u) && u.HasRight(access.Catalog) }
 	return map[string]*kind{
 		"cities": {
 			title: "Cities", module: "Properties", allowed: masters,
@@ -123,7 +124,7 @@ func (s *Service) smallMasterKinds() map[string]*kind {
 			},
 		},
 		"categories": {
-			title: "Categories", module: "Items", allowed: masters,
+			title: "Categories", module: "Items", allowed: catalog,
 			required: []string{"category"},
 			sample:   "category,fnb\nHousekeeping,no\nFood & Beverage,yes\n",
 			keyOf:    key("category"),
@@ -159,7 +160,7 @@ func (s *Service) smallMasterKinds() map[string]*kind {
 			},
 		},
 		"pack_sizes": {
-			title: "Pack sizes", module: "Items", allowed: masters,
+			title: "Pack sizes", module: "Items", allowed: catalog,
 			required: []string{"pack_size"},
 			sample:   "pack_size\nbox of 100\n1 kg pack\npiece\n",
 			keyOf:    key("pack_size"),
@@ -188,7 +189,7 @@ func (s *Service) smallMasterKinds() map[string]*kind {
 			},
 		},
 		"sub_categories": {
-			title: "Sub-categories", module: "Items", allowed: masters,
+			title: "Sub-categories", module: "Items", allowed: catalog,
 			required: []string{"code", "sub_category", "category"},
 			sample:   "code,sub_category,category,auto_po\nLN,Linen,Housekeeping,no\nGA,Guest Amenities,Housekeeping,yes\n",
 			keyOf:    key("code"),

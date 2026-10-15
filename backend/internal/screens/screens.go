@@ -133,8 +133,8 @@ func Defaults(rights []string, step string) map[string]int {
 		"bills_amc":        lv(has("raise")),
 		"corporate":        lv(at("creq", "dh", "capp")),
 		"warehouse":        lv(at("wh")),
-		"vendors":          lv(has("masters") || at("finance", "cc")),
-		"items":            lv(has("masters")),
+		"vendors":          lv(has("catalog") || at("finance", "cc")),
+		"items":            lv(has("catalog")),
 		"vendor_mapping":   lv(has("masters")),
 		"master_approvals": None, // Finance approves new masters before they are used or go to Zoho
 		"reports":          View,
@@ -143,7 +143,7 @@ func Defaults(rights []string, step string) map[string]int {
 		"budgets":          lv(at("cc")),
 		"corporate_setup":  lv(has("masters")),
 		"bill_types":       lv(has("masters")),
-		"item_setup":       lv(has("masters")),
+		"item_setup":       lv(has("catalog")),
 		"users":            None,
 		"flow":             View,
 		"zoho":             lv(at("finance")),
@@ -164,7 +164,7 @@ func Defaults(rights []string, step string) map[string]int {
 	}
 	if at("finance") {
 		m["master_approvals"] = Edit
-	} else if has("masters") {
+	} else if has("masters") || has("catalog") {
 		m["master_approvals"] = View // whoever adds masters sees what waits for Finance
 	}
 	if step == "admin" {

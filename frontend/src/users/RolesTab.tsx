@@ -21,7 +21,7 @@ interface Catalogue { screens: { key: string; label: string; group: string; view
 interface Group { id: number; name: string; sort: number; roles: number }
 
 const RIGHTS: Record<string, string> = { raise: 'Raise request or bill', approve: 'Approve', issue_po: 'Issue PO', receive: 'Receive or dispatch goods', match: 'Match invoice',
-  pay: 'Payment and Zoho', masters: 'Edit masters', upload: 'Upload opening and bulk data' }
+  pay: 'Payment and Zoho', masters: 'Edit masters (properties, mapping, rates, bill types)', catalog: 'Create and edit items and vendors (Finance approves)', upload: 'Upload opening and bulk data' }
 const STEPS: [string, string][] = [['cc', 'Cost Controller: approves requests'], ['l2', 'Cluster Manager: approves event requests and bills'], ['preop', 'Pre-opening Team: approves warehouse and pre-opening orders'],
   ['purchase', 'Purchase Team: issues POs'], ['store', 'Receiving / Store: receives goods'], ['wh', 'Warehouse Manager: dispatches and receives'], ['ap', 'Accounts Payable: matches invoices'],
   ['finance', 'Finance: approves payment'], ['staff', 'Property staff: raises requests'], ['l1', 'Property Manager: raises requests'], ['', 'No step in the flow: view and reports only']]

@@ -10,6 +10,7 @@ import { setVendorToken, vendorToken, vget, vpost } from './portalApi'
 import { VendorOrderPage, VendorOrdersPage } from './VendorOrders'
 import { VendorPaymentsPage } from './VendorPayments'
 import { VendorDashboard } from './VendorDashboard'
+import { VendorDetailsPage } from './VendorDetails'
 
 export interface Vendor { id: number; code: string; name: string; email: string; must_change: boolean }
 /** A vendor the signed-in email can open. */
@@ -63,6 +64,7 @@ export function VendorPortal() {
             <NavLink to="/vendor" end>Dashboard</NavLink>
             <NavLink to="/vendor/orders">Orders</NavLink>
             <NavLink to="/vendor/payments">Payments</NavLink>
+            <NavLink to="/vendor/details">My details</NavLink>
             <NavLink to="/vendor/password">Password</NavLink>
             <button className="link" onClick={signOut}>Sign out</button>
           </nav>
@@ -76,6 +78,7 @@ export function VendorPortal() {
               <Route path="orders" element={<VendorOrdersPage />} />
               <Route path="orders/:id" element={<VendorOrderPage />} />
               <Route path="payments" element={<VendorPaymentsPage />} />
+              <Route path="details" element={<VendorDetailsPage />} />
               <Route path="password" element={<PasswordPage />} />
               <Route path="*" element={<Navigate to="/vendor" replace />} />
             </Routes>

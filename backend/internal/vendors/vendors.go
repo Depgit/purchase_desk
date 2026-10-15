@@ -19,6 +19,7 @@ import (
 	"purchasedesk/internal/encryption"
 	"purchasedesk/internal/httpjson"
 	"purchasedesk/internal/indiantax"
+	"purchasedesk/internal/masterapproval"
 	"purchasedesk/internal/money"
 	"purchasedesk/internal/textclean"
 	"purchasedesk/internal/uploadedfiles"
@@ -73,6 +74,7 @@ type Vendor struct {
 	SubCategoryIDs []int64  `json:"sub_category_ids"`
 	BillTypeIDs    []int64  `json:"bill_type_ids"`
 	Supplies       []string `json:"supplies"`
+	FinChange      string   `json:"fin_change"` // an edit waiting for Finance: what changed
 }
 
 const selectVendor = `SELECT v.id, v.code, v.vendor_type, v.legal_name, v.address, v.city, v.pin, v.contact_person, v.mobile, v.email,
@@ -81,7 +83,8 @@ const selectVendor = `SELECT v.id, v.code, v.vendor_type, v.legal_name, v.addres
 	coalesce((SELECT array_agg(sub_category_id ORDER BY sub_category_id) FROM vendor_sub_category WHERE vendor_id=v.id),'{}'),
 	coalesce((SELECT array_agg(bill_type_id ORDER BY bill_type_id) FROM vendor_bill_type WHERE vendor_id=v.id),'{}'),
 	coalesce((SELECT array_agg(sc.name ORDER BY sc.name) FROM vendor_sub_category x JOIN sub_category sc ON sc.id=x.sub_category_id WHERE x.vendor_id=v.id),'{}') ||
-	coalesce((SELECT array_agg(b.name ORDER BY b.name) FROM vendor_bill_type x JOIN bill_type b ON b.id=x.bill_type_id WHERE x.vendor_id=v.id),'{}')
+	coalesce((SELECT array_agg(b.name ORDER BY b.name) FROM vendor_bill_type x JOIN bill_type b ON b.id=x.bill_type_id WHERE x.vendor_id=v.id),'{}'),
+	v.fin_change
 	FROM vendor v LEFT JOIN app_user bu ON bu.id=v.bank_verified_by`
 
 func scan(row pgx.CollectableRow) (Vendor, error) {
@@ -90,7 +93,7 @@ func scan(row pgx.CollectableRow) (Vendor, error) {
 	err := row.Scan(&v.ID, &v.Code, &v.Type, &v.Name, &v.Address, &v.City, &v.PIN, &v.Contact, &v.Mobile, &v.Email,
 		&v.GSTRegistered, &v.GSTIN, &v.PAN, &v.StateCode, &v.MSME, &v.Udyam, &v.BankHolder, &last4, &v.IFSC,
 		&v.BankProofID, &v.MSMEFileID, &v.BankVerified, &v.BankVerifiedBy, &v.Terms, &v.SheetMode, &v.SheetTime, &v.SheetChannel, &v.Active, &v.InactiveReason,
-		&v.SubCategoryIDs, &v.BillTypeIDs, &v.Supplies)
+		&v.SubCategoryIDs, &v.BillTypeIDs, &v.Supplies, &v.FinChange)
 	if last4 != "" {
 		v.BankMasked = "••••••" + last4
 	}
@@ -300,7 +303,7 @@ func nullIfEmpty(s string) any {
 
 func (s *Service) save(w http.ResponseWriter, r *http.Request) error {
 	u := access.From(r)
-	if err := access.NeedRight(u, access.Masters, "edit masters"); err != nil {
+	if err := access.NeedRight(u, access.Catalog, "create or edit vendors"); err != nil {
 		return err
 	}
 	in, proof, err := readInput(r)
@@ -370,6 +373,11 @@ func (s *Service) Update(ctx context.Context, tx pgx.Tx, u *access.User, id int6
 		return "", false, err
 	}
 	resent := in.BankAccount != "" || oldGST != in.GSTRegistered || oldGSTIN != in.GSTIN || oldPAN != in.PAN
+	before, err := masterapproval.Snapshot(ctx, tx, "vendor", id)
+	if err != nil {
+		return "", false, err
+	}
+	before["supplies"] = supplies(ctx, tx, id)
 	if _, err := tx.Exec(ctx, `UPDATE vendor SET vendor_type=$2, legal_name=$3, address=coalesce(nullif($4,''),address), city=coalesce(nullif($5,''),city), pin=coalesce(nullif($6,''),pin),
 		contact_person=coalesce(nullif($7,''),contact_person), mobile=$8, email=$9, gst_registered=$10, gstin=$11, pan=$12, state_code=$13, msme=$14, udyam=$15,
 		bank_holder=coalesce(nullif($16,''),bank_holder), payment_terms=$17,
@@ -394,11 +402,43 @@ func (s *Service) Update(ctx context.Context, tx pgx.Tx, u *access.User, id int6
 		return "", false, err
 	}
 	if in.Type == "goods" {
-		_, err := tx.Exec(ctx, `INSERT INTO vendor_sub_category(vendor_id,sub_category_id) SELECT $1, unnest($2::bigint[]) ON CONFLICT DO NOTHING`, id, in.SubCategoryIDs)
-		return code, resent, err
+		if _, err := tx.Exec(ctx, `INSERT INTO vendor_sub_category(vendor_id,sub_category_id) SELECT $1, unnest($2::bigint[]) ON CONFLICT DO NOTHING`, id, in.SubCategoryIDs); err != nil {
+			return "", false, err
+		}
 	}
-	_, err := tx.Exec(ctx, `INSERT INTO vendor_bill_type(vendor_id,bill_type_id) SELECT $1, unnest($2::bigint[]) ON CONFLICT DO NOTHING`, id, in.BillTypeIDs)
-	return code, resent, err
+	// Any change to a verified vendor sends it back to Finance (it cannot be used until verified again), and once
+	// verified an edit of a vendor already in Zoho goes to Zoho.
+	after, err := masterapproval.Snapshot(ctx, tx, "vendor", id)
+	if err != nil {
+		return "", false, err
+	}
+	after["supplies"] = supplies(ctx, tx, id)
+	reVerify := false
+	if changed := masterapproval.Changed(before, after); len(changed) > 0 {
+		what := "Edited by " + u.Name + ": " + strings.Join(changed, ", ")
+		wasVerified, _ := before["bank_verified"].(bool)
+		if _, err := tx.Exec(ctx, `UPDATE vendor SET bank_verified=FALSE,
+			fin_change=CASE WHEN $3 THEN $2 ELSE concat_ws('; ', nullif(fin_change,''), $2::text) END,
+			zoho_update_due=EXISTS (SELECT 1 FROM zoho_map_vendor m WHERE m.vendor_id=$1) WHERE id=$1`, id, what, wasVerified); err != nil {
+			return "", false, err
+		}
+		reVerify = wasVerified
+		if err := auditlog.Write(ctx, tx, u, "Vendors", "Vendor edited, waits for Finance", code, strings.Join(changed, ", ")); err != nil {
+			return "", false, err
+		}
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO vendor_bill_type(vendor_id,bill_type_id) SELECT $1, unnest($2::bigint[]) ON CONFLICT DO NOTHING`, id, in.BillTypeIDs); err != nil {
+		return "", false, err
+	}
+	return code, resent || reVerify, nil
+}
+
+// supplies is what a vendor supplies: its sub-categories (goods) or bill types, to compare an edit with.
+func supplies(ctx context.Context, q database.Q, id int64) []int64 {
+	var out []int64
+	_ = q.QueryRow(ctx, `SELECT coalesce(array_agg(x ORDER BY x),'{}') FROM (SELECT sub_category_id x FROM vendor_sub_category WHERE vendor_id=$1
+		UNION ALL SELECT -bill_type_id FROM vendor_bill_type WHERE vendor_id=$1) s`, id).Scan(&out)
+	return out
 }
 
 // Seal encrypts a bank account number for storage and gives its last four digits ("" for none).
@@ -424,7 +464,7 @@ func (s *Service) verify(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 	var code, name, last4 string
-	if err := s.DB.QueryRow(r.Context(), `UPDATE vendor SET bank_verified=TRUE, bank_verified_by=$2, bank_verified_at=now() WHERE id=$1 RETURNING code, legal_name, bank_account_last4`, id, u.ID).Scan(&code, &name, &last4); err != nil {
+	if err := s.DB.QueryRow(r.Context(), `UPDATE vendor SET bank_verified=TRUE, bank_verified_by=$2, bank_verified_at=now(), fin_change='' WHERE id=$1 RETURNING code, legal_name, bank_account_last4`, id, u.ID).Scan(&code, &name, &last4); err != nil {
 		return err
 	}
 	if last4 == "" {

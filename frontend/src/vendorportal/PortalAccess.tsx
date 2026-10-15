@@ -19,7 +19,7 @@ export function PortalAccess({ vendorId, canEdit }: { vendorId: number; canEdit:
   const [given, setGiven] = useState<{ email: string; password: string; url: string; emailed: boolean; message: string } | null>(null)
   const a = useAction()
   if (!data) return null
-  const may = canEdit && (me?.is_admin || hasRight('masters') || hasRight('issue_po'))
+  const may = canEdit && (me?.is_admin || hasRight('masters') || hasRight('catalog') || hasRight('issue_po'))
   const on = data.enabled && data.active
   return (
     <section className="card"><h2>Vendor portal</h2>

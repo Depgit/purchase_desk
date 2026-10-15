@@ -24,6 +24,7 @@ import (
 	"purchasedesk/internal/passwords"
 	"purchasedesk/internal/sessiontoken"
 	"purchasedesk/internal/uploadedfiles"
+	"purchasedesk/internal/vendors"
 )
 
 const sessionTTL = 12 * time.Hour
@@ -32,6 +33,7 @@ type Service struct {
 	DB       *pgxpool.Pool
 	Tokens   sessiontoken.Tokens
 	Files    *uploadedfiles.Service
+	Vendors  *vendors.Service // the vendor's own change requests ("My details")
 	Messages *messaging.Sender
 	BaseURL  string // the app's address, for the sign-in link sent to a vendor
 
@@ -59,6 +61,8 @@ func (s *Service) VendorRoutes(r chi.Router) {
 		r.Post("/vendor-portal/orders/{id}/invoice", httpjson.Wrap(s.invoice))
 		r.Get("/vendor-portal/payments", httpjson.Wrap(s.payments))
 		r.Get("/vendor-portal/dashboard", httpjson.Wrap(s.dashboard))
+		r.Get("/vendor-portal/details", httpjson.Wrap(s.details))
+		r.Post("/vendor-portal/details", httpjson.Wrap(s.proposeDetails))
 		r.Get("/vendor-portal/files/{id}", httpjson.Wrap(s.file))
 	})
 }

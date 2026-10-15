@@ -19,6 +19,7 @@ import (
 	"purchasedesk/internal/database"
 	"purchasedesk/internal/httpjson"
 	"purchasedesk/internal/indiantax"
+	"purchasedesk/internal/masterapproval"
 	"purchasedesk/internal/textclean"
 	"purchasedesk/internal/zohowake"
 )
@@ -105,7 +106,14 @@ func SaveCategory(ctx context.Context, q database.Q, u *access.User, id int64, i
 	if err := q.QueryRow(ctx, `SELECT name, is_fb FROM category WHERE id=$1`, id).Scan(&old, &oldFB); err != nil {
 		return 0, httpjson.NotFound("Category")
 	}
+	before, err := masterapproval.Snapshot(ctx, q, "category", id)
+	if err != nil {
+		return 0, err
+	}
 	if _, err := q.Exec(ctx, `UPDATE category SET name=$2, is_fb=$3 WHERE id=$1`, id, in.Name, in.IsFB); err != nil {
+		return 0, err
+	}
+	if _, err := masterapproval.Edited(ctx, q, u, "category", id, before); err != nil { // an approved category waits for Finance again
 		return 0, err
 	}
 	return id, auditlog.Write(ctx, q, u, "Items", "Category edited", in.Name, fmt.Sprintf("%s, F&B %v → %s, F&B %v", old, oldFB, in.Name, in.IsFB))
@@ -114,7 +122,7 @@ func SaveCategory(ctx context.Context, q database.Q, u *access.User, id int64, i
 // saveCategory adds a category, or edits its name and F&B flag (PUT /categories/{id}).
 func (s *Service) saveCategory(w http.ResponseWriter, r *http.Request) error {
 	u := access.From(r)
-	if err := access.NeedRight(u, access.Masters, "edit masters"); err != nil {
+	if err := access.NeedRight(u, access.Catalog, "create or edit items and item setup"); err != nil {
 		return err
 	}
 	var in CategoryInput
@@ -135,7 +143,7 @@ func (s *Service) saveCategory(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
-	return httpjson.OK(w, map[string]int64{"id": id})
+	return httpjson.OK(w, map[string]any{"id": id, "message": strings.TrimSpace("Saved. " + masterapproval.WaitNote(r.Context(), s.DB, "category", id))})
 }
 
 type SubCategory struct {
@@ -245,7 +253,14 @@ func SaveSubCategory(ctx context.Context, q database.Q, u *access.User, id int64
 	if in.AutoPO != nil {
 		auto = *in.AutoPO
 	}
+	before, err := masterapproval.Snapshot(ctx, q, "sub_category", id)
+	if err != nil {
+		return 0, err
+	}
 	if _, err := q.Exec(ctx, `UPDATE sub_category SET name=$2, category_id=$3, auto_po=$4 WHERE id=$1`, id, in.Name, catID, auto); err != nil {
+		return 0, err
+	}
+	if _, err := masterapproval.Edited(ctx, q, u, "subcat", id, before); err != nil { // an approved sub-category waits for Finance again
 		return 0, err
 	}
 	var newCat string
@@ -259,7 +274,7 @@ func SaveSubCategory(ctx context.Context, q database.Q, u *access.User, id int64
 
 func (s *Service) saveSubCategory(w http.ResponseWriter, r *http.Request) error {
 	u := access.From(r)
-	if err := access.NeedRight(u, access.Masters, "edit masters"); err != nil {
+	if err := access.NeedRight(u, access.Catalog, "create or edit items and item setup"); err != nil {
 		return err
 	}
 	var in SubCategoryInput
@@ -280,7 +295,7 @@ func (s *Service) saveSubCategory(w http.ResponseWriter, r *http.Request) error 
 	if err != nil {
 		return err
 	}
-	return httpjson.OK(w, map[string]int64{"id": id})
+	return httpjson.OK(w, map[string]any{"id": id, "message": strings.TrimSpace("Saved. " + masterapproval.WaitNote(r.Context(), s.DB, "subcat", id))})
 }
 
 type Named struct {
@@ -328,7 +343,7 @@ func (s *Service) listPackSizes(w http.ResponseWriter, r *http.Request) error {
 
 func (s *Service) createNamed(w http.ResponseWriter, r *http.Request, table, label string) error {
 	u := access.From(r)
-	if err := access.NeedRight(u, access.Masters, "edit masters"); err != nil {
+	if err := access.NeedRight(u, access.Catalog, "create or edit items and item setup"); err != nil {
 		return err
 	}
 	var in struct {
@@ -629,9 +644,16 @@ func Update(ctx context.Context, tx pgx.Tx, u *access.User, id int64, in *SKUInp
 	if err := tx.QueryRow(ctx, `SELECT k.code||' · '||concat_ws(' ', b.name, k.item_name)||' · '||k.gst_pct||'%' FROM sku k LEFT JOIN brand b ON b.id=k.brand_id WHERE k.id=$1`, id).Scan(&old); err != nil {
 		return "", err
 	}
+	before, err := masterapproval.Snapshot(ctx, tx, "sku", id)
+	if err != nil {
+		return "", err
+	}
 	if err := tx.QueryRow(ctx, `UPDATE sku SET brand_id=$2, item_name=$3, pack_size_id=$4, gst_pct=$5, hsn=$6, scope=$7, cluster_ids=$8, property_ids=$9, tds_section=$10, tds_pct=$11,
 		daily_use=coalesce($12, daily_use), wh_stocked=coalesce($13, wh_stocked) WHERE id=$1 RETURNING code`,
 		id, in.brandRef(), in.ItemName, in.PackSizeID, in.GST, in.HSN, in.Scope, in.ClusterIDs, in.PropertyIDs, in.TDSSection, in.tdsPct, in.DailyUse, in.WHStocked).Scan(&code); err != nil {
+		return "", err
+	}
+	if _, err := masterapproval.Edited(ctx, tx, u, "item", id, before); err != nil { // an approved item waits for Finance again
 		return "", err
 	}
 	return code, auditlog.Write(ctx, tx, u, "Items", "SKU edited", code, fmt.Sprintf("%s → %s · %v%%", old, strings.TrimSpace(in.BrandName+" "+in.ItemName), in.GST))
@@ -639,7 +661,7 @@ func Update(ctx context.Context, tx pgx.Tx, u *access.User, id int64, in *SKUInp
 
 func (s *Service) saveSKU(w http.ResponseWriter, r *http.Request) error {
 	u := access.From(r)
-	if err := access.NeedRight(u, access.Masters, "edit masters"); err != nil {
+	if err := access.NeedRight(u, access.Catalog, "create or edit items and item setup"); err != nil {
 		return err
 	}
 	var in SKUInput
@@ -674,5 +696,9 @@ func (s *Service) saveSKU(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
-	return httpjson.OK(w, map[string]string{"code": code})
+	msg := code + " saved."
+	if id != 0 {
+		msg = strings.TrimSpace(msg + " " + masterapproval.WaitNote(r.Context(), s.DB, "item", id))
+	}
+	return httpjson.OK(w, map[string]string{"code": code, "message": msg})
 }

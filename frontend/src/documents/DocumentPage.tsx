@@ -4,6 +4,7 @@ import { Link, useNavigate, useParams } from 'react-router-dom'
 import { fileUrl, post } from '../api/client'
 import { useApi } from '../api/useApi'
 import { AdvancesCard } from '../advances/AdvancesCard'
+import { PAYMENT_TERMS } from '../api/types'
 import type { Doc, Invoice } from '../api/types'
 import { ReasonModal, type ReasonKind } from '../approvals/ReasonModal'
 import { useSession } from '../auth/session'
@@ -194,7 +195,7 @@ function sentBack(detail: Detail, invoices: Invoice[]): SentBack | null {
 function ActionPanel({ detail, invoices, onDone }: { detail: Detail; invoices: Invoice[] | null | undefined; onDone: () => void }) {
   const d = detail.document
   const acts = detail.actions
-  if (d.status === 'APPROVED' && d.advance_hold_po) return <p className="note warn"><b>{d.advance_hold_po} is prepared on Advance terms and waits for Finance to approve the advance.</b> It is raised and sent to {d.vendor} only once Finance approves it (see Advance to vendor below). If Finance rejects the advance, the Purchase Team issues the PO again.</p>
+  if (d.status === 'APPROVED' && d.advance_hold_po) return <p className="note warn"><b>{d.advance_hold_po} is prepared on Advance terms and waits for the advance to be {d.advance_approved ? 'paid' : 'approved and paid'}.</b> It is raised and sent to {d.vendor} only once the advance shows Paid: Finance marks it paid with the UTR, or it is read paid from Zoho (see Advance to vendor below). Until then there is no goods receipt. If Finance rejects the advance, the Purchase Team issues the PO again.</p>
   if (acts.includes('approve')) return <ApprovePanel doc={d} canRoute={acts.includes('route')} canPreop={acts.includes('preop_approver')} raisesPO={!!detail.raises_po} onDone={onDone} />
   if (acts.includes('resubmit')) return <ResubmitPanel doc={d} canEdit={acts.includes('edit')} onDone={onDone} />
   if (acts.includes('issue_po')) return <IssuePOPanel doc={d} onDone={onDone} />
@@ -225,7 +226,9 @@ function ApprovePanel({ doc, canRoute, canPreop, raisesPO, onDone }: { doc: Doc;
   // The last approval raises the PO: estimated rates are confirmed here, and on Advance terms the advance is asked.
   const estimated = raisesPO ? doc.lines.filter((l) => l.qty > 0 && (l.estimated || l.rate <= 0)) : []
   const [rates, setRates] = useState<Record<number, string>>(Object.fromEntries(estimated.map((l) => [l.id, l.rate > 0 ? String(l.rate) : ''])))
-  const advanceTerms = raisesPO && doc.vendor_terms === 'Advance'
+  // The approver picks the PO's payment terms (the vendor's own by default); Advance asks the advance for Finance.
+  const [terms, setTerms] = useState(PAYMENT_TERMS.includes(doc.vendor_terms) ? doc.vendor_terms : 'Net 30')
+  const advanceTerms = raisesPO && terms === 'Advance'
   const [adv, setAdv] = useState<AdvanceDraft>(newAdvance())
   const poValue = doc.lines.reduce((t, l) => t + lineValue(q[l.id] === undefined ? l.qty : +q[l.id] || 0, estimated.some((e) => e.id === l.id) ? +rates[l.id] || 0 : l.rate, l.gst_pct), 0)
   const approve = () => {
@@ -234,7 +237,7 @@ function ApprovePanel({ doc, canRoute, canPreop, raisesPO, onDone }: { doc: Doc;
     if (advanceTerms) { const p = advanceProblem(adv, poValue, poValue); if (p) return a.setErrors([p]) }
     a.run(() => post(`/documents/${doc.id}/approve`, {
       quantities: changed, note,
-      ...(raisesPO ? { rates: Object.fromEntries(estimated.map((l) => [l.id, +rates[l.id] || 0])), advance: advanceTerms ? advanceBody(adv, poValue) : undefined } : {}),
+      ...(raisesPO ? { payment_terms: terms, rates: Object.fromEntries(estimated.map((l) => [l.id, +rates[l.id] || 0])), advance: advanceTerms ? advanceBody(adv, poValue) : undefined } : {}),
     }), (r: any) => { onDone(); return r.message })
   }
   return (
@@ -248,8 +251,11 @@ function ApprovePanel({ doc, canRoute, canPreop, raisesPO, onDone }: { doc: Doc;
         <p className="hint">Change a quantity before approving, or set it to 0 to drop that item. The requester sees what changed and by whom.</p>
       </>}
       {raisesPO && <div className="note"><b>Approving raises the PO.</b> {advanceTerms
-        ? `${doc.vendor} is on Advance terms: the PO is prepared and goes to the vendor once Finance approves the advance below.`
-        : `It goes to ${doc.vendor} at once, on its ${doc.vendor_terms || 'usual'} terms.`}</div>}
+        ? `On Advance terms the PO is prepared and goes to ${doc.vendor} once Finance approves and pays the advance below.`
+        : `It goes to ${doc.vendor} on ${terms} terms.`}</div>}
+      {raisesPO && <label className="field"><span>Payment terms for this PO</span>
+        <select value={terms} onChange={(e) => setTerms(e.target.value)}>{PAYMENT_TERMS.map((t) => <option key={t} value={t}>{t}{t === doc.vendor_terms ? ' (vendor\'s usual)' : ''}</option>)}</select>
+        <span className="hint">Choose Advance when the vendor must be paid before it dispatches; you then say how much.</span></label>}
       {estimated.length > 0 && <div className="grid2">{estimated.map((l) => (
         <label className="field" key={l.id}><span>Rate for {l.item_name} (₹, before GST)</span>
           <input type="number" min="0" step="0.01" inputMode="decimal" value={rates[l.id]} onChange={(e) => setRates({ ...rates, [l.id]: e.target.value })} />

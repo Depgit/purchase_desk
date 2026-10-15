@@ -34,7 +34,7 @@ export function ItemsPage() {
   const { data, reload } = useApi<SKU[]>('/skus')
   const [edit, setEdit] = useState<SKU | 'new' | null>(null)
   const [upload, setUpload] = useState(false)
-  const ed = sc.edit && hasRight('masters')
+  const ed = sc.edit && hasRight('catalog')
   const scope = (s: SKU) => s.scope === 'all' ? 'All properties' : [...s.cluster_ids.map((c) => l?.clusters.find((x) => x.id === c)?.name + ' cluster'), s.property_ids.length ? `${s.property_ids.length} properties` : ''].filter(Boolean).join(' + ')
   return (
     <>
@@ -109,7 +109,7 @@ function SKUModal({ sku, onClose, onDone }: { sku: SKU | null; onClose: () => vo
       {sku && <ZohoMasterCard kind="item" id={sku.id} />}
       <Errors list={a.errors} />
       <div className="btns"><button className="btn ghost" onClick={onClose}>Cancel</button>
-        <button className="btn" disabled={a.busy} onClick={() => a.run(() => sku ? put('/skus/' + sku.id, f) : post('/skus', f), (r: any) => { onDone(); return (r.code || '') + ' saved' })}>Save item</button></div>
+        <button className="btn" disabled={a.busy} onClick={() => a.run(() => sku ? put('/skus/' + sku.id, f) : post('/skus', f), (r: any) => { onDone(); return r.message || (r.code || '') + ' saved' })}>Save item</button></div>
     </Modal>
   )
 }

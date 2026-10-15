@@ -37,7 +37,7 @@ type Service struct {
 	Guard    *access.Guard
 	Files    *uploadedfiles.Service
 	Messages *messaging.Sender
-	// POReleased sends the vendor a PO that was raised when Finance approved its advance (purchaseorders.SendPO).
+	// POReleased sends the vendor a PO that was raised when its advance was paid (purchaseorders.Release).
 	POReleased func(u *access.User, docID int64)
 }
 
@@ -72,7 +72,7 @@ type Advance struct {
 	PONumber     string     `json:"po_number"`
 	Kind         string     `json:"kind"`
 	POOpen       bool       `json:"po_open"` // goods still due on the PO
-	POHeld       bool       `json:"po_held"` // the PO waits for this advance to be approved before it is raised
+	POHeld       bool       `json:"po_held"` // the PO waits for this advance to be approved and paid before it is raised
 	VendorID     int64      `json:"vendor_id"`
 	Vendor       string     `json:"vendor"`
 	VendorEmail  string     `json:"-"`
@@ -374,7 +374,7 @@ func CreateAtApproval(ctx context.Context, tx pgx.Tx, u *access.User, role strin
 func create(ctx context.Context, tx pgx.Tx, u *access.User, role string, files *uploadedfiles.Service, d *documents.Doc, in Ask, proforma *uploadedfiles.File) (string, error) {
 	po := d.PONumber
 	if d.AdvanceHold != "" {
-		po = d.AdvanceHold // the PO is raised under this number once Finance approves the advance
+		po = d.AdvanceHold // the PO is raised under this number once the advance is approved and paid
 	}
 	value, poTDS, err := poValues(ctx, tx, d.ID)
 	if err != nil {
@@ -456,7 +456,7 @@ func (s *Service) request(w http.ResponseWriter, r *http.Request) error {
 			return err
 		}
 		if d.AdvanceHold != "" {
-			return httpjson.Conflict("%s is waiting for Finance to approve its first advance.", d.AdvanceHold)
+			return httpjson.Conflict("%s is waiting for its first advance to be approved and paid.", d.AdvanceHold)
 		}
 		msg, err = Create(r.Context(), tx, u, s.Files, d, in, proforma)
 		return err
@@ -492,7 +492,6 @@ func (s *Service) decide(action string) httpjson.Handler {
 		}
 		in.Note = strings.TrimSpace(in.Note)
 		var msg string
-		var released int64 // the held PO raised by approving this advance
 		err = pgx.BeginFunc(r.Context(), s.DB, func(tx pgx.Tx) error {
 			x, err := s.one(r.Context(), tx, u, id, true)
 			if err != nil {
@@ -538,16 +537,11 @@ func (s *Service) decide(action string) httpjson.Handler {
 			if !x.POHeld {
 				return nil
 			}
-			// The PO was waiting for this advance: approved, it is raised and goes to the vendor; rejected or
-			// cancelled, the request goes back to Purchase to issue the PO again.
+			// The PO was waiting for this advance: approved, it still waits until the advance is paid (releaseHeld);
+			// rejected or cancelled, the request goes back to Purchase to issue the PO again.
 			if status == Approved {
-				po, err := documents.ReleaseHeldPO(r.Context(), tx, x.DocumentID)
-				if err != nil || po == "" {
-					return err
-				}
-				released = x.DocumentID
-				msg += ". " + po + " is raised and sent to " + x.Vendor
-				return auditlog.Doc(r.Context(), tx, u, role, x.DocumentID, x.DocNumber, module(x.Kind), po+" issued to vendor", "Advance "+x.Number+" approved by Finance")
+				msg += ". " + x.PONumber + " goes to " + x.Vendor + " once the advance is paid: mark it paid with the UTR, or read it from Zoho"
+				return nil
 			}
 			po, err := documents.ClearHeldPO(r.Context(), tx, x.DocumentID)
 			if err != nil || po == "" {
@@ -558,9 +552,6 @@ func (s *Service) decide(action string) httpjson.Handler {
 		})
 		if err != nil {
 			return err
-		}
-		if released != 0 && s.POReleased != nil {
-			s.POReleased(u, released)
 		}
 		return httpjson.OK(w, map[string]string{"message": msg})
 	}
@@ -605,6 +596,7 @@ func (s *Service) paid(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 	var x *Advance
+	var po string // the held PO raised now the advance is paid
 	err = pgx.BeginFunc(r.Context(), s.DB, func(tx pgx.Tx) error {
 		if x, err = s.one(r.Context(), tx, u, id, true); err != nil {
 			return err
@@ -618,17 +610,81 @@ func (s *Service) paid(w http.ResponseWriter, r *http.Request) error {
 		if _, err := tx.Exec(r.Context(), `UPDATE advance SET status='PAID', paid_by=$2, paid_on=$3, payment_ref=$4 WHERE id=$1`, id, u.ID, on, in.Reference); err != nil {
 			return err
 		}
-		return auditlog.Doc(r.Context(), tx, u, finance(u, x).Name, x.DocumentID, x.DocNumber, module(x.Kind),
-			fmt.Sprintf("Advance %s paid · %s", x.Number, money.INR(x.PayVendor)), in.Reference+" on "+clock.YMD(on))
+		role := finance(u, x).Name
+		if err := auditlog.Doc(r.Context(), tx, u, role, x.DocumentID, x.DocNumber, module(x.Kind),
+			fmt.Sprintf("Advance %s paid · %s", x.Number, money.INR(x.PayVendor)), in.Reference+" on "+clock.YMD(on)); err != nil {
+			return err
+		}
+		po, err = releaseHeld(r.Context(), tx, u, role, x)
+		return err
 	})
 	if err != nil {
 		return err
 	}
 	s.tellVendor(u, x, in.Reference, clock.YMD(on))
-	return httpjson.OK(w, map[string]string{"message": fmt.Sprintf("%s paid: %s to %s", x.Number, money.INR(x.PayVendor), x.Vendor)})
+	msg := fmt.Sprintf("%s paid: %s to %s", x.Number, money.INR(x.PayVendor), x.Vendor)
+	if po != "" {
+		s.released(u, x.DocumentID)
+		msg += ". " + po + " is raised and goes to the vendor"
+	}
+	return httpjson.OK(w, map[string]string{"message": msg})
 }
 
-// tellVendor emails the vendor that the advance is paid (template advpaid), in the background.
+// PaidInZoho marks an approved advance paid from the vendor payment Finance recorded in Zoho (zohopush.ReadAdvances):
+// Zoho's date and reference, the payment linked so it is never sent to Zoho again, and the vendor told as usual.
+func (s *Service) PaidInZoho(ctx context.Context, id int64, on time.Time, ref, paymentID, paymentNo string) (string, error) {
+	var x *Advance
+	var po string
+	err := pgx.BeginFunc(ctx, s.DB, func(tx pgx.Tx) error {
+		out, err := s.load(ctx, tx, `WHERE a.id=$1 FOR UPDATE OF a`, id)
+		if err != nil {
+			return err
+		}
+		if len(out) == 0 || out[0].Status != Approved {
+			return httpjson.Conflict("This advance is no longer waiting for payment.")
+		}
+		x = &out[0]
+		if _, err := tx.Exec(ctx, `UPDATE advance SET status='PAID', paid_on=$2, payment_ref=$3, zoho_payment_id=$4, zoho_error='', zoho_at=now() WHERE id=$1`, id, on, ref, paymentID); err != nil {
+			return err
+		}
+		if err := auditlog.Doc(ctx, tx, nil, "Zoho", x.DocumentID, x.DocNumber, module(x.Kind),
+			fmt.Sprintf("Advance %s paid · %s (read from Zoho)", x.Number, money.INR(x.PayVendor)), "Zoho payment "+paymentNo+" · "+ref+" on "+clock.YMD(on)); err != nil {
+			return err
+		}
+		po, err = releaseHeld(ctx, tx, nil, "Zoho", x)
+		return err
+	})
+	if err != nil {
+		return "", err
+	}
+	s.tellVendor(nil, x, ref, clock.YMD(on))
+	if po != "" {
+		s.released(nil, x.DocumentID)
+	}
+	return x.Number, nil
+}
+
+// releaseHeld raises the PO that waited for this advance, now it is paid (the PO number, or "" when none waited).
+func releaseHeld(ctx context.Context, tx pgx.Tx, u *access.User, role string, x *Advance) (string, error) {
+	if !x.POHeld {
+		return "", nil
+	}
+	po, err := documents.ReleaseHeldPO(ctx, tx, x.DocumentID)
+	if err != nil || po == "" {
+		return po, err
+	}
+	return po, auditlog.Doc(ctx, tx, u, role, x.DocumentID, x.DocNumber, module(x.Kind), po+" issued to vendor", "Advance "+x.Number+" paid")
+}
+
+// released hands a PO raised by an advance payment on to the vendor (after the transaction).
+func (s *Service) released(u *access.User, docID int64) {
+	if s.POReleased != nil {
+		s.POReleased(u, docID)
+	}
+}
+
+// tellVendor emails the vendor that the advance is paid (template advpaid), in the background. u is nil when the
+// payment was read from Zoho.
 func (s *Service) tellVendor(u *access.User, x *Advance, ref, on string) {
 	if s.Messages == nil || x.VendorEmail == "" {
 		return
@@ -642,7 +698,11 @@ func (s *Service) tellVendor(u *access.User, x *Advance, ref, on string) {
 		}
 		text := flowsettings.Fill(body, map[string]string{"vendor": x.Vendor, "amount": money.INR(x.PayVendor), "po_number": x.PONumber, "property": x.Property,
 			"date": on, "reference": ref, "advance": x.Number})
-		if _, err := s.Messages.Email(ctx, x.VendorEmail, "Advance paid on "+x.PONumber+" · "+x.Property, text, nil, x.PONumber, &u.ID); err != nil {
+		var by *int64
+		if u != nil {
+			by = &u.ID
+		}
+		if _, err := s.Messages.Email(ctx, x.VendorEmail, "Advance paid on "+x.PONumber+" · "+x.Property, text, nil, x.PONumber, by); err != nil {
 			log.Printf("advance email %s: %v", x.Number, err)
 		}
 	}()

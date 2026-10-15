@@ -42,6 +42,8 @@ export interface Doc {
   approved_at: string | null; po_number: string; po_date: string | null; deliver_by: string; payment_terms: string; po_closed_short: boolean
   /** Set while the PO waits for Finance to approve its advance: the number the PO will be raised under. */
   advance_hold_po: string
+  /** On hold, the advance is approved and only its payment is awaited. */
+  advance_approved: boolean
   /** The Zoho Books purchase order kept in step with this PO; zoho_po_sync is what is still to send (create, update, cancel). */
   zoho_po_id: string; zoho_po_sync: '' | 'create' | 'update' | 'cancel'; zoho_po_error: string
   /** What the vendor did with the PO (vendor portal, or confirmed by Purchase): '', accepted or declined. */
@@ -95,7 +97,7 @@ export const PAYMENT_TERMS = ['Net 15', 'Net 30', 'Net 45', '15th of next month'
  * vendor's invoices; what is left is refunded or carried forward to the vendor's next invoices. */
 export interface Advance {
   id: number; number: string; document_id: number; document_number: string; po_number: string; kind: string; po_open: boolean
-  /** The PO waits for this advance to be approved before it is raised. */
+  /** The PO waits for this advance to be approved and paid before it is raised. */
   po_held: boolean
   vendor_id: number; vendor: string; property_id: number; property: string; amount: number; pct: number | null; tds_amount: number; pay_vendor: number
   reason: string; note: string; proforma_file_id: number | null; status: 'PENDING' | 'APPROVED' | 'PAID' | 'REJECTED' | 'CANCELLED'

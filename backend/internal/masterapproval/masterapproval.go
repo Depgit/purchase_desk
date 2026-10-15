@@ -38,8 +38,15 @@ var tables = map[string]struct{ table, label string }{
 	"property": {"property", "Property"}, "billtype": {"bill_type", "Bill type"}, "head": {"expense_head", "Expense head"},
 }
 
+// editable masters keep the values before an edit (fin_before), so a rejected edit can be undone.
+var editable = map[string]bool{"category": true, "subcat": true, "item": true}
+
+// VendorChange approves or rejects a change a vendor asked for on the vendor portal (set by the vendors package, which
+// knows how to save a vendor).
+var VendorChange func(ctx context.Context, tx pgx.Tx, u *access.User, id int64, approve bool, reason string) (string, error)
+
 // order approves parents before what is built on them (a category before its sub-categories, those before items).
-var order = map[string]int{"category": 0, "subcat": 1, "item": 2, "property": 3, "billtype": 4, "head": 5}
+var order = map[string]int{"category": 0, "subcat": 1, "item": 2, "property": 3, "billtype": 4, "head": 5, "vendor_change": 6}
 
 // Pending is one master waiting for Finance.
 type Pending struct {
@@ -51,6 +58,9 @@ type Pending struct {
 	CreatedBy string    `json:"created_by"`
 	CreatedAt time.Time `json:"created_at"`
 	WaitsFor  string    `json:"waits_for"` // a parent that must be approved first
+	Change    string    `json:"change"`    // an edit of an approved master: what changed (blank for a new one)
+	Edit      bool      `json:"edit"`      // an edit (rejecting it puts the old values back) rather than a new master
+	FileID    *int64    `json:"file_id"`   // a vendor's change: the new bank proof to check
 }
 
 func finance(u *access.User) error {
@@ -61,29 +71,36 @@ func finance(u *access.User) error {
 }
 
 const listSQL = `
-SELECT 'category', c.id, '', c.name, CASE WHEN c.is_fb THEN 'Food & beverage category' ELSE 'Category' END, coalesce(u.name,''), c.created_at, ''
+SELECT 'category', c.id, '', c.name, CASE WHEN c.is_fb THEN 'Food & beverage category' ELSE 'Category' END, coalesce(u.name,''), c.created_at, '',
+  c.fin_change, c.fin_before IS NOT NULL, NULL::bigint
   FROM category c LEFT JOIN app_user u ON u.id=c.created_by WHERE c.fin_status='pending'
 UNION ALL
 SELECT 'subcat', s.id, s.code, s.name, 'Sub-category of '||c.name||' · gets a Zoho expense account', coalesce(u.name,''), s.created_at,
-  CASE WHEN c.fin_status<>'approved' THEN 'category '||c.name ELSE '' END
+  CASE WHEN c.fin_status<>'approved' THEN 'category '||c.name ELSE '' END, s.fin_change, s.fin_before IS NOT NULL, NULL::bigint
   FROM sub_category s JOIN category c ON c.id=s.category_id LEFT JOIN app_user u ON u.id=s.created_by WHERE s.fin_status='pending'
 UNION ALL
 SELECT 'item', k.id, k.code, concat_ws(' ', b.name, k.item_name)||' ('||ps.name||')', 'Item · '||sc.name||' · GST '||k.gst_pct::float8||'% · HSN '||coalesce(nullif(k.hsn,''),'—'),
-  coalesce(u.name,''), k.created_at, CASE WHEN sc.fin_status<>'approved' THEN 'sub-category '||sc.name WHEN c.fin_status<>'approved' THEN 'category '||c.name ELSE '' END
+  coalesce(u.name,''), k.created_at, CASE WHEN sc.fin_status<>'approved' THEN 'sub-category '||sc.name WHEN c.fin_status<>'approved' THEN 'category '||c.name ELSE '' END,
+  k.fin_change, k.fin_before IS NOT NULL, NULL::bigint
   FROM sku k JOIN sub_category sc ON sc.id=k.sub_category_id JOIN category c ON c.id=sc.category_id LEFT JOIN brand b ON b.id=k.brand_id
   JOIN pack_size ps ON ps.id=k.pack_size_id LEFT JOIN app_user u ON u.id=k.created_by WHERE k.fin_status='pending'
 UNION ALL
-SELECT 'property', p.id, p.code, p.name, initcap(p.kind)||' property · '||cl.name||' · gets a Zoho reporting tag option', coalesce(u.name,''), p.created_at, ''
+SELECT 'property', p.id, p.code, p.name, initcap(p.kind)||' property · '||cl.name||' · gets a Zoho reporting tag option', coalesce(u.name,''), p.created_at, '', '', false, NULL::bigint
   FROM property p JOIN cluster cl ON cl.id=p.cluster_id LEFT JOIN app_user u ON u.id=p.created_by WHERE p.fin_status='pending'
 UNION ALL
-SELECT 'billtype', b.id, '', b.name, initcap(b.section)||' bill type · gets a Zoho expense account', coalesce(u.name,''), b.created_at, ''
+SELECT 'billtype', b.id, '', b.name, initcap(b.section)||' bill type · gets a Zoho expense account', coalesce(u.name,''), b.created_at, '', '', false, NULL::bigint
   FROM bill_type b LEFT JOIN app_user u ON u.id=b.created_by WHERE b.fin_status='pending'
 UNION ALL
-SELECT 'head', h.id, '', h.name, 'Corporate expense head · gets a Zoho expense account', coalesce(u.name,''), h.created_at, ''
+SELECT 'head', h.id, '', h.name, 'Corporate expense head · gets a Zoho expense account', coalesce(u.name,''), h.created_at, '', '', false, NULL::bigint
   FROM expense_head h LEFT JOIN app_user u ON u.id=h.created_by WHERE h.fin_status='pending'
 UNION ALL
-SELECT 'vendor', v.id, v.code, v.legal_name, 'Vendor · approve by verifying its bank details on the vendor page', coalesce(u.name,''), v.created_at, ''
+SELECT 'vendor', v.id, v.code, v.legal_name, 'Vendor · approve by verifying it on the vendor page', coalesce(u.name,''), v.created_at, '',
+  v.fin_change, v.fin_change<>'', NULL::bigint
   FROM vendor v LEFT JOIN app_user u ON u.id=v.created_by WHERE v.active AND NOT v.bank_verified AND v.vendor_type<>'warehouse'
+UNION ALL
+SELECT 'vendor_change', x.id, v.code, v.legal_name, 'Changes the vendor asked for on the vendor portal', x.asked_by, x.asked_at, '',
+  x.changes, true, x.bank_proof_file_id
+  FROM vendor_change x JOIN vendor v ON v.id=x.vendor_id WHERE x.status='pending'
 ORDER BY 7`
 
 // Count is how many masters wait for Finance (the menu badge).
@@ -92,7 +109,8 @@ func Count(ctx context.Context, q database.Q) int {
 	_ = q.QueryRow(ctx, `SELECT (SELECT count(*) FROM category WHERE fin_status='pending') + (SELECT count(*) FROM sub_category WHERE fin_status='pending')
 		+ (SELECT count(*) FROM sku WHERE fin_status='pending') + (SELECT count(*) FROM property WHERE fin_status='pending')
 		+ (SELECT count(*) FROM bill_type WHERE fin_status='pending') + (SELECT count(*) FROM expense_head WHERE fin_status='pending')
-		+ (SELECT count(*) FROM vendor WHERE active AND NOT bank_verified AND vendor_type<>'warehouse')`).Scan(&n)
+		+ (SELECT count(*) FROM vendor WHERE active AND NOT bank_verified AND vendor_type<>'warehouse')
+		+ (SELECT count(*) FROM vendor_change WHERE status='pending')`).Scan(&n)
 	return n
 }
 
@@ -110,16 +128,26 @@ func (s *Service) list(w http.ResponseWriter, r *http.Request) error {
 
 // decide approves or rejects one master inside tx.
 func decide(ctx context.Context, tx pgx.Tx, u *access.User, kind string, id int64, approve bool, reason string) (string, error) {
+	if kind == "vendor_change" {
+		if VendorChange == nil {
+			return "", httpjson.Bad("Vendor changes cannot be approved here.")
+		}
+		return VendorChange(ctx, tx, u, id, approve, reason)
+	}
 	t, ok := tables[kind]
 	if !ok {
-		return "", httpjson.Bad("Vendors are approved by verifying their bank details on the vendor's page.")
+		return "", httpjson.Bad("Vendors are approved by verifying them on the vendor's page.")
 	}
 	var name, status string
-	nameCol := "name"
+	var before []byte
+	nameCol, beforeCol := "name", "NULL::jsonb"
 	if kind == "item" {
 		nameCol = "code||' '||item_name"
 	}
-	if err := tx.QueryRow(ctx, `SELECT `+nameCol+`, fin_status FROM `+t.table+` WHERE id=$1 FOR UPDATE`, id).Scan(&name, &status); err != nil {
+	if editable[kind] {
+		beforeCol = "fin_before"
+	}
+	if err := tx.QueryRow(ctx, `SELECT `+nameCol+`, fin_status, `+beforeCol+` FROM `+t.table+` WHERE id=$1 FOR UPDATE`, id).Scan(&name, &status, &before); err != nil {
 		return "", httpjson.NotFound(t.label)
 	}
 	if status != "pending" {
@@ -128,6 +156,17 @@ func decide(ctx context.Context, tx pgx.Tx, u *access.User, kind string, id int6
 	if !approve {
 		if len(strings.TrimSpace(reason)) < 3 {
 			return "", httpjson.Bad("Write why %s is rejected.", name)
+		}
+		if before != nil {
+			// A rejected edit is undone: the values before it come back and the record is usable again.
+			if err := restore(ctx, tx, t.table, id, before); err != nil {
+				return "", err
+			}
+			if _, err := tx.Exec(ctx, `UPDATE `+t.table+` SET fin_status='approved', fin_by=$2, fin_at=now(), fin_note=$3, fin_change='', fin_before=NULL WHERE id=$1`, id, u.ID, strings.TrimSpace(reason)); err != nil {
+				return "", err
+			}
+			return fmt.Sprintf("Edit of %s %s rejected; the previous values are back", strings.ToLower(t.label), name),
+				auditlog.Write(ctx, tx, u, "Masters", t.label+" edit rejected by Finance", name, "Previous values restored. "+reason)
 		}
 		set := `fin_status='rejected', fin_by=$2, fin_at=now(), fin_note=$3, active=FALSE, inactive_by=$2, inactive_at=now(), inactive_reason='Rejected by Finance: '||$3`
 		if kind == "category" { // categories have no active flag: rejected is enough (nothing under it can be approved)
@@ -150,7 +189,14 @@ func decide(ctx context.Context, tx pgx.Tx, u *access.User, kind string, id int6
 	if waits != "" {
 		return "", httpjson.Conflict("Approve %s first: %s belongs to it.", waits, name)
 	}
-	if _, err := tx.Exec(ctx, `UPDATE `+t.table+` SET fin_status='approved', fin_by=$2, fin_at=now() WHERE id=$1`, id, u.ID); err != nil {
+	set := `fin_status='approved', fin_by=$2, fin_at=now()`
+	if editable[kind] {
+		set += `, fin_change='', fin_before=NULL`
+	}
+	if kind == "item" && before != nil {
+		set += `, zoho_update_due=EXISTS (SELECT 1 FROM zoho_map_item m WHERE m.sku_id=$1)` // an edit of an item already in Zoho goes there
+	}
+	if _, err := tx.Exec(ctx, `UPDATE `+t.table+` SET `+set+` WHERE id=$1`, id, u.ID); err != nil {
 		return "", err
 	}
 	zohowake.Now() // it goes to Zoho now (created there, or linked to the same one already there)

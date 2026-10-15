@@ -230,7 +230,7 @@ func (s *Service) Act(ctx context.Context, tx pgx.Tx, u *access.User, st flowset
 			case res.PO != "":
 				out.message += ", " + res.PO + " issued to the vendor"
 			case res.Held != "":
-				out.message += ". " + res.Advance + "; " + res.Held + " goes to the vendor once Finance approves it"
+				out.message += ". " + res.Advance + "; " + res.Held + " goes to the vendor once Finance approves and pays the advance"
 			}
 			out.notify = "ok"
 			if changed {

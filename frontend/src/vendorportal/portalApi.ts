@@ -42,3 +42,11 @@ export function vupload<T = any>(path: string, data: unknown, field: string, fil
 
 /** Opens a file the vendor uploaded. */
 export const vfileUrl = (id: number) => `/api/vendor-portal/files/${id}?token=${encodeURIComponent(vendorToken())}`
+
+/** Sends a form with a JSON "data" field and several named files (missing ones are left out). */
+export function vuploadFiles<T = any>(path: string, data: unknown, files: Record<string, File | null>) {
+  const fd = new FormData()
+  fd.append('data', JSON.stringify(data))
+  for (const [k, f] of Object.entries(files)) if (f) fd.append(k, f)
+  return send<T>('POST', path, fd)
+}

@@ -25,7 +25,7 @@ export function VendorsPage() {
   return (
     <>
       <div className="head"><div><h1>Vendors</h1><p className="sub">Goods suppliers, utility providers, AMC contractors and other services. A vendor is used only when active and bank verified.</p></div>
-        <div className="acts">{(sc.edit && hasRight('masters')) && <>{hasRight('upload') && <button className="btn ghost" onClick={() => setUpload(true)}>Bulk upload / edit</button>}
+        <div className="acts">{(sc.edit && hasRight('catalog')) && <>{hasRight('upload') && <button className="btn ghost" onClick={() => setUpload(true)}>Bulk upload / edit</button>}
           <button className="btn" onClick={() => nav('/vendors/new')}>+ Onboard vendor</button></>}</div></div>
       <DataTable screen="vendors" rows={data || []} rowKey={(v) => v.id} dim={(v) => !v.active}
         search={(v) => [v.code, v.legal_name, v.city, v.gstin, v.pan, ...v.supplies].join(' ')}
@@ -48,7 +48,7 @@ export function VendorsPage() {
             {fin && !v.bank_verified && v.vendor_type !== 'warehouse' && <> <button className="link" disabled={a.busy} onClick={() => a.run(() => post(`/vendors/${v.id}/verify`), () => { reload(); return 'Bank details verified for ' + v.legal_name })}>Verify</button></>}</>,
             csv: (v) => v.bank_verified ? 'Verified' : 'Pending' },
           { key: 'status', label: 'Status', render: (v) => <ActiveToggle kind="vendor" id={v.id} name={v.legal_name} active={v.active} reason={v.inactive_reason} onDone={reload} />, csv: (v) => v.active ? 'Active' : 'Inactive' },
-          { key: 'edit', label: '', render: (v) => (sc.edit && hasRight('masters')) && v.vendor_type !== 'warehouse' ? <button className="link" onClick={() => nav(`/vendors/${v.id}/edit`)}>Edit</button> : null },
+          { key: 'edit', label: '', render: (v) => v.vendor_type === 'warehouse' ? null : <button className="link" onClick={() => nav(`/vendors/${v.id}/edit`)}>{sc.edit && hasRight('catalog') ? 'Edit' : 'Open'}</button> },
         ]} csvName="vendors" />
       {a.errors.length > 0 && <p className="note bad">{a.errors.join(' ')}</p>}
       {upload && <UploadModal kind="vendors" title="Bulk upload or edit vendors" onClose={() => setUpload(false)} onDone={reload} />}

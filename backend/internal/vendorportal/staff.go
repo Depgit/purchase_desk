@@ -30,7 +30,7 @@ func HasLogin(ctx context.Context, q database.Q, vendorID int64) bool {
 
 // canManage: the vendor portal sign-in is given by whoever edits vendor masters or issues POs.
 func canManage(u *access.User) error {
-	if u.IsAdmin || u.HasRight(access.Masters) || u.HasRight(access.IssuePO) {
+	if u.IsAdmin || u.HasRight(access.Masters) || u.HasRight(access.Catalog) || u.HasRight(access.IssuePO) {
 		return nil
 	}
 	return httpjson.Forbidden("Only the Purchase Team or whoever edits vendors can give a vendor its sign-in.")

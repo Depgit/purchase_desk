@@ -108,7 +108,7 @@ func (s *Service) issue(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 	if hold {
-		return httpjson.OK(w, map[string]string{"message": adv + ". " + po + " goes to the vendor once Finance approves the advance.", "po_number": ""})
+		return httpjson.OK(w, map[string]string{"message": adv + ". " + po + " goes to the vendor once Finance approves and pays the advance.", "po_number": ""})
 	}
 	s.SendPO(u, id)
 	return httpjson.OK(w, map[string]string{"message": po + " sent to the vendor", "po_number": po})
@@ -117,7 +117,7 @@ func (s *Service) issue(w http.ResponseWriter, r *http.Request) error {
 // issueOne turns one approved request into a PO inside tx. Rates missing from the map keep the request's rate. terms ""
 // takes the vendor's own terms. In bulk, a request with estimated rates is refused: those rates need confirming first.
 // With hold the PO is prepared (rates, date, terms, its number reserved in advance_hold_po) but not issued: it waits
-// for Finance to approve its advance.
+// for its advance to be approved and paid by Finance.
 func issueOne(ctx context.Context, tx pgx.Tx, u *access.User, id int64, rates map[int64]float64, due time.Time, terms string, bulk, hold bool) (string, error) {
 	d, err := documents.Load(ctx, tx, id, true)
 	if err != nil {
@@ -127,7 +127,7 @@ func issueOne(ctx context.Context, tx pgx.Tx, u *access.User, id int64, rates ma
 		return "", httpjson.Conflict("%s is not waiting for a PO.", d.Number)
 	}
 	if d.AdvanceHold != "" {
-		return "", httpjson.Conflict("%s is waiting for Finance to approve its advance. It goes to the vendor once approved; if Finance rejects the advance, issue it again.", d.AdvanceHold)
+		return "", httpjson.Conflict("%s is waiting for its advance. It goes to the vendor once Finance approves and pays the advance; if Finance rejects it, issue the PO again.", d.AdvanceHold)
 	}
 	if u.Level("purchase_orders", d.PropertyID, d.ClusterID) < screens.Edit {
 		return "", httpjson.Forbidden("Your role can only view Purchase Orders at %s, so it cannot issue %s.", d.Property, d.Number)
@@ -181,7 +181,7 @@ func issueOne(ctx context.Context, tx pgx.Tx, u *access.User, id int64, rates ma
 		if d.IsCorp() {
 			module = "Corporate"
 		}
-		return po, auditlog.Doc(ctx, tx, u, g.Name, d.ID, d.Number, module, po+" prepared, waiting for Finance to approve the advance", note)
+		return po, auditlog.Doc(ctx, tx, u, g.Name, d.ID, d.Number, module, po+" prepared, waiting for Finance to approve and pay the advance", note)
 	}
 	if err := raise(ctx, tx, id, po, due, terms); err != nil {
 		return "", err
@@ -221,6 +221,8 @@ func raise(ctx context.Context, tx pgx.Tx, id int64, po string, due time.Time, t
 type AtApproval struct {
 	Rates   map[int64]float64 `json:"rates"`
 	Advance *advances.Ask     `json:"advance"`
+	// Terms are the payment terms the approver chose for this PO (blank: the vendor's own). "Advance" asks the advance.
+	Terms string `json:"payment_terms"`
 }
 
 // AutoResult is what Auto did: the PO raised (sent to the vendor), or the PO held for Finance with the advance asked.
@@ -239,6 +241,12 @@ func Auto(ctx context.Context, tx pgx.Tx, u *access.User, role string, d *docume
 		return out, nil
 	}
 	terms := d.VendorTerms
+	if a.Terms != "" {
+		if !textclean.Contains(money.PaymentTerms, a.Terms) {
+			return out, httpjson.Bad("Choose the payment terms for this PO.")
+		}
+		terms = a.Terms // the approver's choice for this PO, for example Advance for a vendor normally on credit
+	}
 	if !textclean.Contains(money.PaymentTerms, terms) {
 		if !all {
 			return out, nil
@@ -289,7 +297,7 @@ func Auto(ctx context.Context, tx pgx.Tx, u *access.User, role string, d *docume
 	}
 	if terms == money.Advance {
 		if a.Advance == nil {
-			errs = append(errs, d.Vendor+" is on Advance terms: enter the advance to ask Finance for (approving raises the PO, which waits for that advance).")
+			errs = append(errs, "This PO is on Advance terms: enter the advance to ask Finance for (approving raises the PO, which waits for that advance).")
 		} else if err := a.Advance.Check(ctx, tx); err != nil {
 			errs = append(errs, err.Error())
 		}
@@ -311,11 +319,11 @@ func Auto(ctx context.Context, tx pgx.Tx, u *access.User, role string, d *docume
 		module = "Corporate"
 	}
 	if terms == money.Advance {
-		// Prepared and held: the PO is raised and sent once Finance approves the advance (advances.decide).
+		// Prepared and held: the PO is raised and sent once the advance is approved and paid (advances.releaseHeld).
 		if _, err := tx.Exec(ctx, `UPDATE document SET advance_hold_po=$2, deliver_by=$3, payment_terms=$4, updated_at=now() WHERE id=$1`, d.ID, po, due, terms); err != nil {
 			return out, err
 		}
-		if err := auditlog.Doc(ctx, tx, u, role, d.ID, d.Number, module, po+" prepared at approval, waiting for Finance to approve the advance", note); err != nil {
+		if err := auditlog.Doc(ctx, tx, u, role, d.ID, d.Number, module, po+" prepared at approval, waiting for Finance to approve and pay the advance", note); err != nil {
 			return out, err
 		}
 		held, err := documents.Load(ctx, tx, d.ID, false)
@@ -412,7 +420,11 @@ func (s *Service) SendPO(u *access.User, docID int64) {
 		if s.PortalURL != "" && vendorportal.HasLogin(ctx, s.DB, d.VendorID) {
 			text += "\n\nPlease accept this order and give its dispatch date on the Saltstayz vendor portal: " + s.PortalURL
 		}
-		if _, err := s.Messages.Email(ctx, d.VendorEmail, "Purchase order "+d.PONumber+" · "+d.Property, text, nil, d.PONumber, &u.ID); err != nil {
+		var by *int64 // nil when the PO was raised by an advance payment read from Zoho
+		if u != nil {
+			by = &u.ID
+		}
+		if _, err := s.Messages.Email(ctx, d.VendorEmail, "Purchase order "+d.PONumber+" · "+d.Property, text, nil, d.PONumber, by); err != nil {
 			log.Printf("PO email %s: %v", d.PONumber, err)
 			return
 		}
@@ -424,8 +436,8 @@ func (s *Service) SendPO(u *access.User, docID int64) {
 	}()
 }
 
-// Release sends the vendor a PO raised without the Purchase Team (at the final approval, or when Finance approves its
-// advance). A purchase PO waits as "Push to vendor" and reaches the vendor in its order sheet, sent by the approvers;
+// Release sends the vendor a PO raised without the Purchase Team (at the final approval, or when its advance is paid;
+// u is nil when that payment was read from Zoho). A purchase PO waits as "Push to vendor" and reaches the vendor in its order sheet, sent by the approvers;
 // a corporate PO (not in order sheets) is emailed now.
 func (s *Service) Release(u *access.User, docID int64) {
 	var kind string

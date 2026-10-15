@@ -24,10 +24,13 @@ const (
 	Match   = "match"
 	Pay     = "pay"
 	Masters = "masters"
+	// Catalog creates and edits categories, sub-categories, brands, pack sizes, items and vendors (Accounts Payable);
+	// Finance approves each new one and each edit.
+	Catalog = "catalog"
 	Upload  = "upload"
 )
 
-var AllRights = []string{Raise, Approve, IssuePO, Receive, Match, Pay, Masters, Upload}
+var AllRights = []string{Raise, Approve, IssuePO, Receive, Match, Pay, Masters, Catalog, Upload}
 
 // Steps where a role can sit in the flow.
 var Steps = []string{"staff", "l1", "l2", "cc", "purchase", "store", "ap", "finance", "wh", "whs", "whl1", "whl2", "preop", "chef", "hchef", "creq", "dh", "capp", "admin", ""}

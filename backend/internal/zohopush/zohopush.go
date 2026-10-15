@@ -35,6 +35,7 @@ type Service struct {
 	Sync        *zohosync.Service
 	Files       *uploadedfiles.Service
 	PushEnabled bool
+	Advances    *advances.Service // marks an advance paid when its payment is found in Zoho
 }
 
 func (s *Service) Routes(r chi.Router) {
@@ -42,6 +43,7 @@ func (s *Service) Routes(r chi.Router) {
 	r.Get("/invoices/{id}/zoho-preview", httpjson.Wrap(s.preview))
 	r.Post("/zoho/push", httpjson.Wrap(s.push))
 	r.Post("/zoho/read-payments", httpjson.Wrap(s.readPayments))
+	r.Post("/zoho/read-advance-payments", httpjson.Wrap(s.readAdvancePayments))
 	s.poRoutes(r)
 }
 

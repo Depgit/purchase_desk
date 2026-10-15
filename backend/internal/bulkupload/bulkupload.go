@@ -174,9 +174,10 @@ func hasUpload(u *access.User) bool { return u.HasRight(access.Upload) }
 
 func (s *Service) define() map[string]*kind {
 	masters := func(u *access.User) bool { return hasUpload(u) && u.HasRight(access.Masters) }
+	catalog := func(u *access.User) bool { return hasUpload(u) && u.HasRight(access.Catalog) }
 	return map[string]*kind{
 		"items": {
-			title: "Items", module: "Items", allowed: masters,
+			title: "Items", module: "Items", allowed: catalog,
 			required: []string{"category", "sub_category", "item_name", "unit", "gst_percent"}, // brand may be blank for services
 			sample:   "sku_code,category,sub_category,brand,item_name,unit,gst_percent,hsn,properties,tds_section,daily_consumption\n,Housekeeping,Guest Amenities,Aroma Leaf,Body lotion 30 ml,box of 250,18,33049910,ALL,,yes\n,Engineering,Electrical,BrightVolt,Pool pump capacitor,piece,18,,P01;P23,,no\n",
 			keyOf:    key("sku_code"),
@@ -659,7 +660,7 @@ func (s *Service) define() map[string]*kind {
 			},
 		},
 		"vendors": {
-			title: "Vendors", module: "Vendors", allowed: masters,
+			title: "Vendors", module: "Vendors", allowed: catalog,
 			required: []string{"vendor_type", "legal_name", "address", "city", "pin", "contact_person", "mobile", "email", "pan", "bank_holder", "bank_account", "ifsc", "payment_terms", "supplies"},
 			sample:   "vendor_code,vendor_type,legal_name,address,city,pin,contact_person,mobile,email,gstin,pan,msme,udyam,bank_holder,bank_account,ifsc,payment_terms,supplies\n,goods,Shree Balaji Hotel Supplies,Plot 12 Udyog Vihar,Gurugram,122016,Rakesh Gupta,9810011111,orders@shreebalaji.example,06AABCS4107K1Z1,AABCS4107K,yes,UDYAM-HR-05-0012345,Shree Balaji Hotel Supplies,123456789012,HDFC0001234,Net 30,Guest Amenities;Cleaning Chemicals\n,utility,Electricity DISCOM,Sector 29,Gurugram,122001,Billing desk,9810022222,billing@discom.example,,AABCD1234E,no,,DHBVN,987654321098,SBIN0001234,Net 15,Electricity\n",
 			keyOf:    key("vendor_code"),

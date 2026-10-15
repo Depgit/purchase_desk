@@ -35,7 +35,7 @@ export function ItemSetupPage() {
   const cats = useApi<{ id: number; name: string; is_fb: boolean; sub_categories: number; skus: number; fin_status: string }[]>('/categories')
   const packs = useApi<{ id: number; name: string; active: boolean; skus: number }[]>('/pack-sizes')
   const brands = useApi<{ id: number; name: string; active: boolean; skus: number }[]>('/brands')
-  const ed = sc.edit && hasRight('masters')
+  const ed = sc.edit && hasRight('catalog')
   const reloadAll = () => { subs.reload(); cats.reload(); packs.reload(); brands.reload(); refreshLookups() }
   const editLink = (kind: Kind, row: Row) => ed && <button className="link" onClick={() => setEdit({ kind, row })}>Edit</button>
   const st = useActiveFilter()
@@ -95,7 +95,7 @@ function AddModal({ kind, row, cats, everyPO, onClose, onDone }: { kind: Kind; r
       {row && kind === 'brand' && <p className="hint">Renaming changes it on every SKU of this brand.</p>}
       <Errors list={a.errors} />
       <div className="btns"><button className="btn ghost" onClick={onClose}>Cancel</button>
-        <button className="btn" disabled={a.busy} onClick={() => a.run(() => row ? put(`${path}/${row.id}`, { name, category_id: cat, code, is_fb: fb, ...(kind === 'sub' ? { auto_po: auto } : {}) }) : post(path, { name, category_id: cat, code, is_fb: fb, ...(kind === 'sub' ? { auto_po: auto } : {}) }), () => { onDone(); return name + (row ? ' saved' : ' added') })}>Save</button></div>
+        <button className="btn" disabled={a.busy} onClick={() => a.run(() => row ? put(`${path}/${row.id}`, { name, category_id: cat, code, is_fb: fb, ...(kind === 'sub' ? { auto_po: auto } : {}) }) : post(path, { name, category_id: cat, code, is_fb: fb, ...(kind === 'sub' ? { auto_po: auto } : {}) }), (r: any) => { onDone(); return r?.message && r.message !== 'Saved.' ? name + ': ' + r.message : name + (row ? ' saved' : ' added') })}>Save</button></div>
     </Modal>
   )
 }

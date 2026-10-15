@@ -634,6 +634,16 @@ func (c *Client) CreateItem(ctx context.Context, body map[string]any) (Item, err
 	return out.Item, err
 }
 
+// UpdateItem changes an item already in Zoho (PUT /items/{id}) after Finance approved an edit of it.
+func (c *Client) UpdateItem(ctx context.Context, id string, body map[string]any) error {
+	return c.Do(ctx, http.MethodPut, "/items/"+url.PathEscape(id), nil, body, nil, nil)
+}
+
+// UpdateVendor changes a vendor contact already in Zoho (PUT /contacts/{id}) after Finance verified an edit of it.
+func (c *Client) UpdateVendor(ctx context.Context, id string, body map[string]any) error {
+	return c.Do(ctx, http.MethodPut, "/contacts/"+url.PathEscape(id), nil, body, nil, nil)
+}
+
 // CreateVendor creates a vendor contact from details verified in Purchase Desk.
 func (c *Client) CreateVendor(ctx context.Context, body map[string]any) (Contact, error) {
 	var out struct {
@@ -823,6 +833,51 @@ func (c *Client) CreateJournal(ctx context.Context, body map[string]any) (string
 	}
 	err := c.Do(ctx, http.MethodPost, "/journals", nil, body, nil, &out)
 	return out.Journal.ID, out.Journal.Number, err
+}
+
+// VendorPayment is a payment made to a vendor in Zoho (an advance is one, unapplied until its bill comes).
+type VendorPayment struct {
+	ID          string  `json:"payment_id"`
+	Number      string  `json:"payment_number"`
+	VendorID    string  `json:"vendor_id"`
+	Date        string  `json:"date"`
+	Amount      float64 `json:"amount"`
+	Reference   string  `json:"reference_number"`
+	Description string  `json:"description"`
+	AccountID   string  `json:"paid_through_account_id"`
+}
+
+// VendorPayments lists a vendor's payments dated on or after since (GET /vendorpayments; every page).
+func (c *Client) VendorPayments(ctx context.Context, vendorID string, since time.Time) ([]VendorPayment, error) {
+	out := []VendorPayment{}
+	q := url.Values{"vendor_id": {vendorID}, "date_start": {since.Format("2006-01-02")}, "sort_column": {"date"}}
+	keep := func(raw json.RawMessage) error {
+		var p VendorPayment
+		if err := json.Unmarshal(raw, &p); err != nil {
+			return err
+		}
+		// Zoho may ignore a filter: keep only this vendor's payments from that date.
+		if (p.VendorID == "" || p.VendorID == vendorID) && (p.Date == "" || p.Date >= since.Format("2006-01-02")) {
+			out = append(out, p)
+		}
+		return nil
+	}
+	err := c.ListAll(ctx, "/vendorpayments", "vendorpayments", q, keep)
+	if err != nil && !errors.Is(err, ErrTokenRevoked) && !DailyLimit(err) {
+		// Zoho refused the filters: read every payment, newest first, and filter here.
+		out = out[:0]
+		err = c.ListAll(ctx, "/vendorpayments", "vendorpayments", url.Values{"sort_column": {"date"}, "sort_order": {"D"}}, keep)
+	}
+	return out, err
+}
+
+// GetVendorPayment reads one vendor payment (GET /vendorpayments/{id}).
+func (c *Client) GetVendorPayment(ctx context.Context, id string) (VendorPayment, error) {
+	var out struct {
+		Payment VendorPayment `json:"vendorpayment"`
+	}
+	err := c.Do(ctx, http.MethodGet, "/vendorpayments/"+url.PathEscape(id), nil, nil, nil, &out)
+	return out.Payment, err
 }
 
 // CreateVendorPayment records a payment to a vendor (POST /vendorpayments). With no bills it stays in Zoho as an

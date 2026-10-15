@@ -114,9 +114,10 @@ type Doc struct {
 	DeliverBy     string     `json:"deliver_by"`
 	PaymentTerms  string     `json:"payment_terms"`
 	ClosedShort   bool       `json:"po_closed_short"`
-	AdvanceHold   string     `json:"advance_hold_po"` // set while the PO waits for Finance to approve its advance: the PO number it will get
-	ZohoPOID      string     `json:"zoho_po_id"`      // the Zoho Books purchase order kept in step with this PO
-	ZohoPOSync    string     `json:"zoho_po_sync"`    // what is still to send to Zoho: create, update, cancel, or "" when in step
+	AdvanceHold   string     `json:"advance_hold_po"`  // set while the PO waits for its advance to be approved and paid: the PO number it will get
+	AdvanceReady  bool       `json:"advance_approved"` // on hold, the advance is approved and only its payment is awaited
+	ZohoPOID      string     `json:"zoho_po_id"`       // the Zoho Books purchase order kept in step with this PO
+	ZohoPOSync    string     `json:"zoho_po_sync"`     // what is still to send to Zoho: create, update, cancel, or "" when in step
 	ZohoPOError   string     `json:"zoho_po_error"`
 	VendorStatus  string     `json:"vendor_status"` // what the vendor did with the PO: "", accepted (awaiting delivery) or declined
 	VendorActedAt *time.Time `json:"vendor_acted_at"`
@@ -179,7 +180,8 @@ const selectDoc = `SELECT d.id, d.number, d.kind, d.property_id, p.name, p.kind,
 	d.requester_id, ru.name, coalesce(ru.mobile,''), d.requester_step, d.status, d.route_steps, d.step_idx,
 	d.event_reason, d.event_note, d.routed_reason, d.routed_note, d.cm_approved_at, d.preop_user_id, coalesce(pu.name,''),
 	d.return_reason, d.return_note, d.modified_note, d.modified_by, d.modified_at, d.approved_at,
-	coalesce(d.po_number,''), d.po_date, coalesce(d.deliver_by::text,''), d.payment_terms, d.po_closed_short, coalesce(d.advance_hold_po,''), coalesce(d.zoho_po_id,''), d.zoho_po_sync, d.zoho_po_error,
+	coalesce(d.po_number,''), d.po_date, coalesce(d.deliver_by::text,''), d.payment_terms, d.po_closed_short, coalesce(d.advance_hold_po,''),
+	(d.advance_hold_po IS NOT NULL AND EXISTS (SELECT 1 FROM advance a WHERE a.document_id=d.id AND a.status='APPROVED')), coalesce(d.zoho_po_id,''), d.zoho_po_sync, d.zoho_po_error,
 	d.vendor_status, d.vendor_acted_at, d.vendor_note, coalesce(d.dispatch_date::text,''), d.sent_to_vendor_at,
 	coalesce((SELECT value='true'::jsonb FROM setting WHERE key='receipt_by_requester'), false),
 	d.is_transfer, d.dispatched_at, coalesce(d.wait_until::text,''), d.wait_note,
@@ -202,7 +204,7 @@ func scanDoc(row pgx.Row) (*Doc, error) {
 		&d.RequesterID, &d.Requester, &d.RequesterMob, &d.RequesterStep, &d.Status, &d.RouteSteps, &d.StepIdx,
 		&d.EventReason, &d.EventNote, &d.RoutedReason, &d.RoutedNote, &d.CMApprovedAt, &d.PreopUserID, &d.PreopUser,
 		&d.ReturnReason, &d.ReturnNote, &d.ModifiedNote, &d.ModifiedBy, &d.ModifiedAt, &d.ApprovedAt,
-		&d.PONumber, &d.PODate, &d.DeliverBy, &d.PaymentTerms, &d.ClosedShort, &d.AdvanceHold, &d.ZohoPOID, &d.ZohoPOSync, &d.ZohoPOError,
+		&d.PONumber, &d.PODate, &d.DeliverBy, &d.PaymentTerms, &d.ClosedShort, &d.AdvanceHold, &d.AdvanceReady, &d.ZohoPOID, &d.ZohoPOSync, &d.ZohoPOError,
 		&d.VendorStatus, &d.VendorActedAt, &d.VendorNote, &d.DispatchDate, &d.SentToVendor, &d.ReceiptByRequester,
 		&d.IsTransfer, &d.DispatchedAt, &d.WaitUntil, &d.WaitNote,
 		&d.BillTypeID, &d.BillType, &d.BillSection, &d.PeriodStart, &d.Months, &d.Remark, &d.CreatedAt,
@@ -395,7 +397,7 @@ func (d *Doc) Owner() string {
 		return "requester"
 	case Approved:
 		if d.AdvanceHold != "" {
-			return "finance" // the PO waits for Finance to approve its advance
+			return "finance" // the PO waits for Finance to approve and pay its advance
 		}
 		if d.Kind == "purchase" || d.Kind == "corp_purchase" {
 			return "purchase"
@@ -455,6 +457,9 @@ func (d *Doc) StatusLabel() string {
 	case Approved:
 		if d.IsBill() {
 			return "Approved, with Finance"
+		}
+		if d.AdvanceHold != "" && d.AdvanceReady {
+			return "PO waiting for advance payment"
 		}
 		if d.AdvanceHold != "" {
 			return "PO waiting for advance approval"
@@ -636,8 +641,8 @@ func CloseIfPaid(ctx context.Context, q database.Q, docID int64) error {
 	return err
 }
 
-// ReleaseHeldPO issues a PO that was waiting for Finance to approve its advance: it takes the number it was held
-// under. It returns that number, or "" when the document was not on hold.
+// ReleaseHeldPO issues a PO that was waiting for its advance, once the advance is paid (marked paid with its UTR, or
+// read paid from Zoho): it takes the number it was held under. It returns that number, or "" when the document was not on hold.
 func ReleaseHeldPO(ctx context.Context, q database.Q, docID int64) (string, error) {
 	zohowake.Now() // something may now go to Zoho
 	var po string

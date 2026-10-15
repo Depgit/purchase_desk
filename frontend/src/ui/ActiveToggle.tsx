@@ -13,12 +13,15 @@ const SCREEN: Record<string, ScreenKey> = { city: 'cities', cluster: 'cities', p
   brand: 'item_setup', pack_size: 'item_setup', sku: 'items', vendor: 'vendors', bill_type: 'bill_types', mapping: 'vendor_mapping',
   department: 'corporate_setup', expense_head: 'corporate_setup', partner: 'warehouse' }
 
+// Items, item setup and vendors are kept by the catalog right (Accounts Payable); other masters by the masters right.
+const CATALOG = new Set(['sku', 'sub_category', 'category', 'brand', 'pack_size', 'vendor'])
+
 export function ActiveToggle({ kind, id, name, active, reason, onDone, canEdit }: {
   kind: string; id: number; name: string; active: boolean; reason?: string; onDone: () => void; canEdit?: boolean
 }) {
   const { hasRight, me } = useSession()
   const screen = SCREEN[kind]
-  const editable = canEdit ?? (kind === 'user' || kind === 'role' ? !!me?.is_admin : hasRight('masters') && (!!me?.is_admin || !screen || me?.screens?.[screen] === 'edit'))
+  const editable = canEdit ?? (kind === 'user' || kind === 'role' ? !!me?.is_admin : hasRight(CATALOG.has(kind) ? 'catalog' : 'masters') && (!!me?.is_admin || !screen || me?.screens?.[screen] === 'edit'))
   const [ask, setAsk] = useState<string | null>(null)
   const [why, setWhy] = useState('')
   const a = useAction()

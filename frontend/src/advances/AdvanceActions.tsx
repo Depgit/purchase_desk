@@ -16,7 +16,7 @@ const LABEL: Record<Advance['status'], [string, Tone]> = {
 
 export function AdvanceStatus({ a }: { a: Advance }) {
   const [label, tone] = LABEL[a.status]
-  if (a.status === 'PENDING' && a.po_held) return <><Pill tone={tone}>{label}</Pill> <Pill tone="warn">PO waits for this</Pill></>
+  if ((a.status === 'PENDING' || a.status === 'APPROVED') && a.po_held) return <><Pill tone={tone}>{label}</Pill> <Pill tone="warn">PO waits for this</Pill></>
   if (a.status !== 'PAID') return <Pill tone={tone}>{label}</Pill>
   if (a.open < 0.005) return <Pill tone="ok">Settled</Pill>
   return <><Pill tone="warn">Paid · {inr(a.open)} to adjust</Pill>{a.carry_forward && <> <Pill>Carried forward</Pill></>}</>

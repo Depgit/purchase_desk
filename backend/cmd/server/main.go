@@ -93,7 +93,10 @@ func main() {
 			if !app.ZohoSync.Connected(ctx) {
 				return nil
 			}
-			_, err := app.ZohoPush.ReadPayments(ctx)
+			if _, err := app.ZohoPush.ReadPayments(ctx); err != nil {
+				return err
+			}
+			_, _, err := app.ZohoPush.ReadAdvances(ctx) // advances Finance paid in Zoho
 			return err
 		}},
 		// Everything that goes to Zoho by itself, in order: new vendors, items and properties, every vendor PO kept

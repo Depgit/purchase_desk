@@ -118,14 +118,8 @@ func (s *Service) VendorToZoho(ctx context.Context, u *access.User, vid int64) (
 	if err != nil {
 		return "", err
 	}
-	body := map[string]any{"contact_name": v.Name, "company_name": v.Name, "contact_type": "vendor", "payment_terms": money.TermsDays(v.Terms),
-		"payment_terms_label": v.Terms, "gst_treatment": "business_none"}
-	if v.GST {
-		body["gst_treatment"], body["gst_no"] = "business_gst", v.GSTIN
-	}
-	if v.State != "" {
-		body["place_of_contact"] = v.State
-	}
+	body := vendorBody(v.Name, v.Terms, v.GSTIN, v.State, v.GST)
+	body["contact_type"] = "vendor"
 	if v.Email != "" || v.Mobile != "" {
 		body["contact_persons"] = []map[string]any{{"first_name": textclean.Default(v.Contact, v.Name), "email": v.Email, "mobile": v.Mobile, "is_primary_contact": true}}
 	}
@@ -149,97 +143,200 @@ func (s *Service) VendorToZoho(ctx context.Context, u *access.User, vid int64) (
 	return v.Name + " created in Zoho and linked.", nil
 }
 
+// vendorBody is the Zoho contact for a vendor: name, payment terms, GST treatment and state.
+func vendorBody(name, terms, gstin, state string, gst bool) map[string]any {
+	body := map[string]any{"contact_name": name, "company_name": name, "payment_terms": money.TermsDays(terms), "payment_terms_label": terms, "gst_treatment": "business_none"}
+	if gst {
+		body["gst_treatment"], body["gst_no"] = "business_gst", gstin
+	}
+	if state != "" {
+		body["place_of_contact"] = state
+	}
+	return body
+}
+
+// VendorUpdateToZoho sends a verified edit of a vendor already in Zoho (PUT /contacts/{id}): name, terms, GST, state.
+func (s *Service) VendorUpdateToZoho(ctx context.Context, u *access.User, vid int64) (string, error) {
+	var code, name, gstin, state, terms, contact string
+	var gst, verified bool
+	if err := s.DB.QueryRow(ctx, `SELECT v.code, v.legal_name, coalesce(v.gstin,''), v.state_code, v.payment_terms, v.gst_registered, v.bank_verified, coalesce(m.contact_id,'')
+		FROM vendor v LEFT JOIN zoho_map_vendor m ON m.vendor_id=v.id WHERE v.id=$1`, vid).Scan(&code, &name, &gstin, &state, &terms, &gst, &verified, &contact); err != nil {
+		return "", httpjson.NotFound("Vendor")
+	}
+	if !verified {
+		return "", held("%s waits for Finance to verify the change; it goes to Zoho once verified.", name)
+	}
+	if contact == "" {
+		_, err := s.DB.Exec(ctx, `UPDATE vendor SET zoho_update_due=FALSE WHERE id=$1`, vid) // not in Zoho: it is created there instead
+		return "", err
+	}
+	if !s.PushEnabled {
+		return "", held("Writing to Zoho is switched off on this server (ZOHO_PUSH_ENABLED=false).")
+	}
+	c, _, err := s.Client(ctx)
+	if err != nil {
+		return "", err
+	}
+	body := vendorBody(name, terms, gstin, state, gst)
+	if err := c.UpdateVendor(ctx, contact, body); err != nil {
+		return "", httpjson.Bad("Zoho did not take the change to %s: %v", name, err)
+	}
+	if _, err := s.DB.Exec(ctx, `UPDATE vendor SET zoho_update_due=FALSE WHERE id=$1`, vid); err != nil {
+		return "", err
+	}
+	_, _ = s.DB.Exec(ctx, `UPDATE zoho_contact SET name=$2, company=$2, gst_no=$3, gst_treatment=$4, state_code=$5 WHERE contact_id=$1`, contact, name, strings.ToUpper(gstin), body["gst_treatment"], state)
+	_ = auditlog.Write(ctx, s.DB, u, "Zoho", "Vendor updated in Zoho", code, name+" · contact "+contact)
+	return name + " updated in Zoho.", nil
+}
+
 // ItemToZoho creates a Purchase Desk item in Zoho and links it. An active Zoho item with the same SKU code or name is
 // linked instead of creating a second one. The purchase account comes from the item's sub-category mapping and the
 // GST from the tax mapping, so those must be mapped first.
-func (s *Service) ItemToZoho(ctx context.Context, u *access.User, id int64) (string, error) {
-	var code, item, brand, brandKind, pack, hsn, subcat, accountID, linked string
-	var gst float64
+// zItem is what Zoho is told about an item.
+type zItem struct {
+	ID                                                int64
+	Code, Item, Name, Pack, HSN, SubCat, Account, Fin string
+	Linked, Product                                   string
+	GST, Rate                                         float64
+}
+
+// itemFacts reads an item as Zoho needs it: its Zoho name (brand, item, pack), account, GST, rate and link.
+func (s *Service) itemFacts(ctx context.Context, id int64) (zItem, error) {
+	var x zItem
+	var brand, brandKind string
 	var rate *float64
 	err := s.DB.QueryRow(ctx, `SELECT k.code, k.item_name, coalesce(b.name,''), coalesce(b.kind,''), ps.name, k.hsn, sc.name, coalesce(a.account_id,''), k.gst_pct::float8,
 		(SELECT rc.rate::float8 FROM rate_card rc WHERE rc.sku_id=k.id AND NOT rc.superseded ORDER BY rc.valid_from DESC LIMIT 1),
-		coalesce((SELECT item_id FROM zoho_map_item x WHERE x.sku_id=k.id),'')
+		coalesce((SELECT item_id FROM zoho_map_item x WHERE x.sku_id=k.id),''),
+		CASE WHEN k.fin_status<>'approved' THEN k.fin_status WHEN sc.fin_status<>'approved' THEN 'sub-category '||sc.fin_status ELSE 'approved' END
 		FROM sku k LEFT JOIN brand b ON b.id=k.brand_id JOIN pack_size ps ON ps.id=k.pack_size_id JOIN sub_category sc ON sc.id=k.sub_category_id
 		LEFT JOIN zoho_map_account m ON m.kind='subcat' AND m.ref=sc.id::text LEFT JOIN zoho_account a ON a.account_id=m.account_id AND a.active
-		WHERE k.id=$1`, id).Scan(&code, &item, &brand, &brandKind, &pack, &hsn, &subcat, &accountID, &gst, &rate, &linked)
+		WHERE k.id=$1`, id).Scan(&x.Code, &x.Item, &brand, &brandKind, &x.Pack, &x.HSN, &x.SubCat, &x.Account, &x.GST, &rate, &x.Linked, &x.Fin)
 	if err != nil {
-		return "", httpjson.NotFound("Item")
+		return x, httpjson.NotFound("Item")
 	}
-	if linked != "" {
-		return "", httpjson.Bad("%s is already linked to a Zoho item.", item)
-	}
-	var fin string
-	_ = s.DB.QueryRow(ctx, `SELECT CASE WHEN k.fin_status<>'approved' THEN k.fin_status WHEN sc.fin_status<>'approved' THEN 'sub-category '||sc.fin_status ELSE 'approved' END
-		FROM sku k JOIN sub_category sc ON sc.id=k.sub_category_id WHERE k.id=$1`, id).Scan(&fin)
-	if fin != "approved" {
-		return "", held("%s waits for Finance to approve it (%s); it goes to Zoho once approved.", item, fin)
-	}
-	name := item
+	x.ID = id
+	x.Name = x.Item
 	if brandKind == "brand" && brand != "" {
-		name = brand + " " + item
+		x.Name = brand + " " + x.Item
 	}
-	name += " (" + pack + ")"
-	if len([]rune(name)) > 100 {
-		name = string([]rune(name)[:100])
+	x.Name += " (" + x.Pack + ")"
+	if len([]rune(x.Name)) > 100 {
+		x.Name = string([]rune(x.Name)[:100])
 	}
-	// One of this SKU code or name already in Zoho is linked, not duplicated.
-	var existing, existingName string
-	_ = s.DB.QueryRow(ctx, `SELECT item_id, name FROM zoho_item WHERE active AND ((sku<>'' AND norm_key(sku)=norm_key($1)) OR norm_key(name)=norm_key($2)) ORDER BY (norm_key(sku)=norm_key($1)) DESC LIMIT 1`, code, name).Scan(&existing, &existingName)
-	if existing != "" {
-		if _, err := s.DB.Exec(ctx, `INSERT INTO zoho_map_item(sku_id,item_id,how,updated_by) VALUES ($1,$2,'manual',$3)
-			ON CONFLICT (sku_id) DO UPDATE SET item_id=EXCLUDED.item_id, how='manual', updated_by=EXCLUDED.updated_by, updated_at=now()`, id, existing, by(u)); err != nil {
-			return "", err
-		}
-		_ = auditlog.Write(ctx, s.DB, u, "Zoho", "Mapping changed", "item "+code, existingName+" (already in Zoho)")
-		return existingName + " already exists in Zoho, so it is linked.", nil
+	x.Product = "goods"
+	if brandKind == "service" {
+		x.Product = "service"
 	}
-	if accountID == "" {
-		return "", held("Map the Zoho account for the sub-category %s first (Accounts tab). Zoho needs a purchase account for the item.", subcat)
+	if rate != nil {
+		x.Rate = *rate
+	}
+	return x, nil
+}
+
+// itemBody is the Zoho item: it needs the sub-category's account and both GST taxes mapped.
+func (s *Service) itemBody(ctx context.Context, x zItem) (map[string]any, error) {
+	if x.Account == "" {
+		return nil, held("Map the Zoho account for the sub-category %s first (Accounts tab). Zoho needs a purchase account for the item.", x.SubCat)
 	}
 	// GST: the taxes mapped for this rate within the state and from another state.
 	prefs := []map[string]any{}
 	for _, sp := range []string{"intra", "inter"} {
 		var taxID string
-		_ = s.DB.QueryRow(ctx, `SELECT tax_id FROM zoho_map_tax WHERE gst_pct=$1 AND supply=$2`, gst, sp).Scan(&taxID)
+		_ = s.DB.QueryRow(ctx, `SELECT tax_id FROM zoho_map_tax WHERE gst_pct=$1 AND supply=$2`, x.GST, sp).Scan(&taxID)
 		if taxID == "" {
-			return "", held("Map the Zoho tax for GST %v%% (%s) first (Taxes tab), so the item carries its GST.", gst, map[string]string{"intra": "within the state", "inter": "from another state"}[sp])
+			return nil, held("Map the Zoho tax for GST %v%% (%s) first (Taxes tab), so the item carries its GST.", x.GST, map[string]string{"intra": "within the state", "inter": "from another state"}[sp])
 		}
 		prefs = append(prefs, map[string]any{"tax_id": taxID, "tax_specification": sp})
 	}
 	if !s.PushEnabled {
-		return "", held("Writing to Zoho is switched off on this server (ZOHO_PUSH_ENABLED=false).")
+		return nil, held("Writing to Zoho is switched off on this server (ZOHO_PUSH_ENABLED=false).")
 	}
-	product := "goods"
-	if brandKind == "service" {
-		product = "service"
+	return map[string]any{"name": x.Name, "sku": x.Code, "unit": x.Pack, "rate": x.Rate, "purchase_rate": x.Rate, "item_type": "purchases", "product_type": x.Product,
+		"purchase_account_id": x.Account, "purchase_description": x.SubCat, "hsn_or_sac": x.HSN, "is_taxable": true, "item_tax_preferences": prefs}, nil
+}
+
+func (s *Service) ItemToZoho(ctx context.Context, u *access.User, id int64) (string, error) {
+	x, err := s.itemFacts(ctx, id)
+	if err != nil {
+		return "", err
 	}
-	r0 := 0.0
-	if rate != nil {
-		r0 = *rate
+	if x.Linked != "" {
+		return "", httpjson.Bad("%s is already linked to a Zoho item.", x.Item)
 	}
-	body := map[string]any{"name": name, "sku": code, "unit": pack, "rate": r0, "purchase_rate": r0, "item_type": "purchases", "product_type": product,
-		"purchase_account_id": accountID, "purchase_description": subcat, "hsn_or_sac": hsn, "is_taxable": true, "item_tax_preferences": prefs}
+	if x.Fin != "approved" {
+		return "", held("%s waits for Finance to approve it (%s); it goes to Zoho once approved.", x.Item, x.Fin)
+	}
+	// One of this SKU code or name already in Zoho is linked, not duplicated.
+	var existing, existingName string
+	_ = s.DB.QueryRow(ctx, `SELECT item_id, name FROM zoho_item WHERE active AND ((sku<>'' AND norm_key(sku)=norm_key($1)) OR norm_key(name)=norm_key($2)) ORDER BY (norm_key(sku)=norm_key($1)) DESC LIMIT 1`, x.Code, x.Name).Scan(&existing, &existingName)
+	if existing != "" {
+		if _, err := s.DB.Exec(ctx, `INSERT INTO zoho_map_item(sku_id,item_id,how,updated_by) VALUES ($1,$2,'manual',$3)
+			ON CONFLICT (sku_id) DO UPDATE SET item_id=EXCLUDED.item_id, how='manual', updated_by=EXCLUDED.updated_by, updated_at=now()`, id, existing, by(u)); err != nil {
+			return "", err
+		}
+		_ = auditlog.Write(ctx, s.DB, u, "Zoho", "Mapping changed", "item "+x.Code, existingName+" (already in Zoho)")
+		return existingName + " already exists in Zoho, so it is linked.", nil
+	}
+	body, err := s.itemBody(ctx, x)
+	if err != nil {
+		return "", err
+	}
 	c, _, err := s.Client(ctx)
 	if err != nil {
 		return "", err
 	}
 	zi, err := c.CreateItem(ctx, body)
 	if err != nil {
-		return "", httpjson.Bad("Zoho did not create %s: %v", name, err)
+		return "", httpjson.Bad("Zoho did not create %s: %v", x.Name, err)
 	}
 	if zi.ID == "" {
-		return "", httpjson.Bad("Zoho did not return the new item %s. Click Sync now and check the Items tab.", name)
+		return "", httpjson.Bad("Zoho did not return the new item %s. Click Sync now and check the Items tab.", x.Name)
 	}
 	if _, err := s.DB.Exec(ctx, `INSERT INTO zoho_item(item_id,name,sku,hsn_or_sac,unit,product_type,item_type,brand,purchase_rate,tax_pct,purchase_account_id,active,synced_at)
-		VALUES ($1,$2,$3,$4,$5,$6,'purchases','',$7,$8,$9,TRUE,now()) ON CONFLICT (item_id) DO NOTHING`, zi.ID, name, code, hsn, pack, product, r0, gst, accountID); err != nil {
+		VALUES ($1,$2,$3,$4,$5,$6,'purchases','',$7,$8,$9,TRUE,now()) ON CONFLICT (item_id) DO NOTHING`, zi.ID, x.Name, x.Code, x.HSN, x.Pack, x.Product, x.Rate, x.GST, x.Account); err != nil {
 		return "", err
 	}
 	if _, err := s.DB.Exec(ctx, `INSERT INTO zoho_map_item(sku_id,item_id,how,updated_by) VALUES ($1,$2,'manual',$3)
 		ON CONFLICT (sku_id) DO UPDATE SET item_id=EXCLUDED.item_id, how='manual', updated_by=EXCLUDED.updated_by, updated_at=now()`, id, zi.ID, by(u)); err != nil {
 		return "", err
 	}
-	_ = auditlog.Write(ctx, s.DB, u, "Zoho", "Item created in Zoho", name, code)
-	return name + " created in Zoho and linked.", nil
+	_ = auditlog.Write(ctx, s.DB, u, "Zoho", "Item created in Zoho", x.Name, x.Code)
+	return x.Name + " created in Zoho and linked.", nil
+}
+
+// ItemUpdateToZoho sends an approved edit of an item already in Zoho (PUT /items/{id}).
+func (s *Service) ItemUpdateToZoho(ctx context.Context, u *access.User, id int64) (string, error) {
+	x, err := s.itemFacts(ctx, id)
+	if err != nil {
+		return "", err
+	}
+	if x.Fin != "approved" {
+		return "", held("%s waits for Finance to approve the change; it goes to Zoho once approved.", x.Item)
+	}
+	if x.Linked == "" {
+		_, err := s.DB.Exec(ctx, `UPDATE sku SET zoho_update_due=FALSE WHERE id=$1`, id) // not in Zoho: it is created there instead
+		return "", err
+	}
+	body, err := s.itemBody(ctx, x)
+	if err != nil {
+		return "", err
+	}
+	c, _, err := s.Client(ctx)
+	if err != nil {
+		return "", err
+	}
+	if err := c.UpdateItem(ctx, x.Linked, body); err != nil {
+		return "", httpjson.Bad("Zoho did not take the change to %s: %v", x.Name, err)
+	}
+	if _, err := s.DB.Exec(ctx, `UPDATE sku SET zoho_update_due=FALSE WHERE id=$1`, id); err != nil {
+		return "", err
+	}
+	if _, err := s.DB.Exec(ctx, `UPDATE zoho_item SET name=$2, hsn_or_sac=$3, unit=$4, tax_pct=$5, purchase_account_id=$6, synced_at=now() WHERE item_id=$1`, x.Linked, x.Name, x.HSN, x.Pack, x.GST, x.Account); err != nil {
+		return "", err
+	}
+	_ = auditlog.Write(ctx, s.DB, u, "Zoho", "Item updated in Zoho", x.Name, x.Code)
+	return x.Name + " updated in Zoho.", nil
 }
 
 // PropertyToZoho links a property to the reporting tag option of its name, or adds that option under the reporting
@@ -425,6 +522,9 @@ func (s *Service) SyncMasters(ctx context.Context) error {
 		{"subcat", `SELECT x.id FROM sub_category x WHERE x.active AND x.fin_status='approved' AND NOT EXISTS (SELECT 1 FROM zoho_map_account m WHERE m.kind='subcat' AND m.ref=x.id::text)`, s.accountFor("subcat")},
 		{"billtype", `SELECT x.id FROM bill_type x WHERE x.active AND x.fin_status='approved' AND NOT EXISTS (SELECT 1 FROM zoho_map_account m WHERE m.kind='billtype' AND m.ref=x.id::text)`, s.accountFor("billtype")},
 		{"head", `SELECT x.id FROM expense_head x WHERE x.active AND x.fin_status='approved' AND NOT EXISTS (SELECT 1 FROM zoho_map_account m WHERE m.kind='head' AND m.ref=x.id::text)`, s.accountFor("head")},
+		// Approved edits of items and vendors already in Zoho.
+		{"item_update", `SELECT x.id FROM sku x WHERE x.zoho_update_due AND x.fin_status='approved'`, s.ItemUpdateToZoho},
+		{"vendor_update", `SELECT x.id FROM vendor x WHERE x.zoho_update_due AND x.bank_verified`, s.VendorUpdateToZoho},
 	}
 	for _, k := range kinds {
 		rows, err := s.DB.Query(ctx, k.sql+` AND `+retry+` ORDER BY x.id LIMIT 25`, k.kind)

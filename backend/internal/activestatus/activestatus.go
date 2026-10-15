@@ -18,6 +18,9 @@ import (
 
 type Service struct{ DB *pgxpool.Pool }
 
+// catalogKinds are kept by the catalog right (Accounts Payable); the other masters by the masters right.
+var catalogKinds = map[string]bool{"sku": true, "sub_category": true, "category": true, "brand": true, "pack_size": true, "vendor": true}
+
 func (s *Service) Routes(r chi.Router) {
 	r.Post("/masters/{kind}/{id}/active", httpjson.Wrap(s.setActive))
 	r.Get("/masters/{kind}/{id}/impact", httpjson.Wrap(s.inactiveImpact))
@@ -63,6 +66,10 @@ func (s *Service) setActive(w http.ResponseWriter, r *http.Request) error {
 		}
 	} else if kind == "user" {
 		if err := users.Manages(r.Context(), s.DB, p, id); err != nil { // the Admin, or whoever added this user
+			return err
+		}
+	} else if catalogKinds[kind] {
+		if err := access.NeedRight(p, access.Catalog, "change items or vendors"); err != nil {
 			return err
 		}
 	} else if err := access.NeedRight(p, access.Masters, "edit masters"); err != nil {

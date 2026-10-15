@@ -89,7 +89,8 @@ func New(d Deps) *Built {
 	inv := &invoices.Service{DB: d.DB, Guard: guard, Held: zpush.Held}
 	loginSvc := &login.Service{DB: d.DB, Tokens: d.Tokens, Guard: guard, Messages: d.Messages, DevMode: d.DevMode}
 	sheets := &vendorsheets.Service{DB: d.DB, Messages: d.Messages}
-	portal := &vendorportal.Service{DB: d.DB, Tokens: d.Tokens, Files: files, Messages: d.Messages, BaseURL: d.BaseURL}
+	portal := &vendorportal.Service{DB: d.DB, Tokens: d.Tokens, Files: files, Messages: d.Messages, BaseURL: d.BaseURL, Vendors: vendorSvc}
+	masterapproval.VendorChange = vendorSvc.DecideChange // Finance approves a vendor's own change under Masters to approve
 
 	r := chi.NewRouter()
 	r.Use(middleware.RealIP, middleware.RequestID, middleware.Logger, middleware.Recoverer, middleware.Timeout(120*time.Second))
@@ -127,7 +128,9 @@ func New(d Deps) *Built {
 			(&approvals.Service{DB: d.DB, Guard: guard, Messages: d.Messages, POSent: poSvc.Release}).Routes(r)
 			(&goodsreceipts.Service{DB: d.DB, Files: files}).Routes(r)
 			(&balancereject.Service{DB: d.DB, Messages: d.Messages}).Routes(r)
-			(&advances.Service{DB: d.DB, Guard: guard, Files: files, Messages: d.Messages, POReleased: poSvc.Release}).Routes(r)
+			advSvc := &advances.Service{DB: d.DB, Guard: guard, Files: files, Messages: d.Messages, POReleased: poSvc.Release}
+			advSvc.Routes(r)
+			zpush.Advances = advSvc // advances paid in Zoho are read back
 			inv.Routes(r)
 			files.Routes(r)
 			(&formdrafts.Service{DB: d.DB, Files: files}).Routes(r)

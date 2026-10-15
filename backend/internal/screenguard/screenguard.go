@@ -165,6 +165,8 @@ var rules = func() []rule {
 		// Masters: lists stay readable as references; changes need edit.
 		R("GET", `/master-approvals`, V, none, fixed("master_approvals")),
 		R("W", `/master-approvals.*`, E, none, fixed("master_approvals")),
+		// A vendor's portal sign-in is given by the Purchase Team too, not only by whoever edits vendors.
+		R("W", `/vendors/\d+/portal.*`, E, none, fixed("vendors", "purchase_orders")),
 		R("W", `/vendors.*`, E, none, fixed("vendors")),
 		R("W", `/skus.*`, E, none, fixed("items")),
 		R("W", `/(categories|sub-categories|brands|pack-sizes).*`, E, none, fixed("item_setup")),
@@ -182,7 +184,7 @@ var rules = func() []rule {
 		R("W", `/pick-lists/.*`, E, none, fixed("flow")),
 		R("GET", `/templates`, V, none, fixed("templates")),
 		R("W", `/templates/.*`, E, none, fixed("templates")),
-		R("W", `/zoho/(push|read-payments)`, E, none, fixed("payments", "zoho")),
+		R("W", `/zoho/(push|read-payments|read-advance-payments)`, E, none, fixed("payments", "zoho")),
 		R("W", `/zoho/mappings`, E, none, fixed("zoho", "corporate_setup")),
 		R("GET", `/zoho/masters/(vendor|item|property)/\d+`, V, none, fixed("vendors", "items", "properties", "zoho")), // the Zoho card on a master's page
 		R("GET", `/zoho/.*`, V, none, fixed("zoho", "corporate_setup")),

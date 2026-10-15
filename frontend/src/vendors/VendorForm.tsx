@@ -12,10 +12,11 @@ import { usePopup } from '../ui/Toast'
 import { PortalAccess } from '../vendorportal/PortalAccess'
 import { ZohoMasterCard } from '../zohobooks/ZohoMasterCard'
 import { useScreen } from '../screenaccess/screen'
+import { useSession } from '../auth/session'
 
 export interface Vendor {
   id: number; code: string; vendor_type: string; legal_name: string; address: string; city: string; pin: string; contact_person: string; mobile: string; email: string
-  gst_registered: boolean; gstin: string; pan: string; state_code: string; msme: boolean; udyam: string; bank_holder: string; bank_account_masked: string; ifsc: string
+  gst_registered: boolean; gstin: string; pan: string; state_code: string; msme: boolean; udyam: string; bank_holder: string; bank_account_masked: string; ifsc: string; fin_change?: string
   bank_proof_file_id: number | null; msme_file_id: number | null; bank_verified: boolean; bank_verified_by: string; payment_terms: string; sheet_mode: string; sheet_time: string; sheet_channel: string
   active: boolean; inactive_reason: string; sub_category_ids: number[]; bill_type_ids: number[]; supplies: string[]
 }
@@ -34,6 +35,9 @@ export function VendorForm() {
   const a = useAction()
   const popup = usePopup()
   const sc = useScreen('vendors')
+  const po = useScreen('purchase_orders')
+  const { hasRight } = useSession()
+  const canSave = sc.edit && hasRight('catalog') // Accounts Payable keeps vendors; others only view them
   // A new goods vendor can get its vendor portal sign-in in the same step (later: the Vendor portal card on its page).
   const [portalOn, setPortalOn] = useState(true)
   const [portalEmail, setPortalEmail] = useState<string | null>(null)
@@ -54,6 +58,7 @@ export function VendorForm() {
     <>
       <div className="head"><div><button className="link" onClick={() => nav('/vendors')}>‹ Vendors</button><h1>{id ? `Edit ${orig?.legal_name || ''}` : 'Onboard vendor'}</h1>
         <p className="sub">Formats are checked as you save, and duplicates by name, GSTIN or PAN are blocked.</p></div></div>
+      {id && orig?.fin_change && <p className="note warn"><b>Waiting for Finance:</b> {orig.fin_change}. The vendor cannot be used until Finance verifies it.</p>}
       {id && <p className="note warn">Every field can be changed. A change to the bank account, GST details or PAN sends the vendor back to Finance, and it cannot be used on new requests or bills until verified again.</p>}
       <div className="cols">
         <div className="stack">
@@ -105,7 +110,8 @@ export function VendorForm() {
             <span>Give the vendor a portal sign-in now<br /><span className="hint">A one-time password is shown after saving and emailed to the vendor. They sign in at /vendor and choose their own password.</span></span></label>
             {portalOn && <label className="field"><span>Portal sign-in email</span><input type="email" value={portalEmail ?? f.email} onChange={(e) => setPortalEmail(e.target.value)} placeholder="Defaults to the vendor's email" /></label>}</div>}
           <Errors list={a.errors} />
-          <button className="btn" disabled={a.busy} onClick={() => a.run(async () => {
+          {!canSave && <p className="note">View only: Accounts Payable adds and edits vendors, and Finance approves each change.</p>}
+          {canSave && <button className="btn" disabled={a.busy} onClick={() => a.run(async () => {
               const r: any = await upload(id ? '/vendors/' + id : '/vendors', id && f.ifsc.trim().toUpperCase() === (orig?.ifsc || '') ? { ...f, ifsc: '' } : f, { bank_proof: proof, msme_certificate: f.msme ? msmeCert : null }, id ? 'PUT' : 'POST')
               if (!id && goods && portalOn) {
                 // The vendor is saved either way; a problem with the sign-in is fixed on its page.
@@ -118,9 +124,9 @@ export function VendorForm() {
               if (r.portalError) { nav(`/vendors/${r.id}/edit`); return `${r.code} saved, but the portal sign-in was not given: ${r.portalError} Fix it in the Vendor portal card.` }
               nav('/vendors')
               return r.sent_for_verification ? 'Saved. Waiting for Finance to verify again.' : id ? 'Vendor saved' : `${r.code} saved. Waiting for Finance to verify bank details.`
-            })}>Save vendor</button>
+            })}>Save vendor</button>}
         </section>
-        {id && orig?.vendor_type === 'goods' && <PortalAccess vendorId={+id} canEdit={sc.edit} />}
+        {id && orig?.vendor_type === 'goods' && <PortalAccess vendorId={+id} canEdit={sc.edit || po.edit} />}
         {id && <ZohoMasterCard kind="vendor" id={+id} />}</div>
       </div>
     </>

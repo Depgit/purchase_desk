@@ -39,7 +39,7 @@ export function IssuePOPanel({ doc, onDone }: { doc: Doc; onDone: () => void }) 
       <p className="sub">PO value incl. GST: <b>{inr(total)}</b></p>
       {advance && <div className="xpbox">
         <h3>Advance to ask Finance for</h3>
-        <p className="hint">The PO is not raised yet: it waits for Finance to approve this advance, and goes to the vendor once approved. Finance then pays the advance, and it is adjusted on the vendor's invoice.</p>
+        <p className="hint">The PO is not raised yet: it waits until Finance approves and pays this advance (marked paid with the UTR, or read from Zoho), and only then goes to the vendor. The advance is adjusted on the vendor's invoice.</p>
         <AdvanceFields a={adv} onChange={setAdv} poValue={total} room={total} poLabel="this PO" />
       </div>}
       <Errors list={a.errors} />
