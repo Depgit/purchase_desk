@@ -23,11 +23,11 @@ import (
 	"purchasedesk/internal/filestorage"
 	"purchasedesk/internal/firstrun"
 	"purchasedesk/internal/messaging"
-	"purchasedesk/internal/releasephase"
 	"purchasedesk/internal/router"
 	"purchasedesk/internal/scheduler"
 	"purchasedesk/internal/sessiontoken"
 	"purchasedesk/internal/zohoapi"
+	"purchasedesk/internal/zohowake"
 )
 
 func main() {
@@ -50,7 +50,6 @@ func main() {
 	if err := database.Migrate(ctx, db); err != nil {
 		log.Fatal(err)
 	}
-	releasephase.Set(cfg.ReleasePhase)
 	if err := firstrun.EnsureAdmin(ctx, db, cfg.AdminEmail, cfg.AdminPassword, cfg.AdminName); err != nil {
 		log.Fatal(err)
 	}
@@ -75,42 +74,41 @@ func main() {
 		cors = cfg.BaseURL
 	}
 	app := router.New(router.Deps{DB: db, Tokens: sessiontoken.Tokens{Secret: []byte(cfg.JWTSecret)}, Box: box, Store: store, Messages: msgs,
-		DevMode: cfg.Env == "development", PushEnabled: cfg.ZohoPushEnabled, CORSOrigin: cors})
+		DevMode: cfg.Env == "development", PushEnabled: cfg.ZohoPushEnabled, CORSOrigin: cors, BaseURL: cfg.BaseURL})
 	if err := app.ZohoSync.SeedFromEnv(ctx, zohoapi.Config{AccountsURL: cfg.ZohoAccountsURL, APIURL: cfg.ZohoAPIURL, OrgID: cfg.ZohoOrgID,
 		ClientID: cfg.ZohoClientID, ClientSecret: cfg.ZohoClientSecret, RefreshToken: cfg.ZohoRefreshToken}); err != nil {
 		log.Fatal(err)
 	}
 
-	jobs := []scheduler.Job{}
-	if releasephase.On(releasephase.Zoho) {
-		jobs = append(jobs,
-			scheduler.Job{Name: "zoho-sync", Every: time.Hour, Run: func(ctx context.Context) error {
-				if !app.ZohoSync.Connected(ctx) {
-					return nil
-				}
-				_, err := app.ZohoSync.Sync(ctx)
-				return err
-			}},
-			scheduler.Job{Name: "zoho-payments", Every: 2 * time.Hour, Run: func(ctx context.Context) error {
-				if !app.ZohoSync.Connected(ctx) {
-					return nil
-				}
-				_, err := app.ZohoPush.ReadPayments(ctx)
-				return err
-			}})
-	}
-	if app.Journals != nil {
+	jobs := []scheduler.Job{
+		scheduler.Job{Name: "zoho-sync", Every: time.Hour, Run: func(ctx context.Context) error {
+			if !app.ZohoSync.Connected(ctx) {
+				return nil
+			}
+			_, err := app.ZohoSync.Sync(ctx)
+			return err
+		}},
+		// Paid status comes only from Zoho; each read asks for the bills changed since the last one, so it is cheap.
+		scheduler.Job{Name: "zoho-payments", Every: 15 * time.Minute, Run: func(ctx context.Context) error {
+			if !app.ZohoSync.Connected(ctx) {
+				return nil
+			}
+			_, err := app.ZohoPush.ReadPayments(ctx)
+			return err
+		}},
+		// Everything that goes to Zoho by itself, in order: new vendors, items and properties, every vendor PO kept
+		// in step with a Zoho purchase order, bills approved for payment, and paid vendor advances. It runs every
+		// minute and at once after such a change (zohowake). Nothing is sent while ZOHO_PUSH_ENABLED is false.
+		scheduler.Job{Name: "zoho-send", Every: time.Minute, Run: app.ZohoPush.SendAll, Wake: zohowake.C()},
+		scheduler.Job{Name: "vendor-sheets", Every: time.Minute, Run: app.Sheets.RunAuto},
 		// After a month ends, each property's warehouse journal for the rest of that month is posted to Zoho.
-		jobs = append(jobs, scheduler.Job{Name: "warehouse-journals", Every: time.Hour, Run: app.Journals.PostMonthEnds})
-	}
-	if releasephase.On(releasephase.Sheets) {
-		jobs = append(jobs, scheduler.Job{Name: "vendor-sheets", Every: time.Minute, Run: app.Sheets.RunAuto})
+		scheduler.Job{Name: "warehouse-journals", Every: time.Hour, Run: app.Journals.PostMonthEnds},
 	}
 	scheduler.Start(ctx, jobs...)
 
 	srv := &http.Server{Addr: ":" + cfg.Port, Handler: app.Handler, ReadHeaderTimeout: 10 * time.Second}
 	go func() {
-		log.Printf("Purchase Desk API listening on :%s (release phase: %d, storage: %s, Zoho push enabled: %v)", cfg.Port, releasephase.Current(), store.Name(), cfg.ZohoPushEnabled)
+		log.Printf("Purchase Desk API listening on :%s (storage: %s, Zoho push enabled: %v)", cfg.Port, store.Name(), cfg.ZohoPushEnabled)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Fatal(err)
 		}

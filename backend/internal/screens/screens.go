@@ -25,44 +25,44 @@ func LevelOf(s string) (int, bool) {
 	return 0, false
 }
 
-// Screen is one menu item. Phase is the release phase it opens in.
+// Screen is one menu item.
 type Screen struct {
 	Key   string `json:"key"`
 	Label string `json:"label"`
 	Group string `json:"group"`
-	Phase int    `json:"phase"`
 	// ViewOnly screens have nothing a role may change there: their changes stay with the System Admin.
 	ViewOnly bool `json:"view_only"`
 }
 
 // All is every screen, in menu order.
 var All = []Screen{
-	{"approvals", "Approvals", "Purchase flow", 1, false},
-	{"requests", "Purchase Requests", "Purchase flow", 1, false},
-	{"purchase_orders", "Purchase Orders", "Purchase flow", 1, false},
-	{"vendor_sheets", "Vendor Order Sheets", "Purchase flow", 4, false},
-	{"goods_receipts", "Goods Receipts", "Purchase flow", 1, false},
-	{"invoices", "Invoices", "Purchase flow", 1, false},
-	{"payments", "Payments and advances", "Purchase flow", 1, false},
-	{"bills_utility", "Utility Bills", "Bills, corporate and warehouse", 3, false},
-	{"bills_amc", "AMC Bills", "Bills, corporate and warehouse", 3, false},
-	{"corporate", "Corporate", "Bills, corporate and warehouse", 3, false},
-	{"warehouse", "Warehouse", "Bills, corporate and warehouse", 4, false},
-	{"vendors", "Vendors", "Masters", 1, false},
-	{"items", "Items (SKU)", "Masters", 1, false},
-	{"vendor_mapping", "Vendor Mapping", "Masters", 1, false},
-	{"reports", "Reports", "Reports", 5, true},
-	{"properties", "Properties", "Settings", 1, false},
-	{"cities", "Cities & Clusters", "Settings", 1, false},
-	{"budgets", "Budgets", "Settings", 3, false},
-	{"corporate_setup", "Corporate Setup", "Settings", 3, false},
-	{"bill_types", "Bill Types", "Settings", 3, false},
-	{"item_setup", "Item Setup", "Settings", 1, false},
-	{"users", "Users & Rights", "Settings", 1, false},
-	{"flow", "Flow Settings", "Settings", 1, true},
-	{"zoho", "Zoho Books", "Settings", 2, false},
-	{"templates", "Message Templates", "Settings", 1, true},
-	{"activity", "Activity Log", "Settings", 1, true},
+	{"approvals", "Approvals", "Purchase flow", false},
+	{"requests", "Purchase Requests", "Purchase flow", false},
+	{"purchase_orders", "Purchase Orders", "Purchase flow", false},
+	{"vendor_sheets", "Vendor Order Sheets", "Purchase flow", false},
+	{"goods_receipts", "Goods Receipts", "Purchase flow", false},
+	{"invoices", "Invoices", "Purchase flow", false},
+	{"payments", "Payments and advances", "Purchase flow", false},
+	{"bills_utility", "Utility Bills", "Bills, corporate and warehouse", false},
+	{"bills_amc", "AMC Bills", "Bills, corporate and warehouse", false},
+	{"corporate", "Corporate", "Bills, corporate and warehouse", false},
+	{"warehouse", "Warehouse", "Bills, corporate and warehouse", false},
+	{"vendors", "Vendors", "Masters", false},
+	{"items", "Items (SKU)", "Masters", false},
+	{"vendor_mapping", "Vendor Mapping", "Masters", false},
+	{"master_approvals", "Masters to approve", "Masters", false},
+	{"reports", "Reports", "Reports", true},
+	{"properties", "Properties", "Settings", false},
+	{"cities", "Cities & Clusters", "Settings", false},
+	{"budgets", "Budgets", "Settings", false},
+	{"corporate_setup", "Corporate Setup", "Settings", false},
+	{"bill_types", "Bill Types", "Settings", false},
+	{"item_setup", "Item Setup", "Settings", false},
+	{"users", "Users & Rights", "Settings", false},
+	{"flow", "Flow Settings", "Settings", true},
+	{"zoho", "Zoho Books", "Settings", false},
+	{"templates", "Message Templates", "Settings", true},
+	{"activity", "Activity Log", "Settings", true},
 }
 
 var known = func() map[string]bool {
@@ -122,37 +122,38 @@ func Defaults(rights []string, step string) map[string]int {
 		return View
 	}
 	m := map[string]int{
-		"approvals":       None,
-		"requests":        lv(has("raise")),
-		"purchase_orders": lv(has("issue_po")),
-		"vendor_sheets":   None,
-		"goods_receipts":  lv(has("receive")),
-		"invoices":        lv(has("match")),
-		"payments":        lv(has("pay")),
-		"bills_utility":   lv(has("raise")),
-		"bills_amc":       lv(has("raise")),
-		"corporate":       lv(at("creq", "dh", "capp")),
-		"warehouse":       lv(at("wh")),
-		"vendors":         lv(has("masters") || at("finance", "cc")),
-		"items":           lv(has("masters")),
-		"vendor_mapping":  lv(has("masters")),
-		"reports":         View,
-		"properties":      lv(has("masters") || at("cc")),
-		"cities":          lv(has("masters")),
-		"budgets":         lv(at("cc")),
-		"corporate_setup": lv(has("masters")),
-		"bill_types":      lv(has("masters")),
-		"item_setup":      lv(has("masters")),
-		"users":           None,
-		"flow":            View,
-		"zoho":            lv(at("finance")),
-		"templates":       View,
-		"activity":        None,
+		"approvals":        None,
+		"requests":         lv(has("raise")),
+		"purchase_orders":  lv(has("issue_po")),
+		"vendor_sheets":    None,
+		"goods_receipts":   lv(has("receive") || has("raise")),
+		"invoices":         lv(has("match")),
+		"payments":         lv(has("pay")),
+		"bills_utility":    lv(has("raise")),
+		"bills_amc":        lv(has("raise")),
+		"corporate":        lv(at("creq", "dh", "capp")),
+		"warehouse":        lv(at("wh")),
+		"vendors":          lv(has("masters") || at("finance", "cc")),
+		"items":            lv(has("masters")),
+		"vendor_mapping":   lv(has("masters")),
+		"master_approvals": None, // Finance approves new masters before they are used or go to Zoho
+		"reports":          View,
+		"properties":       lv(has("masters") || at("cc")),
+		"cities":           lv(has("masters")),
+		"budgets":          lv(at("cc")),
+		"corporate_setup":  lv(has("masters")),
+		"bill_types":       lv(has("masters")),
+		"item_setup":       lv(has("masters")),
+		"users":            None,
+		"flow":             View,
+		"zoho":             lv(at("finance")),
+		"templates":        View,
+		"activity":         None,
 	}
-	if at("l2", "cc", "preop") {
+	if at("l2", "cc", "preop", "wh") { // the Warehouse Manager approves warehouse requests
 		m["approvals"] = lv(has("approve"))
 	}
-	if at("cc", "purchase") {
+	if at("cc", "l2", "preop", "wh", "purchase") { // the approvers send the vendor order sheets
 		m["vendor_sheets"] = Edit
 	}
 	if has("masters") {
@@ -160,6 +161,11 @@ func Defaults(rights []string, step string) map[string]int {
 	}
 	if has("masters") || at("finance", "cc") {
 		m["activity"] = View
+	}
+	if at("finance") {
+		m["master_approvals"] = Edit
+	} else if has("masters") {
+		m["master_approvals"] = View // whoever adds masters sees what waits for Finance
 	}
 	if step == "admin" {
 		for k := range m {

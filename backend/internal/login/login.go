@@ -1,4 +1,4 @@
-// Package login signs people in with email or mobile and a password or a one-time code,
+// Package login signs people in with email, mobile or employee ID and a password or a one-time code,
 // and returns the signed-in user with their roles. It also saves each user's screen preferences.
 package login
 
@@ -75,8 +75,12 @@ func normLogin(l string) string {
 	return l
 }
 
+// findUser finds the active user with this email, mobile or employee ID. Should one person's mobile be another's
+// employee ID, email wins, then mobile.
 func (s *Service) findUser(r *http.Request, login string) (id int64, hash *string, mobile, email string, err error) {
-	err = s.DB.QueryRow(r.Context(), `SELECT id, password_hash, coalesce(mobile,''), coalesce(email::text,'') FROM app_user WHERE active AND (email=$1::citext OR mobile=$1)`, login).
+	err = s.DB.QueryRow(r.Context(), `SELECT id, password_hash, coalesce(mobile,''), coalesce(email::text,'') FROM app_user
+		WHERE active AND (email=$1::citext OR mobile=$1 OR ($1<>'' AND upper(employee_id)=upper($1)))
+		ORDER BY (email=$1::citext) IS TRUE DESC, (mobile=$1) IS TRUE DESC LIMIT 1`, login).
 		Scan(&id, &hash, &mobile, &email)
 	return
 }
@@ -106,7 +110,7 @@ func (s *Service) login(w http.ResponseWriter, r *http.Request) error {
 	id, hash, _, _, err := s.findUser(r, key)
 	if err != nil || hash == nil || !passwords.Check(*hash, in.Password) {
 		s.throttle(key, true)
-		return httpjson.Unauthorized("Email, mobile or password is not correct.")
+		return httpjson.Unauthorized("Email, mobile, employee ID or password is not correct.")
 	}
 	return s.issue(w, r, id, "password")
 }
@@ -137,7 +141,7 @@ func (s *Service) otpRequest(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 	sent := false
-	if key == mobile && s.Messages.SMSOTPReady() {
+	if (key == mobile || email == "") && mobile != "" && s.Messages.SMSOTPReady() { // signed in by mobile, or no email to send to
 		sent = s.Messages.SMSOTP(r.Context(), mobile, code) == nil
 	} else if email != "" && s.Messages.EmailReady() {
 		st, _ := s.Messages.Email(r.Context(), email, "Purchase Desk sign-in code", "Your Purchase Desk sign-in code is "+code+". It is valid for 10 minutes.", nil, "otp", &id)

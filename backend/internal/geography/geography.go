@@ -17,8 +17,8 @@ import (
 	"purchasedesk/internal/database"
 	"purchasedesk/internal/httpjson"
 	"purchasedesk/internal/indiantax"
-	"purchasedesk/internal/releasephase"
 	"purchasedesk/internal/textclean"
+	"purchasedesk/internal/zohowake"
 )
 
 type Service struct{ DB *pgxpool.Pool }
@@ -33,9 +33,7 @@ func (s *Service) Routes(r chi.Router) {
 	r.Get("/properties", httpjson.Wrap(s.listProperties))
 	r.Post("/properties", httpjson.Wrap(s.saveProperty))
 	r.Put("/properties/{id}", httpjson.Wrap(s.saveProperty))
-	if releasephase.On(releasephase.Budgets) {
-		r.Put("/properties/{id}/pct", httpjson.Wrap(s.savePropertyPct))
-	}
+	r.Put("/properties/{id}/pct", httpjson.Wrap(s.savePropertyPct))
 }
 
 type City struct {
@@ -255,17 +253,18 @@ type Property struct {
 	BanquetPct  float64 `json:"banquet_pct"`
 	Active      bool    `json:"active"`
 	InactiveWhy string  `json:"inactive_reason"`
+	FinStatus   string  `json:"fin_status"` // pending until Finance approves a new one
 }
 
 const propertySelect = `SELECT p.id, p.code, coalesce(p.doc_code,''), p.doc_seq>0, p.name, p.ezee_code, p.cluster_id, k.name, c.id, c.name, c.state_code, p.l1_user_id, coalesce(u.name,''), coalesce(m.name,''),
-	p.kind, p.plan_pct, p.ird_pct, p.banquet_pct, p.active, coalesce(p.inactive_reason,'')
+	p.kind, p.plan_pct, p.ird_pct, p.banquet_pct, p.active, coalesce(p.inactive_reason,''), p.fin_status
 	FROM property p JOIN cluster k ON k.id=p.cluster_id JOIN city c ON c.id=k.city_id
 	LEFT JOIN app_user u ON u.id=p.l1_user_id LEFT JOIN app_user m ON m.id=k.manager_id`
 
 func scanProperty(row pgx.CollectableRow) (Property, error) {
 	var x Property
 	err := row.Scan(&x.ID, &x.Code, &x.DocCode, &x.DocCodeUsed, &x.Name, &x.EzeeCode, &x.ClusterID, &x.Cluster, &x.CityID, &x.City, &x.StateCode, &x.L1UserID, &x.L1Name, &x.L2Name,
-		&x.Kind, &x.PlanPct, &x.IRDPct, &x.BanquetPct, &x.Active, &x.InactiveWhy)
+		&x.Kind, &x.PlanPct, &x.IRDPct, &x.BanquetPct, &x.Active, &x.InactiveWhy, &x.FinStatus)
 	return x, err
 }
 
@@ -314,8 +313,6 @@ func ValidateProperty(ctx context.Context, q database.Q, in *PropertyInput, id i
 	errs = append(errs, checkDocCode(ctx, q, in, id)...)
 	if !textclean.Contains([]string{"live", "warehouse", "preopening", "corporate"}, in.Kind) {
 		errs = append(errs, "Stage must be live, warehouse, pre-opening or corporate.")
-	} else if !releasephase.PropertyKindOn(in.Kind) {
-		errs = append(errs, "Warehouse and corporate properties open in a later phase of the rollout.")
 	}
 	if !validPct(in.PlanPct) || !validPct(in.IRDPct) || !validPct(in.BanquetPct) {
 		errs = append(errs, "Each cost % must be a number from 0 to 100.")
@@ -371,6 +368,7 @@ func checkDocCode(ctx context.Context, q database.Q, in *PropertyInput, id int64
 // CreateProperty saves a validated new property with the next code (P41, P42, ...).
 // CopyFrom gives the new property the same vendor for every item as an existing property.
 func CreateProperty(ctx context.Context, tx pgx.Tx, u *access.User, in PropertyInput) (int64, string, error) {
+	zohowake.Now() // the new property may go to Zoho as a reporting tag option
 	if _, err := tx.Exec(ctx, `LOCK TABLE property IN SHARE ROW EXCLUSIVE MODE`); err != nil {
 		return 0, "", err
 	}

@@ -1,4 +1,5 @@
 // A labelled form control with an optional hint, plus small inputs bound to a value.
+import { MultiSelect } from './MultiSelect'
 import type { ReactNode } from 'react'
 
 export function Field({ label, hint, children }: { label: ReactNode; hint?: ReactNode; children: ReactNode }) {
@@ -21,14 +22,10 @@ export function Select<T extends string | number>({ value, onChange, options, pl
   )
 }
 
-export function Checks<T extends string | number>({ value, onChange, options }: { value: T[]; onChange: (v: T[]) => void; options: [T, string][] }) {
-  return (
-    <div className="ckrow">
-      {options.map(([v, l]) => (
-        <label className="ck" key={String(v)}>
-          <input type="checkbox" checked={value.includes(v)} onChange={(e) => onChange(e.target.checked ? [...value, v] : value.filter((x) => x !== v))} />{l}
-        </label>
-      ))}
-    </div>
-  )
+/** Several choices from a list (properties, clusters, categories, rights...): a tick-several dropdown with search. */
+export function Checks<T extends string | number>({ value, onChange, options, placeholder = 'Choose', label }: {
+  value: T[]; onChange: (v: T[]) => void; options: [T, string][]; placeholder?: string; label?: string
+}) {
+  return <MultiSelect placeholder={placeholder} ariaLabel={label} value={value.map(String)} options={options.map(([v, l]) => [String(v), l] as [string, string])}
+    onChange={(vs) => onChange(options.filter(([v]) => vs.includes(String(v))).map(([v]) => v))} />
 }

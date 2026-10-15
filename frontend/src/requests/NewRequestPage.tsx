@@ -23,7 +23,10 @@ interface Item {
   sku_id: number; sku_code: string; item_name: string; brand: string; pack_size: string; sub_category_id: number; sub_category: string
   category: string; sku_gst: number; vendor_id: number | null; vendor_name: string; is_warehouse: boolean; rate: number | null; rate_gst: number | null
   estimate_allowed: boolean; orderable: boolean; problem: string
+  /** false: several vendors may supply it here; options lists them (the default first) and the requester picks one. */
+  daily_use: boolean; options: Option[]
 }
+interface Option { vendor_id: number; vendor_name: string; rate: number | null; rate_gst: number | null; estimate_allowed: boolean; orderable: boolean; problem: string }
 interface Form {
   property_id: number; property: string; property_kind: string; items: Item[]
   budget: { sub_category_id: number; sub_category: string; category: string; month_budget: number; month_spent: number; week_budget: number; week_spent: number }[]
@@ -31,7 +34,7 @@ interface Form {
   settings: { evt_l2: boolean; l2_above: number; cc_all: boolean; wh_approval: boolean }
   often: number[]; last: { numbers: string[]; date: string; lines: { sku_id: number; qty: number }[] } | null
 }
-interface Draft { sku_id: number; qty: number; est_rate: number }
+interface Draft { sku_id: number; qty: number; est_rate: number; vendor_id?: number }
 interface Fields { pid: number; lines: Draft[]; evt: boolean; evtWhy: string; evtNote: string; preop: number }
 
 const KIND: Record<string, string> = { warehouse: 'Warehouse', preopening: 'Pre-opening', corporate: 'Corporate office' }
@@ -44,6 +47,11 @@ export function NewRequestPage() {
   const [sp] = useSearchParams()
   const cloneId = sp.get('clone')
   const draftId = Number(sp.get('draft')) || 0
+  // ?property=<id>&lines=<sku>:<qty>,... pre-fills a request (the warehouse's shortfall purchase).
+  const prefill = useRef<{ pid: number; lines: Draft[] } | null>(sp.get('property') ? {
+    pid: Number(sp.get('property')),
+    lines: (sp.get('lines') || '').split(',').map((x) => x.split(':').map(Number)).filter(([s, q]) => s > 0 && q > 0).map(([s, q]) => ({ sku_id: s, qty: q, est_rate: 0 })),
+  } : null)
   const src = useApi<{ document: Doc; actions: string[] }>(editId || cloneId ? `/documents/${editId || cloneId}` : null)
   const srcDoc = src.data?.document
   const pending = useRef<Doc | null>(null)
@@ -51,12 +59,13 @@ export function NewRequestPage() {
   const [skipped, setSkipped] = useState<string[]>([])
   const l = useLookups()
   const { me, hasStep } = useSession()
-  // Live properties: property staff, managers and Purchase. Pre-opening: the Warehouse Manager or anyone assigned to it.
-  // The warehouse: the Warehouse Manager only. Always limited to the user's raise scope; the server checks the same.
+  // Live properties: property staff, managers, property chefs and Purchase. Pre-opening: the Warehouse Manager or anyone
+  // assigned to it. The warehouse: its Warehouse Staff (the Warehouse Manager approves). Always limited to the user's
+  // raise scope; the server checks the same.
   const props = useMemo(() => (l?.properties || []).filter((p) => {
-    if (!p.active || p.kind === 'corporate') return false
+    if (!p.active || p.kind === 'corporate' || p.fin_status === 'pending') return false // a new property waits for Finance
     if (me?.is_admin) return true
-    const kindOK = p.kind === 'warehouse' ? hasStep('wh') : p.kind === 'preopening' ? hasStep('wh', 'staff', 'l1', 'purchase') : hasStep('staff', 'l1', 'purchase')
+    const kindOK = p.kind === 'warehouse' ? hasStep('whs', 'wh') : p.kind === 'preopening' ? hasStep('wh', 'staff', 'l1', 'chef', 'purchase') : hasStep('staff', 'l1', 'chef', 'purchase')
     const inScope = me?.roles.some((g) => g.rights.includes('raise') && (g.scope === 'all' || (g.scope === 'clusters' && g.cluster_ids.includes(p.cluster_id)) || (g.scope === 'properties' && g.property_ids.includes(p.id))))
     return kindOK && inScope
   }), [l, me, hasStep])
@@ -79,6 +88,7 @@ export function NewRequestPage() {
   // Prefill from the request being cloned or edited: switch to its property, then copy its items once that property's
   // item list has loaded. Items no longer orderable there are left out and named.
   useEffect(() => { if (srcDoc) { pending.current = srcDoc; setPid(srcDoc.property_id) } }, [srcDoc])
+  useEffect(() => { if (prefill.current) setPid(prefill.current.pid) }, [])
   // A saved draft (?draft=<id>) comes back the same way.
   useEffect(() => {
     if (!draftId) return
@@ -100,12 +110,20 @@ export function NewRequestPage() {
       const miss: string[] = []
       for (const x of d.lines.filter((x) => x.qty > 0)) {
         const i = avail.get(x.sku_id)
-        if (i?.orderable) keep.push({ sku_id: x.sku_id, qty: x.qty, est_rate: i.rate == null ? x.rate : 0 })
+        const o = i && !i.daily_use ? i.options.find((v) => v.vendor_id === d.vendor_id && v.orderable) : undefined
+        if (o) keep.push({ sku_id: x.sku_id, qty: x.qty, est_rate: o.rate == null ? x.rate : 0, vendor_id: o.vendor_id })
+        else if (i?.orderable) keep.push({ sku_id: x.sku_id, qty: x.qty, est_rate: i.rate == null ? x.rate : 0 })
         else miss.push(x.item_name + (i ? ` (${i.problem.toLowerCase()})` : ''))
       }
       setLines(keep); setSkipped(miss)
       setEvt(!!d.event_reason); setEvtWhy(d.event_reason); setEvtNote(d.event_note)
       if (d.preop_user_id) setPreop(d.preop_user_id)
+    }
+    const pf = prefill.current
+    if (pf && form.property_id === pf.pid) {
+      prefill.current = null
+      setLines(pf.lines.filter((x) => avail.get(x.sku_id)?.orderable))
+      setSkipped(pf.lines.filter((x) => !avail.get(x.sku_id)?.orderable).map((x) => avail.get(x.sku_id)?.item_name || 'item ' + x.sku_id))
     }
     const f = pendingDraft.current
     if (f && form.property_id === f.pid) {
@@ -124,20 +142,30 @@ export function NewRequestPage() {
     if (!q) return cur.filter((d) => d.sku_id !== sku)
     return cur.some((d) => d.sku_id === sku) ? cur.map((d) => d.sku_id === sku ? { ...d, qty: q } : d) : [...cur, { sku_id: sku, qty: q, est_rate: 0 }]
   })
-  const rateOf = (d: Draft) => { const i = byId.get(d.sku_id)!; return i.rate ?? d.est_rate }
-  const gstOf = (d: Draft) => { const i = byId.get(d.sku_id)!; return i.rate_gst ?? i.sku_gst }
+  // The vendor a line goes to: the one picked for an item that is not for daily consumption, else the item's vendor.
+  const pick = (d: Draft) => {
+    const i = byId.get(d.sku_id)!
+    const o = d.vendor_id ? i.options.find((v) => v.vendor_id === d.vendor_id) : undefined
+    return o ? { vendor_id: o.vendor_id, vendor: o.vendor_name, rate: o.rate, gst: o.rate_gst ?? i.sku_gst, wh: false }
+      : { vendor_id: i.vendor_id || 0, vendor: i.vendor_name, rate: i.rate, gst: i.rate_gst ?? i.sku_gst, wh: i.is_warehouse }
+  }
+  const rateOf = (d: Draft) => pick(d).rate ?? d.est_rate
+  const gstOf = (d: Draft) => pick(d).gst
+  const setVendor = (sku: number, vendor: number) => setLines((cur) => cur.map((d) => d.sku_id === sku ? { ...d, vendor_id: vendor, est_rate: 0 } : d))
   const groups = useMemo(() => {
     const g = new Map<number, { vendor: string; wh: boolean; lines: Draft[] }>()
     for (const d of lines) {
-      const i = byId.get(d.sku_id)
-      if (!i || !i.vendor_id) continue
-      if (!g.has(i.vendor_id)) g.set(i.vendor_id, { vendor: i.vendor_name, wh: i.is_warehouse, lines: [] })
-      g.get(i.vendor_id)!.lines.push(d)
+      if (!byId.get(d.sku_id)) continue
+      const v = pick(d)
+      if (!v.vendor_id) continue
+      if (!g.has(v.vendor_id)) g.set(v.vendor_id, { vendor: v.vendor, wh: v.wh, lines: [] })
+      g.get(v.vendor_id)!.lines.push(d)
     }
     return [...g.values()]
-  }, [lines, byId])
+  }, [lines, byId]) // eslint-disable-line react-hooks/exhaustive-deps
   const total = lines.reduce((t, d) => t + (byId.get(d.sku_id) ? lineValue(d.qty, rateOf(d), gstOf(d)) : 0), 0)
-  const kindProp = form && form.property_kind !== 'live'
+  const kindProp = form && form.property_kind === 'preopening' // asks which Pre-opening Team member approves
+  const whProp = form && form.property_kind === 'warehouse'
 
   // The menu: "Often ordered" first when there is history, then all items, then one tab per category.
   const cats = useMemo(() => [...new Set(items.map((i) => i.category))], [items])
@@ -150,6 +178,7 @@ export function NewRequestPage() {
 
   function route(g: { wh: boolean; lines: Draft[] }) {
     if (!form) return ''
+    if (whProp) return 'Warehouse Manager'
     if (kindProp) return (form.preop_members.find((m) => m.id === preop)?.name || 'Pre-opening Team') + ' (Pre-opening Team)'
     const s = form.settings
     if (g.wh && !s.wh_approval) return 'No approval needed'
@@ -176,7 +205,7 @@ export function NewRequestPage() {
   const fields = (): Fields => ({ pid, lines, evt, evtWhy, evtNote, preop })
   const saveDraft = () => draft.save(`${form?.property || 'Request'} · ${lines.length} item${lines.length === 1 ? '' : 's'} · ${inr(total)}`, fields(), {})
   const submit = () => {
-    const noRate = lines.filter((d) => byId.get(d.sku_id)?.rate == null && !(d.est_rate > 0)).map((d) => byId.get(d.sku_id)!.item_name)
+    const noRate = lines.filter((d) => byId.get(d.sku_id) && pick(d).rate == null && !(d.est_rate > 0)).map((d) => byId.get(d.sku_id)!.item_name)
     if (noRate.length) return a.setErrors([`Enter an estimated rate for: ${noRate.join(', ')}. These vendors have no rate for them yet.`])
     const body = { property_id: pid, lines, event_reason: evt ? evtWhy : '', event_note: evt ? evtNote : '', preop_user_id: kindProp ? preop : 0 }
     a.run(() => editId ? put(`/requests/${editId}`, body) : post('/requests', body), (r: any) => { draft.clear(); nav(editId ? '/documents/' + editId : '/requests'); return r.message })
@@ -194,7 +223,7 @@ export function NewRequestPage() {
       <div key={i.sku_id} className={'mt' + (n ? ' on' : '') + (i.orderable ? '' : ' off')} style={{ ['--mc' as string]: colour(i.category) }}>
         <button className="mt-main" disabled={!i.orderable} onClick={() => setQty(i.sku_id, n + 1)} aria-label={'Add ' + i.item_name}>
           <b>{i.item_name}</b><span>{[i.brand, i.pack_size].filter(Boolean).join(' · ')}</span>
-          <span>{i.orderable ? i.vendor_name : i.problem}</span>
+          <span>{!i.orderable ? i.problem : i.options.length > 1 ? `${i.options.length} vendors · pick in the cart` : i.vendor_name}</span>
           <span className="pr">{i.rate != null ? inr(i.rate) : i.orderable ? 'Rate to be entered' : ''}</span>
         </button>
         {n ? <div className="mt-q"><button onClick={() => setQty(i.sku_id, n - 1)} aria-label={'One less ' + i.item_name}>−</button>
@@ -244,11 +273,13 @@ export function NewRequestPage() {
               <div key={g.vendor} className="cgroup">
                 <p className="cvend"><b>{g.vendor}</b><span className="num">{inr(g.lines.reduce((t, d) => t + lineValue(d.qty, rateOf(d), gstOf(d)), 0))}</span></p>
                 <p className="hint">{route(g)}</p>
-                {g.lines.map((d) => { const i = byId.get(d.sku_id)!; return (
+                {g.lines.map((d) => { const i = byId.get(d.sku_id)!; const v = pick(d); return (
                   <div key={d.sku_id} className="cline">
-                    <div><b>{i.item_name}</b><br /><span className="hint">{i.pack_size} · {i.rate == null
+                    <div><b>{i.item_name}</b><br /><span className="hint">{i.pack_size} · {v.rate == null
                       ? <>rate ₹ <input className="cest" type="number" min="0" inputMode="decimal" value={d.est_rate || ''} onChange={(e) => setLines(lines.map((x) => x.sku_id === d.sku_id ? { ...x, est_rate: +e.target.value } : x))} aria-label={'Estimated rate for ' + i.item_name} /></>
-                      : inr(i.rate)} · {inr(lineValue(d.qty, rateOf(d), gstOf(d)))}</span></div>
+                      : inr(v.rate)} · {inr(lineValue(d.qty, rateOf(d), gstOf(d)))}</span>
+                      {i.options.length > 1 && <select className="cvsel" value={v.vendor_id} onChange={(e) => setVendor(d.sku_id, +e.target.value)} aria-label={'Vendor for ' + i.item_name}>
+                        {i.options.map((o) => <option key={o.vendor_id} value={o.vendor_id} disabled={!o.orderable}>{o.vendor_name} · {o.rate != null ? inr(o.rate) : o.orderable ? 'rate to be entered' : o.problem}</option>)}</select>}</div>
                     <div className="qs"><button onClick={() => setQty(d.sku_id, d.qty - 1)} aria-label={'One less ' + i.item_name}>−</button>
                       <input type="number" inputMode="decimal" min="0" value={d.qty} onChange={(e) => setQty(d.sku_id, +e.target.value)} aria-label={'Quantity of ' + i.item_name} />
                       <button onClick={() => setQty(d.sku_id, d.qty + 1)} aria-label={'One more ' + i.item_name}>+</button>
@@ -265,7 +296,7 @@ export function NewRequestPage() {
                   <span className="num">{inr(mine)} of {inr(Math.max(0, left))} left{mine > left && <> <span className="pill bad">Over</span></>}{mine <= left && b.week_spent + mine > b.week_budget && <> <span className="pill warn">Over week</span></>}</span></div>
               })}</>}
           </> : <p className="sub">Nothing added yet. Tap items on the left.</p>}
-          {!kindProp && <>
+          {form?.property_kind === 'live' && <>
             <label className="ck"><input type="checkbox" checked={evt} onChange={(e) => setEvt(e.target.checked)} />Ordering extra for an event</label>
             {evt && <>
               <label className="field"><span>Reason</span><select value={evtWhy} onChange={(e) => setEvtWhy(e.target.value)}><option value="">Choose</option>{form?.event_reasons.map((r) => <option key={r}>{r}</option>)}</select></label>

@@ -145,11 +145,42 @@ function Connection({ c, lists, onDone }: { c: any; lists: Lists | null; onDone:
           <tr><td>Taxes and tax groups</td><td className="r">{c.counts?.Taxes}</td><td>Not created from here</td></tr>
           <tr><td>Property tag options</td><td className="r">{c.counts?.Options}</td><td>Create option for a property</td></tr>
           <tr><td>Locations</td><td className="r">{c.counts?.Locations}</td><td>Optional; not created from here</td></tr>
-          <tr><td>Vendor contacts</td><td className="r">{c.counts?.Contacts}</td><td>Create vendor (Vendors tab)</td></tr>
+          <tr><td>Vendor contacts</td><td className="r">{c.counts?.Contacts}</td><td>Created or linked automatically, or from the Vendors tab</td></tr>
           <tr><td>Bills pushed</td><td className="r">{c.counts?.Bills}</td><td>Payment status read back</td></tr>
         </tbody></table></div></section>
+      <Sending c={c} lists={lists} onDone={onDone} />
       {edit && <CredModal c={c} onClose={() => setEdit(false)} onDone={() => { setEdit(false); onDone() }} />}
     </div>
+  )
+}
+
+/** What goes to Zoho by itself, Zoho's daily allowance as Zoho reports it, and the masters not sent yet. */
+function Sending({ c, lists, onDone }: { c: any; lists: Lists | null; onDone: () => void }) {
+  const { me, hasStep } = useSession()
+  const a = useAction()
+  const probs = useApi<{ kind: string; id: number; name: string; problem: string; at: string }[]>('/zoho/masters/problems')
+  const may = !!me?.is_admin || hasStep('finance')
+  const u = c.usage as { limit: number; remaining: number; reset_at: string; seen_at: string } | undefined
+  const seen = u && !u.seen_at.startsWith('0001')
+  const save = (body: object) => a.run(() => put('/zoho/sending', body), (r: any) => { onDone(); probs.reload(); return r.message })
+  return (
+    <section className="card"><h2>Sending to Zoho</h2>
+      <p>New POs, bills approved for payment, paid advances{c.auto_masters ? ', and new vendors, items and properties' : ''} go to Zoho within seconds of the change.
+        Calls are spaced to about 80 a minute, under Zoho's 100.</p>
+      <dl className="kv"><dt>Zoho calls today</dt><dd>{seen ? <>{(u!.limit - u!.remaining).toLocaleString('en-IN')} used of {u!.limit.toLocaleString('en-IN')} · {u!.remaining.toLocaleString('en-IN')} left
+        {u!.remaining * 5 < u!.limit && <> <Pill tone="warn">Automatic sending paused</Pill></>}<br /><span className="hint">As Zoho reported at {dateTime(u!.seen_at)}; resets {dateTime(u!.reset_at)}. Below a fifth left, only the buttons send.</span></>
+        : <span className="hint">Shown after the next call to Zoho.</span>}</dd></dl>
+      <label className="ck"><input type="checkbox" checked={!!c.auto_masters} disabled={!may || a.busy} onChange={(e) => save({ auto_masters: e.target.checked })} />
+        <span>Create or link vendors, items and properties in Zoho automatically<br /><span className="hint">A vendor once Finance verifies its bank details, an item once its account and GST are mapped, a property once its location is set. One already in Zoho (same GSTIN, SKU code or name) is linked, not duplicated.</span></span></label>
+      <label className="field"><span>Vendor advances are paid from</span>
+        <AccountSelect value={c.advance_account_id || ''} accounts={lists?.accounts || []} types={['bank', 'cash']} disabled={!may || a.busy} onChange={(v) => save({ advance_account_id: v })} />
+        <span className="hint">A paid advance goes to Zoho as a vendor payment from this account, and is applied to its bill once the bill is in Zoho (not yet tested on a live organisation). Not chosen: advances wait.</span></label>
+      <Errors list={a.errors} />
+      {(probs.data || []).length > 0 && <><h3>Not in Zoho yet · {probs.data!.length}</h3>
+        <div className="scroll"><table><thead><tr><th>What</th><th>Why</th></tr></thead><tbody>
+          {probs.data!.map((x) => <tr key={x.kind + x.id}><td>{{ vendor: 'Vendor', item: 'Item', property: 'Property' }[x.kind]} {x.name}</td>
+            <td>{x.problem.replace(/^Held: /, '')}<br /><span className="hint">{x.problem.startsWith('Held:') ? 'Checked again every minute' : 'Zoho refused it; tried again after 30 minutes'} · {dateTime(x.at)}</span></td></tr>)}</tbody></table></div></>}
+    </section>
   )
 }
 
@@ -368,7 +399,27 @@ function Queue() {
             : x.held.length ? <><Pill tone="bad">Held</Pill><br /><span className="hint">{x.held.join('; ')}</span></> : <Pill tone="ok">Ready</Pill>}
             {x.zoho_error && <><br /><span className="hint">{x.zoho_error}</span></>}</td></tr>)}</tbody></table></div>
         {data && !data.length && <p className="empty">No bills waiting.</p>}</section>
+      <PurchaseOrders />
     </>
+  )
+}
+
+// Vendor POs kept in step with Zoho purchase orders: what is still to send, held or refused, and the last ones sent.
+function PurchaseOrders() {
+  const { data, reload } = useApi<{ enabled: boolean; purchase_orders: { id: number; number: string; po_number: string; vendor: string; property: string; sync: string; error: string; zoho_po_id: string; at: string }[] }>('/zoho/purchase-orders')
+  const a = useAction()
+  const list = data?.purchase_orders || []
+  return (
+    <section className="card flush"><div className="shead" style={{ background: 'none', borderTop: 0 }}><div style={{ flex: 1 }}><h2>Purchase orders</h2>
+      <p className="sub">Every vendor PO goes to Zoho as a purchase order under the same number, and is updated or cancelled when it changes here. Sent automatically every minute{data && !data.enabled ? ' once ZOHO_PUSH_ENABLED is on' : ''}.</p></div></div>
+      <Errors list={a.errors} />
+      <div className="scroll"><table><thead><tr><th>PO</th><th>Vendor</th><th>Property</th><th>Zoho</th><th></th></tr></thead>
+        <tbody>{list.map((x) => <tr key={x.id}><td><Link className="link" to={'/documents/' + x.id}>{x.po_number}</Link><br /><span className="hint">{x.number}</span></td><td>{x.vendor}</td><td>{x.property}</td>
+          <td>{!x.sync ? <><Pill tone="ok">In Zoho</Pill> <span className="hint">{x.at}</span></> : <Pill tone={x.error ? 'bad' : 'warn'}>{x.error.startsWith('Held:') ? 'Held' : x.error ? 'Refused' : 'Waiting'} to {x.sync}</Pill>}
+            {x.error && <><br /><span className="hint">{x.error}</span></>}</td>
+          <td className="r">{x.sync && data?.enabled && <button className="link" disabled={a.busy} onClick={() => a.run(() => post(`/zoho/purchase-orders/${x.id}/sync`), (r: any) => { reload(); return r.message })}>Sync now</button>}</td></tr>)}</tbody></table></div>
+      {data && !list.length && <p className="empty">No purchase orders sent yet.</p>}
+    </section>
   )
 }
 

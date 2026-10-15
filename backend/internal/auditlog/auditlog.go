@@ -51,6 +51,18 @@ func Doc(ctx context.Context, q database.Q, u *access.User, roleName string, doc
 	return err
 }
 
+// ByVendor adds a line to a document's history and to the activity log for something a vendor did on the vendor
+// portal; it carries the vendor's name and the role "Vendor" (no user).
+func ByVendor(ctx context.Context, q database.Q, vendor string, docID int64, number, action, note string) error {
+	if _, err := q.Exec(ctx, `INSERT INTO document_log (document_id,user_name,role_name,action,note) VALUES ($1,$2,'Vendor',$3,$4)`,
+		docID, vendor, action, note); err != nil {
+		return err
+	}
+	_, err := q.Exec(ctx, `INSERT INTO activity_log (user_name,role_name,module,action,record,details) VALUES ($1,'Vendor','Vendor portal',$2,$3,$4)`,
+		vendor, action, number, note)
+	return err
+}
+
 type Service struct{ DB *pgxpool.Pool }
 
 func (s *Service) Routes(r chi.Router) {
@@ -74,14 +86,14 @@ func (s *Service) list(w http.ResponseWriter, r *http.Request) error {
 		return httpjson.Forbidden("The activity log is open to the Admin, Finance, the Cost Controller and the Purchase Team.")
 	}
 	q := strings.TrimSpace(r.URL.Query().Get("q"))
-	mod := r.URL.Query().Get("module")
+	mods := httpjson.QStrings(r, "module")
 	limit := httpjson.QInt(r, "limit", 1000)
 	if limit > 10000 {
 		limit = 10000
 	}
 	rows, err := s.DB.Query(r.Context(), `SELECT id, at, user_name, role_name, module, action, record, details FROM activity_log
-		WHERE ($1='' OR module=$1) AND ($2='' OR (user_name||' '||role_name||' '||action||' '||record||' '||details) ILIKE '%'||$2||'%')
-		ORDER BY at DESC, id DESC LIMIT $3`, mod, q, limit)
+		WHERE (cardinality($1::text[])=0 OR module = ANY($1)) AND ($2='' OR (user_name||' '||role_name||' '||action||' '||record||' '||details) ILIKE '%'||$2||'%')
+		ORDER BY at DESC, id DESC LIMIT $3`, mods, q, limit)
 	if err != nil {
 		return err
 	}

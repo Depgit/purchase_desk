@@ -17,7 +17,6 @@ import (
 	"purchasedesk/internal/access"
 	"purchasedesk/internal/auditlog"
 	"purchasedesk/internal/httpjson"
-	"purchasedesk/internal/releasephase"
 	"purchasedesk/internal/textclean"
 )
 
@@ -43,6 +42,7 @@ type gridCell struct {
 type gridRow struct {
 	UserID     int64               `json:"user_id"`
 	Name       string              `json:"name"`
+	EmployeeID string              `json:"employee_id"`
 	Department string              `json:"department"`
 	Active     bool                `json:"active"`
 	Cells      map[string]gridCell `json:"cells"`
@@ -64,9 +64,6 @@ func (s *Service) gridProps(ctx context.Context, u *access.User) ([]gridProp, er
 		var kind string
 		if err := rows.Scan(&p.ID, &p.Code, &p.Name, &p.ClusterID, &kind); err != nil {
 			return nil, err
-		}
-		if !releasephase.PropertyKindOn(kind) {
-			continue
 		}
 		p.Mine = u.IsAdmin || u.UserScopeAny || all || textclean.Contains(visible, p.ID)
 		out = append(out, p)
@@ -126,7 +123,7 @@ func (s *Service) grid(w http.ResponseWriter, r *http.Request) error {
 	rows := []gridRow{}
 	for _, x := range users {
 		canUser := u.IsAdmin || (u.AddsUsers() && x.CreatedBy == u.ID)
-		row := gridRow{UserID: x.ID, Name: x.Name, Department: x.Department, Active: x.Active, Cells: map[string]gridCell{}}
+		row := gridRow{UserID: x.ID, Name: x.Name, EmployeeID: x.EmployeeID, Department: x.Department, Active: x.Active, Cells: map[string]gridCell{}}
 		for _, p := range props {
 			c := cellOf(x.Roles, p)
 			c.Editable = canUser && p.Mine && (c.Via == "" || c.Via == "properties")
@@ -183,9 +180,6 @@ func (s *Service) setPropertyAccess(w http.ResponseWriter, r *http.Request) erro
 	if in.RoleID != 0 {
 		if err := s.DB.QueryRow(r.Context(), `SELECT name, step, active FROM role WHERE id=$1`, in.RoleID).Scan(&roleName, &step, &roleActive); err != nil || !roleActive {
 			return httpjson.Bad("Choose an active role.")
-		}
-		if !releasephase.RoleOn(step) {
-			return httpjson.Bad("That role opens in a later phase of the rollout.")
 		}
 		if !u.IsAdmin && !textclean.Contains(u.CreatableRoles, in.RoleID) {
 			return httpjson.Forbidden("Your role cannot give %s.", roleName)

@@ -1,5 +1,6 @@
 // The central warehouse: stock ledger, orders to dispatch, delivery schedule, in transit, incoming POs,
 // stock movements and delivery partners.
+import { useLookups } from '../api/lookups'
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { post, put } from '../api/client'
@@ -19,7 +20,9 @@ import { useToast } from '../ui/Toast'
 import { ScheduleModal, type Partner } from './DispatchPanel'
 import { useScreen } from '../screenaccess/screen'
 
-interface Stock { sku_id: number; sku_code: string; item: string; brand: string; pack_size: string; sub_category: string; opening: number; purchased: number; issued: number; pilferage: number; in_transit: number; closing: number; min_level: number; rate: number; value: number; pilferage_value: number; status: string }
+interface Stock { sku_id: number; sku_code: string; item: string; brand: string; pack_size: string; sub_category: string; opening: number; purchased: number; issued: number; pilferage: number; in_transit: number; closing: number; min_level: number; rate: number; value: number; pilferage_value: number; status: string
+  /** due: on approved transfers not yet sent; on_order: the warehouse's own open POs; short: still to buy. */
+  due: number; on_order: number; short: number; wh_stocked: boolean }
 type T = Doc & { status_label: string; short_lines: number; age_hours: number }
 interface Move { at: string; kind: string; ref: string; document_id: number; party: string; sku_code: string; item: string; qty: number; value: number }
 type Tab = 'stock' | 'dispatch' | 'schedule' | 'transit' | 'incoming' | 'moves' | 'partners'
@@ -33,6 +36,12 @@ export function WarehousePage() {
   const stock = useApi<Stock[]>('/warehouse/stock')
   const tr = useApi<T[]>('/warehouse/transfers')
   const [sel, setSel] = useState<Set<string | number>>(new Set())
+  const [buy, setBuy] = useState<Set<string | number>>(new Set()) // items ticked to buy for the shortfall
+  const l = useLookups()
+  const whProp = (l?.properties || []).find((p) => p.kind === 'warehouse' && p.active)
+  const raises = hasStep('wh', 'whs') && hasRight('raise')
+  // The shortfall goes into a new warehouse request, pre-filled with the missing quantities (rounded up).
+  const raiseShort = (items: Stock[]) => whProp && nav(`/requests/new?property=${whProp.id}&lines=${items.map((s) => `${s.sku_id}:${Math.ceil(s.short)}`).join(',')}`)
   const [trip, setTrip] = useState(false)
   const [upload, setUpload] = useState(false)
   const all = tr.data || []
@@ -53,6 +62,7 @@ export function WarehousePage() {
         {tile('stock', 'Stock on hand', inr(value((s) => s.closing)))}
         {tile('dispatch', 'Orders to dispatch', toDispatch.length)}
         {tile('dispatch', 'Not yet scheduled', toDispatch.filter((d) => !d.delivery).length, toDispatch.some((d) => !d.delivery))}
+        {tile('stock', 'Items short for orders', (stock.data || []).filter((s) => s.short > 0).length, (stock.data || []).some((s) => s.short > 0))}
         {tile('incoming', 'Deliveries to receive', incoming.length)}
         {tile('transit', 'In transit', inr(value((s) => s.in_transit)))}
         {tile('moves', 'Pilferage booked', inr(value((s) => s.pilferage)), st.some((s) => s.pilferage > 0))}
@@ -60,8 +70,12 @@ export function WarehousePage() {
       <div className="tabs">{([['stock', 'Stock ledger'], ['dispatch', `To dispatch (${toDispatch.length})`], ['schedule', `Delivery schedule (${scheduled.length})`], ['transit', `In transit (${transit.length})`],
         ['incoming', `Incoming to warehouse (${incoming.length})`], ['moves', 'Movements'], ['partners', 'Delivery partners']] as [Tab, string][]).map(([k, l]) =>
         <button key={k} className={tab === k ? 'on' : ''} onClick={() => setTab(k)}>{l}</button>)}</div>
+      {tab === 'stock' && st.some((s) => s.short > 0) && <p className="note warn"><b>Properties have ordered more than the warehouse holds.</b> Short items are what is still to buy after stock and the warehouse's own open orders. {raises ? 'Tick them and raise a purchase for the shortfall; what is in stock can be sent now, the rest follows when it arrives.' : 'The Warehouse Manager or Warehouse Staff buy them.'}</p>}
+      {tab === 'stock' && raises && buy.size > 0 && <div className="tools"><span style={{ flex: 1 }} /><button className="btn" disabled={!whProp} onClick={() => raiseShort(st.filter((s) => buy.has(s.sku_id) && s.short > 0))}>Raise purchase for shortfall ({buy.size})</button></div>}
       {tab === 'stock' && <DataTable screen="wh-stock" rows={st} rowKey={(s) => s.sku_id} search={(s) => [s.sku_code, s.item, s.brand].join(' ')}
-        filters={[{ id: 'low', label: 'Level', options: [['', 'All items'], ['1', 'Below reorder level']], test: (s) => s.closing < s.min_level }]}
+        selectable={raises ? (s) => s.short > 0 : undefined} selected={buy} onSelect={setBuy}
+        filters={[{ id: 'low', label: 'Level', options: [['', 'All items'], ['1', 'Below reorder level'], ['short', 'Short for orders'], ['stocked', 'Stocked at warehouse']],
+          test: (s, v) => v === 'short' ? s.short > 0 : v === 'stocked' ? s.wh_stocked : s.closing < s.min_level }]}
         columns={[
           { key: 'sku', label: 'SKU', render: (s) => s.sku_code, csv: (s) => s.sku_code },
           { key: 'item', label: 'Item', render: (s) => <>{s.brand} {s.item} <span className="hint">{s.pack_size}</span></>, csv: (s) => s.item },
@@ -71,6 +85,9 @@ export function WarehousePage() {
           { key: 'pil', label: 'Pilferage', right: true, render: (s) => s.pilferage ? <Pill tone="bad">{qty(s.pilferage)}</Pill> : 0, sort: (s) => s.pilferage, csv: (s) => s.pilferage },
           { key: 'tr', label: 'In transit', right: true, render: (s) => qty(s.in_transit), sort: (s) => s.in_transit, csv: (s) => s.in_transit },
           { key: 'close', label: 'Closing', right: true, render: (s) => <b>{qty(s.closing)}</b>, sort: (s) => s.closing, csv: (s) => s.closing },
+          { key: 'due', label: 'Ordered by properties', right: true, render: (s) => s.due ? qty(s.due) : '—', sort: (s) => s.due, csv: (s) => s.due },
+          { key: 'ord', label: 'On order', right: true, render: (s) => s.on_order ? qty(s.on_order) : '—', sort: (s) => s.on_order, csv: (s) => s.on_order },
+          { key: 'short', label: 'Short', right: true, render: (s) => s.short > 0 ? <Pill tone="bad">{qty(s.short)}</Pill> : '—', sort: (s) => s.short, csv: (s) => s.short },
           { key: 'min', label: 'Reorder level', right: true, render: (s) => wh ? <MinLevel s={s} onDone={stock.reload} /> : qty(s.min_level), sort: (s) => s.min_level, csv: (s) => s.min_level },
           { key: 'val', label: 'Closing value', right: true, render: (s) => inr(s.value), sort: (s) => s.value, csv: (s) => s.value },
           { key: 'st', label: 'Status', render: (s) => <Pill tone={s.status === 'OK' ? 'ok' : s.status === 'Reorder' ? 'warn' : 'bad'}>{s.status}</Pill>, csv: (s) => s.status },

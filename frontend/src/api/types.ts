@@ -7,7 +7,7 @@ export interface Grant {
   screens: Record<string, number>
 }
 export interface Me {
-  id: number; name: string; email: string; mobile: string; department: string; roles: Grant[]; is_admin: boolean; phase: number
+  id: number; name: string; email: string; mobile: string; department: string; roles: Grant[]; is_admin: boolean
   /** Highest level on each screen across the user's roles; it decides the menu and which screens open. */
   screens: Record<string, Level>
   /** Reports the user's roles include; null means every report. */
@@ -42,6 +42,12 @@ export interface Doc {
   approved_at: string | null; po_number: string; po_date: string | null; deliver_by: string; payment_terms: string; po_closed_short: boolean
   /** Set while the PO waits for Finance to approve its advance: the number the PO will be raised under. */
   advance_hold_po: string
+  /** The Zoho Books purchase order kept in step with this PO; zoho_po_sync is what is still to send (create, update, cancel). */
+  zoho_po_id: string; zoho_po_sync: '' | 'create' | 'update' | 'cancel'; zoho_po_error: string
+  /** What the vendor did with the PO (vendor portal, or confirmed by Purchase): '', accepted or declined. */
+  vendor_status: '' | 'accepted' | 'declined'; vendor_acted_at: string | null; vendor_note: string; dispatch_date: string
+  /** When the PO reached the vendor (order sheet or PO email); null = "Push to vendor". */
+  sent_to_vendor_at: string | null
   is_transfer: boolean; dispatched_at: string | null; wait_until: string; wait_note: string
   bill_type_id: number | null; bill_type: string; bill_section: string; period_start: string; months: number; remark: string
   created_at: string; lines: Line[]; total: number
@@ -77,6 +83,8 @@ export interface Property {
   /** doc_code starts the property's document numbers (PR_HZ_0001); it is fixed once a number uses it (doc_code_used). */
   id: number; code: string; doc_code: string; doc_code_used: boolean; name: string; ezee_code: string; cluster_id: number; cluster: string; city_id: number; city: string; state_code: string
   l1_user_id: number | null; l1_name: string; l2_name: string; kind: string; plan_pct: number; ird_pct: number; banquet_pct: number; active: boolean; inactive_reason: string
+  /** pending until Finance approves a new property (no requests there until then). */
+  fin_status: 'pending' | 'approved' | 'rejected'
 }
 export interface Option { id: number; name: string }
 
@@ -93,6 +101,8 @@ export interface Advance {
   reason: string; note: string; proforma_file_id: number | null; status: 'PENDING' | 'APPROVED' | 'PAID' | 'REJECTED' | 'CANCELLED'
   requested_by: number; requester: string; requested_at: string; decided_by: string; decided_at: string | null; decision_note: string
   paid_on: string; payment_ref: string; carry_forward: boolean; adjusted: number; refunded: number; open: number; actions: string[]; uses?: AdvanceUse[]
+  /** The Zoho vendor payment a paid advance became, or why it has not gone yet. */
+  zoho_payment_id: string; zoho_error: string
 }
 export interface AdvanceUse {
   id: number; advance_id: number; advance_number: string; kind: 'invoice' | 'refund'; invoice_id: number | null; invoice_number: string; voucher_number: string

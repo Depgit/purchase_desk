@@ -1,8 +1,9 @@
-// Sign in with email or mobile, using a password or a one-time code.
+// Sign in with email, mobile or employee ID, using a password or a one-time code.
 import { useState } from 'react'
 import { ApiError, post } from '../api/client'
 import { useSession } from './session'
 import { Errors } from '../ui/Errors'
+import { SignInDoor } from './SignInDoor'
 
 export function LoginPage() {
   const { signIn, signInWithCode } = useSession()
@@ -31,12 +32,13 @@ export function LoginPage() {
         })
         else run(() => signInWithCode(login, code))
       }}>
-        <div><h1>Purchase Desk</h1><p className="sub">Saltstayz</p></div>
+        <SignInDoor on="staff" />
+        <div><h1>Purchase Desk</h1><p className="sub">Saltstayz staff sign-in</p></div>
         <div className="seg" role="group" aria-label="Sign-in method">
           <button type="button" className={mode === 'password' ? 'on' : ''} onClick={() => { setMode('password'); setErrors([]) }}>Password</button>
           <button type="button" className={mode === 'code' ? 'on' : ''} onClick={() => { setMode('code'); setErrors([]) }}>One-time code</button>
         </div>
-        <label className="field"><span>Email or mobile number</span>
+        <label className="field"><span>Email, mobile number or employee ID</span>
           <input value={login} onChange={(e) => setLogin(e.target.value)} autoComplete="username" required autoFocus /></label>
         {mode === 'password' ? (
           <label className="field"><span>Password</span>

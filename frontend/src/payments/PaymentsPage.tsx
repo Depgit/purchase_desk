@@ -9,12 +9,10 @@ import { useSession } from '../auth/session'
 import { day, inr } from '../format/format'
 import { DataTable } from '../ui/DataTable'
 import { Errors } from '../ui/Errors'
-import { Modal } from '../ui/Modal'
 import { Pill } from '../ui/Pill'
 import { useAction } from '../ui/useAction'
 import { ZohoPreview } from './ZohoPreview'
 import { BulkResults, type BulkResult } from '../ui/BulkResults'
-import { PHASE, usePhase } from '../releasephase/phase'
 import { Tabs } from '../ui/Tabs'
 import { AdvancesList } from '../advances/AdvancesList'
 import { useScreen } from '../screenaccess/screen'
@@ -25,14 +23,12 @@ const LABEL: Record<string, [string, '' | 'ok' | 'warn' | 'bad']> = {
 
 export function PaymentsPage() {
   const nav = useNavigate()
-  const { hasStep, me } = useSession()
+  const { hasStep } = useSession()
   const sc = useScreen('payments')
   const fin = sc.edit && hasStep('finance')
-  const zoho = usePhase().on(PHASE.zoho) // before Zoho opens, payment ends at "payment approved" and is marked paid by hand
   const { data, reload } = useApi<Invoice[]>('/invoices?status=MATCHED,PAY_APPROVED,PUSHED,PAID')
   const [sel, setSel] = useState<Set<string | number>>(new Set())
   const [preview, setPreview] = useState<number | null>(null)
-  const [paid, setPaid] = useState<Invoice | null>(null)
   const [results, setResults] = useState<{ invoice_id: number; ok: boolean; message: string }[] | null>(null)
   const [approved, setApproved] = useState<BulkResult[] | null>(null)
   const [sp] = useSearchParams()
@@ -45,11 +41,11 @@ export function PaymentsPage() {
   const overdue = (r: Invoice) => r.status !== 'PAID' && r.pay_by && r.pay_by < new Date().toISOString().slice(0, 10)
   return (
     <>
-      <div className="head"><div><h1>Payments</h1><p className="sub">{zoho ? 'Approve matched invoices and approved bills, push them to Zoho, and follow payment. Payment status is read back from Zoho.' : 'Approve matched invoices for payment. Once the bank transfer is done, the System Admin marks the invoice paid.'}</p></div>
+      <div className="head"><div><h1>Payments</h1><p className="sub">Approve matched invoices and approved bills, push them to Zoho, and follow payment. Paid status and payment reference come from Zoho by themselves, every 15 minutes.</p></div>
         <div className="acts">{fin && <button className="btn" disabled={!toApprove.length || a.busy} onClick={() => a.run(() => post<{ done: number; failed: number; results: BulkResult[] }>('/invoices/bulk', { action: 'approve-payment', ids: toApprove }), (r) => {
             setApproved(r.results); setSel(new Set()); reload(); return `${r.done} approved for payment${r.failed ? `, ${r.failed} not approved` : ''}`
           })}>Approve payment for selected ({toApprove.length})</button>}
-          {fin && zoho && <>
+          {fin && <>
           <button className="btn ghost" disabled={a.busy} onClick={() => a.run(() => post('/zoho/read-payments'), (r: any) => { reload(); return r.message })}>Read payment status from Zoho</button>
           <button className="btn" disabled={!toPush.length || a.busy} onClick={() => a.run(() => post<{ pushed: number; failed: number; results: any[] }>('/zoho/push', { invoice_ids: toPush }), (r) => {
             setResults(r.results); setSel(new Set()); reload(); return `${r.pushed} pushed to Zoho${r.failed ? `, ${r.failed} not pushed` : ''}`
@@ -60,9 +56,9 @@ export function PaymentsPage() {
       {approved && <BulkResults title="Last bulk payment approval" results={approved} label={(id) => rows.find((x) => x.id === id)?.invoice_number || String(id)} onClose={() => setApproved(null)} />}
       {results && <section className="card"><h2>Last push</h2>{results.map((r) => <p key={r.invoice_id}><Pill tone={r.ok ? 'ok' : 'bad'}>{r.ok ? 'Pushed' : 'Not pushed'}</Pill> {rows.find((x) => x.id === r.invoice_id)?.invoice_number}: {r.message}</p>)}</section>}
       <DataTable screen="payments" rows={rows} rowKey={(r) => r.id} date={{ label: 'Invoice date', value: (r) => r.invoice_date }} onOpen={(r) => nav('/invoices/' + r.id)}
-        selectable={fin ? (r) => (r.status === 'MATCHED' && !r.advance_wait.length) || (zoho && r.status === 'PAY_APPROVED' && !r.held.length) : undefined} selected={sel} onSelect={setSel}
+        selectable={fin ? (r) => (r.status === 'MATCHED' && !r.advance_wait.length) || (r.status === 'PAY_APPROVED' && !r.held.length) : undefined} selected={sel} onSelect={setSel}
         search={(r) => [r.invoice_number, r.voucher_number, r.vendor, r.property, r.po_number, r.document_number, r.zoho_bill_id].join(' ')}
-        filters={[{ id: 'st', label: 'Status', options: [['', 'All'], ['MATCHED', 'Payment approval'], ['PAY_APPROVED', zoho ? 'Ready for Zoho' : 'Payment approved'], ...(zoho ? [['HELD', 'Held from Zoho'], ['PUSHED', 'In Zoho, to be paid']] as [string, string][] : []), ['PAID', 'Paid'], ['MSME', 'MSME vendors'], ['LATE', 'Overdue']],
+        filters={[{ id: 'st', label: 'Status', options: [['', 'All'], ['MATCHED', 'Payment approval'], ['PAY_APPROVED', 'Ready for Zoho'], ['HELD', 'Held from Zoho'], ['PUSHED', 'In Zoho, to be paid'], ['PAID', 'Paid'], ['MSME', 'MSME vendors'], ['LATE', 'Overdue']],
           test: (r, v) => v === 'HELD' ? r.held.length > 0 : v === 'MSME' ? r.vendor_msme : v === 'LATE' ? !!overdue(r) : r.status === v }]}
         columns={[
           { key: 'pv', label: 'Voucher', render: (r) => r.voucher_number, sort: (r) => r.id, csv: (r) => r.voucher_number },
@@ -75,30 +71,14 @@ export function PaymentsPage() {
           { key: 'adv', label: 'Advance', right: true, render: (r) => r.advance_adjusted ? <span title={(r.advance_uses || []).map((u) => u.advance_number).join(', ')}>− {inr(r.advance_adjusted - r.advance_tds)}</span> : '—', sort: (r) => r.advance_adjusted, csv: (r) => r.advance_adjusted - r.advance_tds },
           { key: 'net', label: 'Net payable', right: true, render: (r) => inr(r.net_payable), sort: (r) => r.net_payable, csv: (r) => r.net_payable },
           { key: 'payby', label: 'Pay by', render: (r) => overdue(r) ? <Pill tone="bad">Overdue {day(r.pay_by)}</Pill> : day(r.pay_by), sort: (r) => r.pay_by, csv: (r) => r.pay_by },
-          ...(zoho ? [{ key: 'zoho', label: 'Zoho bill', render: (r: Invoice) => r.zoho_bill_id || (r.held.length ? <Pill tone="bad">Held: {r.held[0]}{r.held.length > 1 ? ` +${r.held.length - 1}` : ''}</Pill> : '—'), csv: (r: Invoice) => r.zoho_bill_id }] : []),
-          { key: 'status', label: 'Status', render: (r) => <><Pill tone={LABEL[r.status]?.[1] || ''}>{!zoho && r.status === 'PAY_APPROVED' ? 'Payment approved' : LABEL[r.status]?.[0] || r.status}</Pill>
+          { key: 'zoho', label: 'Zoho bill', render: (r: Invoice) => r.zoho_bill_id || (r.held.length ? <Pill tone="bad">Held: {r.held[0]}{r.held.length > 1 ? ` +${r.held.length - 1}` : ''}</Pill> : '—'), csv: (r: Invoice) => r.zoho_bill_id },
+          { key: 'status', label: 'Status', render: (r) => <><Pill tone={LABEL[r.status]?.[1] || ''}>{LABEL[r.status]?.[0] || r.status}</Pill>
             {r.advance_wait.length > 0 && <><br /><span title={r.advance_wait.join('; ')}><Pill tone="warn">Waiting for advance</Pill></span></>}</>, csv: (r) => r.advance_wait.length ? 'Waiting for advance' : r.status },
           { key: 'act', label: '', render: (r) => <span className="tools" style={{ flexWrap: 'nowrap' }}>
             {fin && r.status === 'MATCHED' && !r.advance_wait.length && <button className="btn ghost small" onClick={() => a.run(() => post(`/invoices/${r.id}/approve-payment`), (x: any) => { reload(); return x.message })}>Approve payment</button>}
-            {zoho && r.status === 'PAY_APPROVED' && <button className="link" onClick={() => setPreview(r.id)}>Preview</button>}
-            {me?.is_admin && (r.status === 'PUSHED' || (!zoho && r.status === 'PAY_APPROVED')) && <button className="link" onClick={() => setPaid(r)}>Mark paid</button>}</span> },
+            {r.status === 'PAY_APPROVED' && <button className="link" onClick={() => setPreview(r.id)}>Preview</button>}</span> },
         ]} csvName="payments" /></>}
       {preview != null && <ZohoPreview invoiceId={preview} onClose={() => setPreview(null)} />}
-      {paid && <MarkPaid inv={paid} onClose={() => setPaid(null)} onDone={() => { setPaid(null); reload() }} />}
     </>
-  )
-}
-
-function MarkPaid({ inv, onClose, onDone }: { inv: Invoice; onClose: () => void; onDone: () => void }) {
-  const [ref, setRef] = useState('')
-  const a = useAction()
-  return (
-    <Modal title={`Mark ${inv.invoice_number} as paid`} onClose={onClose}>
-      <p className="note warn">Use this only as a fallback, for example while Zoho is disconnected. Normally payment is read back from Zoho.</p>
-      <label className="field"><span>Payment reference (UTR or cheque number)</span><input value={ref} onChange={(e) => setRef(e.target.value)} /></label>
-      <Errors list={a.errors} />
-      <div className="btns"><button className="btn ghost" onClick={onClose}>Cancel</button>
-        <button className="btn" disabled={a.busy} onClick={() => a.run(() => post(`/invoices/${inv.id}/mark-paid`, { reference: ref }), (r: any) => { onDone(); return r.message })}>Mark as paid</button></div>
-    </Modal>
   )
 }

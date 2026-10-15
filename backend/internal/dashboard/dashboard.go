@@ -207,6 +207,12 @@ func (s *Service) get(w http.ResponseWriter, r *http.Request) error {
 		}
 		right := map[string]string{documents.Pending: access.Approve, documents.Approved: access.IssuePO, documents.POIssued: access.Receive, documents.WHSent: access.Receive}[d.Status]
 		act := owner != "" && documents.CanAct(u, d, owner, right) != nil
+		if d.Status == documents.POIssued && !d.IsTransfer {
+			act = documents.Receiver(u, d) != nil
+		}
+		if d.Status == documents.WHSent {
+			act = documents.TransferReceiver(u, d) != nil
+		}
 		if d.Status == documents.Approved && d.IsBill() {
 			act = false
 		}

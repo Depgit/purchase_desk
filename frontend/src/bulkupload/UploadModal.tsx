@@ -10,7 +10,7 @@ import { Pill } from '../ui/Pill'
 import { useAction } from '../ui/useAction'
 
 // Uploads that can be downloaded with their current data, edited and uploaded back.
-const EDITABLE = new Set(['items', 'properties', 'vendors', 'users', 'mappings', 'rates', 'budgets', 'property_pct', 'zoho_tags', 'clusters', 'sub_categories', 'pack_sizes'])
+const EDITABLE = new Set(['items', 'properties', 'vendors', 'users', 'mappings', 'rates', 'budgets', 'property_pct', 'zoho_tags', 'clusters', 'sub_categories', 'pack_sizes', 'corp_departments'])
 
 // How rows tie to records, for lists that are not matched by a code column of their own.
 const MATCH: Record<string, string> = {

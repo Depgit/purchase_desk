@@ -20,6 +20,7 @@ import (
 	"purchasedesk/internal/httpjson"
 	"purchasedesk/internal/indiantax"
 	"purchasedesk/internal/textclean"
+	"purchasedesk/internal/zohowake"
 )
 
 type Service struct{ DB *pgxpool.Pool }
@@ -44,24 +45,25 @@ func (s *Service) Routes(r chi.Router) {
 }
 
 type Category struct {
-	ID       int64  `json:"id"`
-	Name     string `json:"name"`
-	IsFB     bool   `json:"is_fb"`
-	SubCount int    `json:"sub_categories"`
-	SKUCount int    `json:"skus"`
+	ID        int64  `json:"id"`
+	Name      string `json:"name"`
+	IsFB      bool   `json:"is_fb"`
+	SubCount  int    `json:"sub_categories"`
+	SKUCount  int    `json:"skus"`
+	FinStatus string `json:"fin_status"` // pending until Finance approves a new one
 }
 
 func (s *Service) listCategories(w http.ResponseWriter, r *http.Request) error {
 	rows, err := s.DB.Query(r.Context(), `SELECT c.id, c.name, c.is_fb,
 		(SELECT count(*) FROM sub_category sc WHERE sc.category_id=c.id),
-		(SELECT count(*) FROM sku JOIN sub_category sc ON sc.id=sku.sub_category_id WHERE sc.category_id=c.id)
+		(SELECT count(*) FROM sku JOIN sub_category sc ON sc.id=sku.sub_category_id WHERE sc.category_id=c.id), c.fin_status
 		FROM category c ORDER BY c.name`)
 	if err != nil {
 		return err
 	}
 	out, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (Category, error) {
 		var c Category
-		return c, row.Scan(&c.ID, &c.Name, &c.IsFB, &c.SubCount, &c.SKUCount)
+		return c, row.Scan(&c.ID, &c.Name, &c.IsFB, &c.SubCount, &c.SKUCount, &c.FinStatus)
 	})
 	if err != nil {
 		return err
@@ -146,18 +148,20 @@ type SubCategory struct {
 	Active     bool   `json:"active"`
 	SKUCount   int    `json:"skus"`
 	Vendors    int    `json:"vendors"`
+	AutoPO     bool   `json:"auto_po"`    // a request of only such items gets its PO at the final approval
+	FinStatus  string `json:"fin_status"` // pending until Finance approves a new one
 }
 
 func (s *Service) listSubCategories(w http.ResponseWriter, r *http.Request) error {
 	rows, err := s.DB.Query(r.Context(), `SELECT sc.id, sc.name, sc.code, sc.category_id, c.name, c.is_fb, sc.active,
-		(SELECT count(*) FROM sku WHERE sku.sub_category_id=sc.id), (SELECT count(*) FROM vendor_sub_category v WHERE v.sub_category_id=sc.id)
+		(SELECT count(*) FROM sku WHERE sku.sub_category_id=sc.id), (SELECT count(*) FROM vendor_sub_category v WHERE v.sub_category_id=sc.id), sc.auto_po, sc.fin_status
 		FROM sub_category sc JOIN category c ON c.id=sc.category_id ORDER BY c.name, sc.name`)
 	if err != nil {
 		return err
 	}
 	out, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (SubCategory, error) {
 		var x SubCategory
-		return x, row.Scan(&x.ID, &x.Name, &x.Code, &x.CategoryID, &x.Category, &x.IsFB, &x.Active, &x.SKUCount, &x.Vendors)
+		return x, row.Scan(&x.ID, &x.Name, &x.Code, &x.CategoryID, &x.Category, &x.IsFB, &x.Active, &x.SKUCount, &x.Vendors, &x.AutoPO, &x.FinStatus)
 	})
 	if err != nil {
 		return err
@@ -173,6 +177,7 @@ type SubCategoryInput struct {
 	Name       string `json:"name"`
 	CategoryID int64  `json:"category_id"`
 	Code       string `json:"code"`
+	AutoPO     *bool  `json:"auto_po"` // nil keeps what is on file
 }
 
 // ValidateSubCategory tidies a sub-category and lists what is wrong with it; id is the one being changed (0 for new).
@@ -216,26 +221,40 @@ func ValidateSubCategory(ctx context.Context, q database.Q, in *SubCategoryInput
 // SaveSubCategory adds a checked sub-category (id 0) or changes its name and category, and logs it.
 func SaveSubCategory(ctx context.Context, q database.Q, u *access.User, id int64, in SubCategoryInput) (int64, error) {
 	if id == 0 {
-		if err := q.QueryRow(ctx, `INSERT INTO sub_category(name,category_id,code,created_by) VALUES ($1,$2,$3,$4) RETURNING id`, in.Name, in.CategoryID, in.Code, u.ID).Scan(&id); err != nil {
+		auto := in.AutoPO != nil && *in.AutoPO
+		if err := q.QueryRow(ctx, `INSERT INTO sub_category(name,category_id,code,auto_po,created_by) VALUES ($1,$2,$3,$4,$5) RETURNING id`, in.Name, in.CategoryID, in.Code, auto, u.ID).Scan(&id); err != nil {
 			return 0, err
 		}
-		return id, auditlog.Write(ctx, q, u, "Items", "Sub-category added", in.Name, "code "+in.Code)
+		note := "code " + in.Code
+		if auto {
+			note += ", POs issued automatically on approval"
+		}
+		return id, auditlog.Write(ctx, q, u, "Items", "Sub-category added", in.Name, note)
 	}
 	// The 2-letter code is fixed once SKUs carry it; the name and the category can change.
 	var old, oldCat string
 	var catID int64
-	if err := q.QueryRow(ctx, `SELECT s.name, s.category_id, c.name FROM sub_category s JOIN category c ON c.id=s.category_id WHERE s.id=$1`, id).Scan(&old, &catID, &oldCat); err != nil {
+	var wasAuto bool
+	if err := q.QueryRow(ctx, `SELECT s.name, s.category_id, c.name, s.auto_po FROM sub_category s JOIN category c ON c.id=s.category_id WHERE s.id=$1`, id).Scan(&old, &catID, &oldCat, &wasAuto); err != nil {
 		return 0, httpjson.NotFound("Sub-category")
 	}
 	if in.CategoryID != 0 {
 		catID = in.CategoryID
 	}
-	if _, err := q.Exec(ctx, `UPDATE sub_category SET name=$2, category_id=$3 WHERE id=$1`, id, in.Name, catID); err != nil {
+	auto := wasAuto
+	if in.AutoPO != nil {
+		auto = *in.AutoPO
+	}
+	if _, err := q.Exec(ctx, `UPDATE sub_category SET name=$2, category_id=$3, auto_po=$4 WHERE id=$1`, id, in.Name, catID, auto); err != nil {
 		return 0, err
 	}
 	var newCat string
 	_ = q.QueryRow(ctx, `SELECT name FROM category WHERE id=$1`, catID).Scan(&newCat)
-	return id, auditlog.Write(ctx, q, u, "Items", "Sub-category edited", in.Name, old+" ("+oldCat+") → "+in.Name+" ("+newCat+")")
+	note := old + " (" + oldCat + ") → " + in.Name + " (" + newCat + ")"
+	if auto != wasAuto {
+		note += map[bool]string{true: "; POs now issued automatically on approval", false: "; POs no longer issued automatically"}[auto]
+	}
+	return id, auditlog.Write(ctx, q, u, "Items", "Sub-category edited", in.Name, note)
 }
 
 func (s *Service) saveSubCategory(w http.ResponseWriter, r *http.Request) error {
@@ -415,13 +434,16 @@ type SKU struct {
 	BrandKind     string  `json:"brand_kind"`
 	TDSSection    string  `json:"tds_section"`
 	TDSPct        float64 `json:"tds_pct"`
+	DailyUse      bool    `json:"daily_use"`  // false: several vendors may supply it at a property, the requester picks
+	FinStatus     string  `json:"fin_status"` // pending until Finance approves a new one
+	WHStocked     bool    `json:"wh_stocked"` // stocked at the Central Warehouse: properties' requests for it go there
 }
 
 func (s *Service) listSKUs(w http.ResponseWriter, r *http.Request) error {
 	rows, err := s.DB.Query(r.Context(), `SELECT k.id, k.code, k.sub_category_id, sc.name, c.id, c.name, coalesce(k.brand_id,0), coalesce(b.name,''), k.item_name, k.pack_size_id, ps.name,
 		k.gst_pct, k.hsn, k.scope, k.cluster_ids, k.property_ids, k.active,
 		(SELECT count(DISTINCT rc.vendor_id) FROM rate_card rc WHERE rc.sku_id=k.id AND NOT rc.superseded AND current_date BETWEEN rc.valid_from AND rc.valid_to),
-		coalesce(b.kind,'brand'), k.tds_section, k.tds_pct
+		coalesce(b.kind,'brand'), k.tds_section, k.tds_pct, k.daily_use, k.fin_status, k.wh_stocked
 		FROM sku k JOIN sub_category sc ON sc.id=k.sub_category_id JOIN category c ON c.id=sc.category_id
 		LEFT JOIN brand b ON b.id=k.brand_id JOIN pack_size ps ON ps.id=k.pack_size_id ORDER BY k.code`)
 	if err != nil {
@@ -430,7 +452,7 @@ func (s *Service) listSKUs(w http.ResponseWriter, r *http.Request) error {
 	out, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (SKU, error) {
 		var x SKU
 		return x, row.Scan(&x.ID, &x.Code, &x.SubCategoryID, &x.SubCategory, &x.CategoryID, &x.Category, &x.BrandID, &x.Brand, &x.ItemName,
-			&x.PackSizeID, &x.PackSize, &x.GST, &x.HSN, &x.Scope, &x.ClusterIDs, &x.PropertyIDs, &x.Active, &x.RatedVendors, &x.BrandKind, &x.TDSSection, &x.TDSPct)
+			&x.PackSizeID, &x.PackSize, &x.GST, &x.HSN, &x.Scope, &x.ClusterIDs, &x.PropertyIDs, &x.Active, &x.RatedVendors, &x.BrandKind, &x.TDSSection, &x.TDSPct, &x.DailyUse, &x.FinStatus, &x.WHStocked)
 	})
 	if err != nil {
 		return err
@@ -450,6 +472,8 @@ type SKUInput struct {
 	ClusterIDs    []int64 `json:"cluster_ids"`
 	PropertyIDs   []int64 `json:"property_ids"`
 	TDSSection    string  `json:"tds_section"` // service items only, a code from indiantax.TDSSections
+	DailyUse      *bool   `json:"daily_use"`   // nil: yes for a new SKU, unchanged on an edit
+	WHStocked     *bool   `json:"wh_stocked"`  // nil: no for a new SKU, unchanged on an edit
 
 	brandID int64   // filled by Validate when the brand already exists
 	tdsPct  float64 // the section's rate, set by Validate
@@ -529,6 +553,14 @@ func Validate(ctx context.Context, q database.Q, in *SKUInput, selfID int64) []s
 	if in.Scope != "all" && in.Scope != "selected" {
 		errs = append(errs, "Availability must be all properties or selected properties.")
 	}
+	// Back to daily consumption only once a single vendor holds it by SKU.
+	if in.DailyUse != nil && *in.DailyUse && selfID != 0 {
+		var vendors int
+		_ = q.QueryRow(ctx, `SELECT count(DISTINCT vendor_id) FROM vendor_mapping WHERE active AND level='sku' AND sku_id=$1`, selfID).Scan(&vendors)
+		if vendors > 1 {
+			errs = append(errs, fmt.Sprintf("This item is mapped to %d vendors. A daily consumption item has one vendor at a property: make the other mappings inactive under Vendor Mapping first.", vendors))
+		}
+	}
 	if in.Scope == "selected" && len(in.ClusterIDs) == 0 && len(in.PropertyIDs) == 0 {
 		errs = append(errs, "Tick at least one cluster or property.")
 	}
@@ -565,6 +597,7 @@ func ensureBrand(ctx context.Context, tx pgx.Tx, u *access.User, in *SKUInput) e
 
 // Create saves a validated SKU with the next code for its sub-category, for example GA-0001.
 func Create(ctx context.Context, tx pgx.Tx, u *access.User, in *SKUInput) (string, error) {
+	zohowake.Now() // something may now go to Zoho
 	if err := ensureBrand(ctx, tx, u, in); err != nil {
 		return "", err
 	}
@@ -577,8 +610,10 @@ func Create(ctx context.Context, tx pgx.Tx, u *access.User, in *SKUInput) (strin
 		return "", err
 	}
 	code := fmt.Sprintf("%s-%04d", prefix, n)
-	_, err := tx.Exec(ctx, `INSERT INTO sku(code,sub_category_id,brand_id,item_name,pack_size_id,gst_pct,hsn,scope,cluster_ids,property_ids,created_by,tds_section,tds_pct)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`, code, in.SubCategoryID, in.brandRef(), in.ItemName, in.PackSizeID, in.GST, in.HSN, in.Scope, in.ClusterIDs, in.PropertyIDs, u.ID, in.TDSSection, in.tdsPct)
+	daily := in.DailyUse == nil || *in.DailyUse
+	stocked := in.WHStocked != nil && *in.WHStocked
+	_, err := tx.Exec(ctx, `INSERT INTO sku(code,sub_category_id,brand_id,item_name,pack_size_id,gst_pct,hsn,scope,cluster_ids,property_ids,created_by,tds_section,tds_pct,daily_use,wh_stocked)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`, code, in.SubCategoryID, in.brandRef(), in.ItemName, in.PackSizeID, in.GST, in.HSN, in.Scope, in.ClusterIDs, in.PropertyIDs, u.ID, in.TDSSection, in.tdsPct, daily, stocked)
 	if err != nil {
 		return "", err
 	}
@@ -594,8 +629,9 @@ func Update(ctx context.Context, tx pgx.Tx, u *access.User, id int64, in *SKUInp
 	if err := tx.QueryRow(ctx, `SELECT k.code||' · '||concat_ws(' ', b.name, k.item_name)||' · '||k.gst_pct||'%' FROM sku k LEFT JOIN brand b ON b.id=k.brand_id WHERE k.id=$1`, id).Scan(&old); err != nil {
 		return "", err
 	}
-	if err := tx.QueryRow(ctx, `UPDATE sku SET brand_id=$2, item_name=$3, pack_size_id=$4, gst_pct=$5, hsn=$6, scope=$7, cluster_ids=$8, property_ids=$9, tds_section=$10, tds_pct=$11 WHERE id=$1 RETURNING code`,
-		id, in.brandRef(), in.ItemName, in.PackSizeID, in.GST, in.HSN, in.Scope, in.ClusterIDs, in.PropertyIDs, in.TDSSection, in.tdsPct).Scan(&code); err != nil {
+	if err := tx.QueryRow(ctx, `UPDATE sku SET brand_id=$2, item_name=$3, pack_size_id=$4, gst_pct=$5, hsn=$6, scope=$7, cluster_ids=$8, property_ids=$9, tds_section=$10, tds_pct=$11,
+		daily_use=coalesce($12, daily_use), wh_stocked=coalesce($13, wh_stocked) WHERE id=$1 RETURNING code`,
+		id, in.brandRef(), in.ItemName, in.PackSizeID, in.GST, in.HSN, in.Scope, in.ClusterIDs, in.PropertyIDs, in.TDSSection, in.tdsPct, in.DailyUse, in.WHStocked).Scan(&code); err != nil {
 		return "", err
 	}
 	return code, auditlog.Write(ctx, tx, u, "Items", "SKU edited", code, fmt.Sprintf("%s → %s · %v%%", old, strings.TrimSpace(in.BrandName+" "+in.ItemName), in.GST))

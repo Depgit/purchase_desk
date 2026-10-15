@@ -19,7 +19,6 @@ import (
 	"purchasedesk/internal/auditlog"
 	"purchasedesk/internal/database"
 	"purchasedesk/internal/httpjson"
-	"purchasedesk/internal/releasephase"
 	"purchasedesk/internal/reports"
 	"purchasedesk/internal/screens"
 	"purchasedesk/internal/textclean"
@@ -87,29 +86,13 @@ func (s *Service) listRoles(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
-	shown := []Role{}
-	for _, x := range out {
-		if releasephase.RoleOn(x.Step) { // roles of later phases stay hidden until RELEASE_PHASE reaches them
-			shown = append(shown, x)
-		}
-	}
-	return httpjson.OK(w, shown)
+	return httpjson.OK(w, out)
 }
 
-// roleCatalogue gives the role editor its lists: screens open in this phase, every report, the action rights and
-// the flow steps a custom role may sit at.
+// roleCatalogue gives the role editor its lists: every screen, every report, the action rights and the flow steps a
+// custom role may sit at.
 func (s *Service) roleCatalogue(w http.ResponseWriter, r *http.Request) error {
-	sc := []screens.Screen{}
-	for _, x := range screens.All {
-		if releasephase.On(x.Phase) {
-			sc = append(sc, x)
-		}
-	}
-	rp := []reports.Item{}
-	if releasephase.On(releasephase.Reports) {
-		rp = reports.List()
-	}
-	return httpjson.OK(w, map[string]any{"screens": sc, "reports": rp, "rights": access.AllRights})
+	return httpjson.OK(w, map[string]any{"screens": screens.All, "reports": reports.List(), "rights": access.AllRights})
 }
 
 // group helpers
@@ -218,9 +201,6 @@ func (s *Service) apply(ctx context.Context, q database.Q, x Role, in roleIn) (R
 	if in.Step != nil && x.IsCustom {
 		if !textclean.Contains(access.Steps, *in.Step) || *in.Step == "admin" {
 			return x, nil, httpjson.Bad("Choose where the role works in the flow.")
-		}
-		if !releasephase.RoleOn(*in.Step) {
-			return x, nil, httpjson.Bad("That step opens in a later phase of the rollout.")
 		}
 		if *in.Step != x.Step {
 			changed = append(changed, "step")

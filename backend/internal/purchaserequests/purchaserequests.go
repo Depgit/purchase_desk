@@ -27,10 +27,11 @@ import (
 	"purchasedesk/internal/httpjson"
 	"purchasedesk/internal/messaging"
 	"purchasedesk/internal/money"
-	"purchasedesk/internal/releasephase"
+	"purchasedesk/internal/purchaseorders"
 	"purchasedesk/internal/screens"
 	"purchasedesk/internal/textclean"
 	"purchasedesk/internal/vendormapping"
+	"purchasedesk/internal/vendorportal"
 )
 
 type Service struct {
@@ -56,21 +57,26 @@ func raiseGrant(u *access.User, propKind string, propID, clusterID int64, cats [
 	if u.IsAdmin {
 		return &access.Grant{Name: "System Admin", Step: "admin"}
 	}
-	for _, step := range []string{"wh", "staff", "l1", "purchase", "creq", "dh"} {
+	for _, step := range []string{"whs", "wh", "staff", "l1", "chef", "purchase", "creq", "dh"} {
 		g := u.Can(step, access.Raise, propID, clusterID, cats)
 		if g == nil {
 			continue
 		}
-		// The warehouse is the Warehouse Manager's alone. A pre-opening property is open to the Warehouse Manager and to
-		// anyone whose role is assigned to it. Live properties are raised for by property staff, managers and Purchase.
+		// The warehouse raises through its Warehouse Staff (the Warehouse Manager approves) and the Warehouse Manager, who
+		// buys what the warehouse is short of (his own goes to the Cost Controller). A pre-opening property is open to the
+		// Warehouse Manager and to anyone whose role is assigned to it. Live properties are raised for by property staff,
+		// managers, property chefs and Purchase.
 		switch propKind {
 		case "warehouse":
-			if step != "wh" {
+			if step != "whs" && step != "wh" {
 				continue
 			}
 		case "preopening":
+			if step == "whs" {
+				continue
+			}
 		default:
-			if step == "wh" {
+			if step == "wh" || step == "whs" {
 				continue
 			}
 		}
@@ -83,11 +89,15 @@ type propInfo struct {
 	ID, ClusterID int64
 	Name, Kind    string
 	Active        bool
+	Approved      bool // by Finance (a new property)
 }
 
 func (s *Service) property(ctx context.Context, id int64) (propInfo, error) {
 	var p propInfo
-	err := s.DB.QueryRow(ctx, `SELECT id, cluster_id, name, kind, active FROM property WHERE id=$1`, id).Scan(&p.ID, &p.ClusterID, &p.Name, &p.Kind, &p.Active)
+	err := s.DB.QueryRow(ctx, `SELECT id, cluster_id, name, kind, active, fin_status='approved' FROM property WHERE id=$1`, id).Scan(&p.ID, &p.ClusterID, &p.Name, &p.Kind, &p.Active, &p.Approved)
+	if err == nil && !p.Approved {
+		return p, httpjson.Bad("%s waits for Finance to approve it. Requests can be raised there once it is approved.", p.Name)
+	}
 	if err != nil {
 		return p, httpjson.Bad("Choose a property.")
 	}
@@ -143,7 +153,7 @@ func (s *Service) form(w http.ResponseWriter, r *http.Request) error {
 		WeekSpent     float64 `json:"week_spent"`
 	}
 	bud := []budgetLine{}
-	if p.Kind == "live" && releasephase.On(releasephase.Budgets) {
+	if p.Kind == "live" {
 		m, err := budgets.LoadMonth(r.Context(), s.DB, p.ID, clock.Today())
 		if err != nil {
 			return err
@@ -228,9 +238,10 @@ func (s *Service) history(ctx context.Context, propertyID int64) ([]int64, *last
 }
 
 type lineIn struct {
-	SKUID   int64   `json:"sku_id"`
-	Qty     float64 `json:"qty"`
-	EstRate float64 `json:"est_rate"`
+	SKUID    int64   `json:"sku_id"`
+	Qty      float64 `json:"qty"`
+	EstRate  float64 `json:"est_rate"`
+	VendorID int64   `json:"vendor_id"` // the vendor picked for an item not for daily consumption; 0 = its default
 }
 
 type createIn struct {
@@ -277,28 +288,39 @@ func (s *Service) prepare(ctx context.Context, u *access.User, in createIn) (*pr
 	if len(in.Lines) == 0 {
 		return nil, httpjson.Bad("Add at least one item.")
 	}
-	merged := map[int64]*lineIn{}
-	order := []int64{}
+	// The same item twice from the same vendor is one line; from two vendors (an item not for daily consumption) two.
+	type lineKey struct{ sku, vendor int64 }
+	merged := map[lineKey]*lineIn{}
+	order := []lineKey{}
 	for i := range in.Lines {
 		l := in.Lines[i]
-		if x, ok := merged[l.SKUID]; ok {
+		k := lineKey{l.SKUID, l.VendorID}
+		if x, ok := merged[k]; ok {
 			x.Qty += l.Qty
 			continue
 		}
-		merged[l.SKUID] = &l
-		order = append(order, l.SKUID)
+		merged[k] = &l
+		order = append(order, k)
 	}
 	errs := []string{}
 	lines := []newLine{}
 	cats := []int64{}
-	for _, id := range order {
-		l := merged[id]
-		src, ok, err := vendormapping.One(ctx, s.DB, l.SKUID, p.ID)
+	for _, k := range order {
+		l := merged[k]
+		src, ok, err := vendormapping.One(ctx, s.DB, l.SKUID, p.ID, l.VendorID)
 		if err != nil {
 			return nil, err
 		}
 		if !ok {
 			errs = append(errs, fmt.Sprintf("Item %d is not available at %s.", l.SKUID, p.Name))
+			continue
+		}
+		if l.VendorID != 0 && (src.VendorID == nil || *src.VendorID != l.VendorID) {
+			if src.DailyUse {
+				errs = append(errs, fmt.Sprintf("%s is a daily consumption item: it comes only from %s at %s.", src.ItemName, src.VendorName, p.Name))
+			} else {
+				errs = append(errs, fmt.Sprintf("The vendor picked for %s does not supply it at %s. Pick one from the list.", src.ItemName, p.Name))
+			}
 			continue
 		}
 		if !src.Orderable {
@@ -342,7 +364,7 @@ func (s *Service) prepare(ctx context.Context, u *access.User, in createIn) (*pr
 		}
 	}
 	var preop any
-	if p.Kind == "warehouse" || p.Kind == "preopening" {
+	if p.Kind == "preopening" { // a warehouse request goes to the Warehouse Manager instead
 		members, err := s.preopMembers(ctx)
 		if err != nil {
 			return nil, err
@@ -372,7 +394,7 @@ func (pr *prepared) steps(st flowsettings.Settings, ls []newLine) []string {
 	for _, l := range ls {
 		amount += money.LineValue(l.qty, l.rate, l.gst)
 	}
-	return approvals.Chain(st, pr.p.Kind, ls[0].vendorIsWarehouse, pr.event, amount)
+	return approvals.Chain(st, pr.p.Kind, ls[0].vendorIsWarehouse, pr.event, amount, pr.g.Step)
 }
 
 func insertLines(ctx context.Context, tx pgx.Tx, docID int64, ls []newLine) error {
@@ -414,7 +436,8 @@ func finalizeIfNoSteps(ctx context.Context, tx pgx.Tx, u *access.User, id int64,
 	if err := auditlog.Doc(ctx, tx, u, "System", id, num, "Purchases", "Approved", "No approval needed under the current flow settings"); err != nil {
 		return err
 	}
-	return approvals.Finalize(ctx, tx, u, d)
+	_, err = approvals.Finalize(ctx, tx, u, "System", d, purchaseorders.AtApproval{})
+	return err
 }
 
 func (s *Service) create(w http.ResponseWriter, r *http.Request) error {
@@ -485,7 +508,7 @@ func onScreens(u *access.User, d *documents.Doc, actions []string) []string {
 		"approve": pick("approvals", "corporate", "approvals"), "return": pick("approvals", "corporate", "approvals"),
 		"reject": pick("approvals", "corporate", "approvals"), "route": {"approvals"}, "preop_approver": {"requests"},
 		"resubmit": pick("requests", "corporate", billScreen), "cancel": pick("requests", "corporate", billScreen),
-		"issue_po": {"purchase_orders"}, "dispatch": {"warehouse"}, "receive": pick("goods_receipts", "corporate", "goods_receipts"),
+		"issue_po": {"purchase_orders"}, "vendor_confirm": {"purchase_orders", "approvals", "corporate"}, "dispatch": {"warehouse"}, "receive": pick("goods_receipts", "corporate", "goods_receipts"),
 		"reject_balance": {"goods_receipts", "purchase_orders"}, "receive_transfer": {"goods_receipts"}, "edit": {"requests"},
 	}
 	if corp {
@@ -785,7 +808,10 @@ func MyTurn(u *access.User, d *documents.Doc) bool {
 	}
 	right := map[string]string{documents.Pending: access.Approve, documents.Approved: access.IssuePO, documents.POIssued: access.Receive, documents.WHSent: access.Receive}[d.Status]
 	if d.Status == documents.WHSent {
-		owner = "store"
+		return documents.TransferReceiver(u, d) != nil
+	}
+	if d.Status == documents.POIssued && !d.IsTransfer {
+		return documents.Receiver(u, d) != nil
 	}
 	return documents.CanAct(u, d, owner, right) != nil
 }
@@ -875,6 +901,9 @@ var stepRight = map[string]string{"l1": access.Approve, "l2": access.Approve, "c
 // looked up; an empty list means nobody holds that role there, so the document is stuck until the Admin gives someone access.
 func (s *Service) ownerPeople(ctx context.Context, d *documents.Doc) ([]string, error) {
 	step := d.Owner()
+	if step == "requester" {
+		return []string{d.Requester}, nil // the person who raised it (receives the goods, or changes a returned request)
+	}
 	right, ok := stepRight[step]
 	if !ok {
 		return nil, nil
@@ -986,7 +1015,7 @@ func (s *Service) detail(w http.ResponseWriter, r *http.Request) error {
 				actions = append(actions, "route")
 			}
 		}
-		if (d.PropertyKind == "warehouse" || d.PropertyKind == "preopening") && (u.IsAdmin || u.HasStep("wh") || u.HasStep("preop")) {
+		if d.PropertyKind == "preopening" && d.Owner() == "preop" && (u.IsAdmin || u.HasStep("wh") || u.HasStep("preop")) {
 			actions = append(actions, "preop_approver")
 		}
 	case documents.Returned:
@@ -1002,14 +1031,17 @@ func (s *Service) detail(w http.ResponseWriter, r *http.Request) error {
 			if documents.CanAct(u, d, "wh", access.Receive) != nil {
 				actions = append(actions, "dispatch")
 			}
-		} else if documents.CanAct(u, d, owner, access.Receive) != nil {
+		} else if documents.Receiver(u, d) != nil {
 			actions = append(actions, "receive")
+		}
+		if !d.IsTransfer && d.VendorStatus != "accepted" && documents.POKeeper(u, d) != nil {
+			actions = append(actions, "vendor_confirm")
 		}
 		if balancereject.Who(u, d) != nil {
 			actions = append(actions, "reject_balance")
 		}
 	case documents.WHSent:
-		if documents.CanAct(u, d, "store", access.Receive) != nil {
+		if documents.TransferReceiver(u, d) != nil {
 			actions = append(actions, "receive_transfer")
 		}
 	}
@@ -1048,7 +1080,21 @@ func (s *Service) detail(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
-	return httpjson.OK(w, map[string]any{"document": rows[0], "log": logs, "receipts": receipts, "actions": actions, "raised_with": siblings, "owner_people": owners})
+	// Invoices the vendor uploaded on the vendor portal; the goods receipt starts from the newest one not yet used.
+	vinv, err := vendorportal.Invoices(r.Context(), s.DB, d.ID)
+	if err != nil {
+		return err
+	}
+	// raises_po: approving now is the last step and raises the PO (no Purchase Team step), so the Approve box asks for
+	// the rates of estimated lines and, on Advance terms, the advance.
+	raisesPO := false
+	if textclean.Contains(actions, "approve") && d.StepIdx == len(d.RouteSteps)-1 && (d.Kind == "purchase" || d.Kind == "corp_purchase") && d.VendorType != "warehouse" {
+		if st, err := flowsettings.Load(r.Context(), s.DB); err == nil {
+			raisesPO = st.POOnApproval
+		}
+	}
+	return httpjson.OK(w, map[string]any{"document": rows[0], "log": logs, "receipts": receipts, "actions": actions, "raised_with": siblings, "owner_people": owners,
+		"vendor_invoices": vinv, "vendor_portal": vendorportal.HasLogin(r.Context(), s.DB, d.VendorID), "raises_po": raisesPO})
 }
 
 func (s *Service) resubmit(w http.ResponseWriter, r *http.Request) error {
@@ -1120,7 +1166,7 @@ func (s *Service) resubmit(w http.ResponseWriter, r *http.Request) error {
 			if total == 0 {
 				return httpjson.Bad("Enter a quantity for at least one item, or cancel the request.")
 			}
-			steps = approvals.Chain(st, d.PropertyKind, d.VendorType == "warehouse", d.EventReason != "", amount)
+			steps = approvals.Chain(st, d.PropertyKind, d.VendorType == "warehouse", d.EventReason != "", amount, d.RequesterStep)
 			if d.IsCorp() {
 				steps = approvals.CorpSteps(st, amount, d.RequesterID, deref(d.CorpL1))
 			}

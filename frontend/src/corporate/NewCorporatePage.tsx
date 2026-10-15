@@ -5,6 +5,7 @@ import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { get, upload } from '../api/client'
 import { DraftControls, DraftList, KeptFiles, useDraft, type Draft } from '../formdrafts/drafts'
 import { useApi } from '../api/useApi'
+import { UploadModal } from '../bulkupload/UploadModal'
 import { useSession } from '../auth/session'
 import { dateTime, inr, lineValue, today } from '../format/format'
 import { Errors } from '../ui/Errors'
@@ -15,7 +16,7 @@ import { useAction } from '../ui/useAction'
 interface Form {
   office: string; l1_only_below: number
   departments: { id: number; name: string; l1_user_id: number; l1: string; l2: string; backup: string; active: boolean }[]
-  expense_heads: { id: number; name: string; active: boolean }[]
+  expense_heads: { id: number; name: string; active: boolean; fin_status: string }[]
   vendors: { id: number; name: string; vendor_type: string }[]
 }
 interface L { description: string; expense_head_id: number; qty: string; unit: string; rate: string; gst_pct: number }
@@ -31,6 +32,7 @@ export function NewCorporatePage() {
   const [vendor, setVendor] = useState(0)
   const [note, setNote] = useState('')
   const [lines, setLines] = useState<L[]>([blank()])
+  const [linesUpload, setLinesUpload] = useState(false)
   const [head, setHead] = useState(0)
   const [inv, setInv] = useState({ number: '', date: today(), amount: '', gst: 18 })
   const [file, setFile] = useState<File | null>(null)
@@ -51,7 +53,7 @@ export function NewCorporatePage() {
     }).catch(() => {})
   }, [draftId]) // eslint-disable-line react-hooks/exhaustive-deps
   const deps = (data?.departments || []).filter((d) => d.active)
-  const heads = (data?.expense_heads || []).filter((h) => h.active)
+  const heads = (data?.expense_heads || []).filter((h) => h.active && h.fin_status === 'approved') // a new head waits for Finance
   useEffect(() => { if (!dept && deps.length) setDept(deps[0].id) }, [deps, dept])
   const d = deps.find((x) => x.id === dept)
   const total = kind === 'purchase' ? lines.reduce((t, l) => t + lineValue(+l.qty || 0, +l.rate || 0, l.gst_pct), 0) : +inv.amount || 0
@@ -86,7 +88,7 @@ export function NewCorporatePage() {
                   <td><select value={l.gst_pct} onChange={(e) => set(i, { gst_pct: +e.target.value })} aria-label={'GST ' + (i + 1)}>{[0, 5, 12, 18, 28, 40].map((g) => <option key={g} value={g}>{g}%</option>)}</select></td>
                   <td className="r">{inr(lineValue(+l.qty || 0, +l.rate || 0, l.gst_pct))}</td>
                   <td><button className="link" onClick={() => setLines(lines.length > 1 ? lines.filter((_, j) => j !== i) : [blank()])}>Remove</button></td></tr>)}</tbody></table></div>
-              <div className="btns" style={{ padding: '10px 14px', justifyContent: 'space-between' }}><button className="btn ghost" onClick={() => setLines([...lines, blank(lines[lines.length - 1]?.expense_head_id)])}>+ Add line</button><b>Total {inr(total)}</b></div>
+              <div className="btns" style={{ padding: '10px 14px', justifyContent: 'space-between' }}><span className="tools"><button className="btn ghost" onClick={() => setLines([...lines, blank(lines[lines.length - 1]?.expense_head_id)])}>+ Add line</button><button className="btn ghost" onClick={() => setLinesUpload(true)}>Upload lines (Excel)</button></span><b>Total {inr(total)}</b></div>
             </section>
           ) : (
             <section className="card"><div className="grid2">
@@ -118,6 +120,13 @@ export function NewCorporatePage() {
           }, { invoice: file, quote }), (r: any) => { draft.clear(); nav('/documents/' + r.id); return r.message })}>Send for approval · {inr(total)}</button></div>
         </section>
       </div>
+      {linesUpload && <UploadModal kind="corp_lines" title="Upload the lines of this corporate purchase" onClose={() => setLinesUpload(false)}
+        onRows={(objs) => {
+          // Uploaded lines are added after what is already filled in (an empty starting line is dropped).
+          const add: L[] = objs.map((o: any) => ({ description: o.description, expense_head_id: o.expense_head_id, qty: String(o.qty), unit: o.unit, rate: String(o.rate), gst_pct: o.gst_pct }))
+          setLines((c) => [...c.filter((l) => l.description.trim() || +l.rate), ...add])
+          setLinesUpload(false)
+        }} />}
     </>
   )
 }

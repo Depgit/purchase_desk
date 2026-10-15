@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5"
@@ -96,6 +97,32 @@ func ID(r *http.Request, name string) (int64, error) {
 		return 0, Bad("Invalid %s", name)
 	}
 	return v, nil
+}
+
+// QInts reads a query value that may list several ids (property_id=3,5,8); 0 and anything unreadable are left out,
+// so an empty list means "all".
+func QInts(r *http.Request, name string) []int64 {
+	out := []int64{}
+	for _, part := range strings.Split(r.URL.Query().Get(name), ",") {
+		if n, err := strconv.ParseInt(strings.TrimSpace(part), 10, 64); err == nil && n != 0 {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+// QStrings reads a query value that may list several words (module=Purchases,Zoho), sent as repeated values or one
+// comma-separated value; blanks are left out, so an empty list means "all".
+func QStrings(r *http.Request, name string) []string {
+	out := []string{}
+	for _, v := range r.URL.Query()[name] {
+		for _, part := range strings.Split(v, ",") {
+			if p := strings.TrimSpace(part); p != "" {
+				out = append(out, p)
+			}
+		}
+	}
+	return out
 }
 
 func QInt(r *http.Request, name string, def int) int {

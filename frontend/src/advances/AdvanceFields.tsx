@@ -29,8 +29,10 @@ export function advanceProblem(a: AdvanceDraft, poValue: number, room: number) {
 export const advanceBody = (a: AdvanceDraft, poValue: number) => a.mode === 'pct'
   ? { pct: +a.val, reason: a.reason, note: a.note } : { amount: advanceAmount(a, poValue), reason: a.reason, note: a.note }
 
-export function AdvanceFields({ a, onChange, poValue, room, poTDS = 0, asked = 0, poLabel }: {
+export function AdvanceFields({ a, onChange, poValue, room, poTDS = 0, asked = 0, poLabel, noFile }: {
   a: AdvanceDraft; onChange: (a: AdvanceDraft) => void; poValue: number; room: number; poTDS?: number; asked?: number; poLabel: string
+  /** No proforma upload (asked from the Approve box, which sends no files). */
+  noFile?: boolean
 }) {
   const [reasons, setReasons] = useState<string[]>([])
   useEffect(() => {
@@ -66,9 +68,9 @@ export function AdvanceFields({ a, onChange, poValue, room, poTDS = 0, asked = 0
         <label className="field"><span>Reason</span><select value={a.reason} onChange={(e) => onChange({ ...a, reason: e.target.value })}>{reasons.map((r) => <option key={r}>{r}</option>)}</select></label>
         <label className="field"><span>Note{other ? ' (needed for Other)' : ' (optional)'}</span><input value={a.note} onChange={(e) => onChange({ ...a, note: e.target.value })} placeholder="e.g. vendor's terms on the quotation" /></label>
       </div>
-      <label className="field"><span>Vendor's proforma invoice or quotation</span>
+      {!noFile && <label className="field"><span>Vendor's proforma invoice or quotation</span>
         <input type="file" accept="application/pdf,image/*" onChange={(e) => onChange({ ...a, file: e.target.files?.[0] || null })} />
-        <span className="hint">PDF or photo. Finance sees it when approving.</span></label>
+        <span className="hint">PDF or photo. Finance sees it when approving.</span></label>}
     </>
   )
 }

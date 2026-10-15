@@ -32,10 +32,10 @@ import (
 	"purchasedesk/internal/invoices"
 	"purchasedesk/internal/items"
 	"purchasedesk/internal/login"
+	"purchasedesk/internal/masterapproval"
 	"purchasedesk/internal/messaging"
 	"purchasedesk/internal/purchaseorders"
 	"purchasedesk/internal/purchaserequests"
-	"purchasedesk/internal/releasephase"
 	"purchasedesk/internal/reports"
 	"purchasedesk/internal/screenguard"
 	"purchasedesk/internal/sessiontoken"
@@ -43,6 +43,7 @@ import (
 	"purchasedesk/internal/users"
 	"purchasedesk/internal/utilitybills"
 	"purchasedesk/internal/vendormapping"
+	"purchasedesk/internal/vendorportal"
 	"purchasedesk/internal/vendors"
 	"purchasedesk/internal/vendorsheets"
 	"purchasedesk/internal/warehouse"
@@ -62,6 +63,7 @@ type Deps struct {
 	DevMode     bool
 	PushEnabled bool
 	CORSOrigin  string
+	BaseURL     string // the app's address, for links in emails (the vendor portal sign-in)
 }
 
 // Built holds the services other parts of the program use, such as the scheduler.
@@ -83,13 +85,11 @@ func New(d Deps) *Built {
 	zpush := &zohopush.Service{DB: d.DB, Sync: zsync, Files: files, PushEnabled: d.PushEnabled}
 	vendorSvc := &vendors.Service{DB: d.DB, Box: d.Box, Files: files}
 	uploads := &bulkupload.Service{DB: d.DB, Vendors: vendorSvc}
-	var journals *warehousejournal.Service
-	inv := &invoices.Service{DB: d.DB, Guard: guard}
-	if releasephase.On(releasephase.Zoho) {
-		inv.Held, inv.ZohoConnected = zpush.Held, zsync.Connected
-	}
+	journals := &warehousejournal.Service{DB: d.DB, Sync: zsync, PushEnabled: d.PushEnabled}
+	inv := &invoices.Service{DB: d.DB, Guard: guard, Held: zpush.Held}
 	loginSvc := &login.Service{DB: d.DB, Tokens: d.Tokens, Guard: guard, Messages: d.Messages, DevMode: d.DevMode}
 	sheets := &vendorsheets.Service{DB: d.DB, Messages: d.Messages}
+	portal := &vendorportal.Service{DB: d.DB, Tokens: d.Tokens, Files: files, Messages: d.Messages, BaseURL: d.BaseURL}
 
 	r := chi.NewRouter()
 	r.Use(middleware.RealIP, middleware.RequestID, middleware.Logger, middleware.Recoverer, middleware.Timeout(120*time.Second))
@@ -102,9 +102,12 @@ func New(d Deps) *Built {
 				httpjson.JSON(w, http.StatusServiceUnavailable, map[string]string{"status": "database unavailable"})
 				return
 			}
-			httpjson.JSON(w, http.StatusOK, map[string]any{"status": "ok", "storage": d.Store.Name(), "phase": releasephase.Current()})
+			httpjson.JSON(w, http.StatusOK, map[string]any{"status": "ok", "storage": d.Store.Name()})
 		})
 		loginSvc.PublicRoutes(r)
+		// The vendor portal has its own sign-in; a vendor session opens nothing else.
+		portal.PublicRoutes(r)
+		portal.VendorRoutes(r)
 		r.Group(func(r chi.Router) {
 			r.Use(guard.Middleware)
 			r.Use((&screenguard.Guard{DB: d.DB}).Middleware) // screen levels from the user's roles, on every request
@@ -117,47 +120,37 @@ func New(d Deps) *Built {
 			vendorSvc.Routes(r)
 			(&vendormapping.Service{DB: d.DB}).Routes(r)
 			(&users.Service{DB: d.DB, Guard: guard}).Routes(r)
-			(&approvals.Service{DB: d.DB, Guard: guard, Messages: d.Messages}).Routes(r)
 			(&purchaserequests.Service{DB: d.DB, Guard: guard, Messages: d.Messages}).Routes(r)
-			poSvc := &purchaseorders.Service{DB: d.DB, Messages: d.Messages, Files: files}
+			poSvc := &purchaseorders.Service{DB: d.DB, Messages: d.Messages, Files: files, PortalURL: portal.URL()}
 			poSvc.Routes(r)
+			portal.StaffRoutes(r)
+			(&approvals.Service{DB: d.DB, Guard: guard, Messages: d.Messages, POSent: poSvc.Release}).Routes(r)
 			(&goodsreceipts.Service{DB: d.DB, Files: files}).Routes(r)
 			(&balancereject.Service{DB: d.DB, Messages: d.Messages}).Routes(r)
-			(&advances.Service{DB: d.DB, Guard: guard, Files: files, Messages: d.Messages, POReleased: poSvc.SendPO}).Routes(r)
+			(&advances.Service{DB: d.DB, Guard: guard, Files: files, Messages: d.Messages, POReleased: poSvc.Release}).Routes(r)
 			inv.Routes(r)
 			files.Routes(r)
 			(&formdrafts.Service{DB: d.DB, Files: files}).Routes(r)
 			uploads.Routes(r)
 			(&worklist.Service{DB: d.DB, Guard: guard}).Routes(r)
+			(&masterapproval.Service{DB: d.DB}).Routes(r)
 
-			// Later phases mount only when RELEASE_PHASE in .env reaches them.
-			if releasephase.On(releasephase.Zoho) {
-				zsync.Routes(r)
-				zpush.Routes(r)
-				(&zohoexport.Service{Sync: zsync}).Routes(r)
-			}
-			if releasephase.On(releasephase.Bills) {
-				(&billtypes.Service{DB: d.DB}).Routes(r)
-				(&utilitybills.Service{DB: d.DB, Files: files}).Routes(r)
-				(&budgets.Service{DB: d.DB, Guard: guard}).Routes(r)
-				(&corporate.Service{DB: d.DB, Files: files}).Routes(r)
-			}
-			if releasephase.On(releasephase.Warehouse) {
-				uploads.Register("warehouse_stock", "Warehouse opening stock", "Warehouse", []string{"sku_code", "opening_qty"},
-					"sku_code,item_name,opening_qty,reorder_level\nLN-0001,Bed sheet double,450,150\n",
-					func(u *access.User) bool { return u.HasRight(access.Upload) && u.HasStep("wh") },
-					warehouse.UploadCheck, warehouse.UploadCommit)
-				(&warehouse.Service{DB: d.DB, Guard: guard, Files: files, Messages: d.Messages}).Routes(r)
-				sheets.Routes(r)
-			}
-			if releasephase.On(releasephase.Zoho) && releasephase.On(releasephase.Warehouse) {
-				journals = &warehousejournal.Service{DB: d.DB, Sync: zsync, PushEnabled: d.PushEnabled}
-				journals.Routes(r)
-			}
-			if releasephase.On(releasephase.Reports) {
-				(&reports.Service{DB: d.DB, Guard: guard}).Routes(r)
-				(&dashboard.Service{DB: d.DB, Guard: guard, Invoices: inv}).Routes(r)
-			}
+			zsync.Routes(r)
+			zpush.Routes(r)
+			(&zohoexport.Service{Sync: zsync}).Routes(r)
+			(&billtypes.Service{DB: d.DB}).Routes(r)
+			(&utilitybills.Service{DB: d.DB, Files: files}).Routes(r)
+			(&budgets.Service{DB: d.DB, Guard: guard}).Routes(r)
+			(&corporate.Service{DB: d.DB, Files: files}).Routes(r)
+			uploads.Register("warehouse_stock", "Warehouse opening stock", "Warehouse", []string{"sku_code", "opening_qty"},
+				"sku_code,item_name,opening_qty,reorder_level\nLN-0001,Bed sheet double,450,150\n",
+				func(u *access.User) bool { return u.HasRight(access.Upload) && u.HasStep("wh") },
+				warehouse.UploadCheck, warehouse.UploadCommit)
+			(&warehouse.Service{DB: d.DB, Guard: guard, Files: files, Messages: d.Messages}).Routes(r)
+			sheets.Routes(r)
+			journals.Routes(r)
+			(&reports.Service{DB: d.DB, Guard: guard}).Routes(r)
+			(&dashboard.Service{DB: d.DB, Guard: guard, Invoices: inv}).Routes(r)
 		})
 	})
 	return &Built{Handler: r, ZohoSync: zsync, ZohoPush: zpush, Uploads: uploads, Files: files, Guard: guard, Sheets: sheets, Journals: journals}

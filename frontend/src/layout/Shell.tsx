@@ -5,13 +5,11 @@ import { NavLink, useLocation, useNavigate } from 'react-router-dom'
 import { get } from '../api/client'
 import { useSession } from '../auth/session'
 import { useToast } from '../ui/Toast'
-import { PHASE, usePhase } from '../releasephase/phase'
 
-interface NavItem { to: string; label: string; badge?: string; show?: boolean; phase?: number; screen?: ScreenKey }
+interface NavItem { to: string; label: string; badge?: string; show?: boolean; screen?: ScreenKey }
 
 export function Shell({ children }: { children: ReactNode }) {
   const { me, signOut, hasRight, hasStep } = useSession()
-  const { on } = usePhase()
   const nav = useNavigate()
   const loc = useLocation()
   const toast = useToast()
@@ -34,47 +32,44 @@ export function Shell({ children }: { children: ReactNode }) {
   }, [theme])
 
   const groups: NavItem[][] = [
-    [{ to: '/', label: on(PHASE.dashboard) ? 'Dashboard' : 'My Work' }],
+    [{ to: '/', label: 'Dashboard' }],
     [
       { to: '/approvals', label: 'Approvals', badge: 'approvals', screen: 'approvals' },
       { to: '/requests', label: 'Purchase Requests', badge: 'requests', screen: 'requests' },
       { to: '/purchase-orders', label: 'Purchase Orders', badge: 'purchase_orders', screen: 'purchase_orders' },
-      { to: '/vendor-sheets', label: 'Vendor Order Sheets', screen: 'vendor_sheets', phase: PHASE.sheets },
+      { to: '/vendor-sheets', label: 'Vendor Order Sheets', badge: 'vendor_sheets', screen: 'vendor_sheets' },
       { to: '/goods-receipts', label: 'Goods Receipts', badge: 'goods_receipts', screen: 'goods_receipts' },
       { to: '/invoices', label: 'Invoices', badge: 'invoices', screen: 'invoices' },
       { to: '/payments', label: 'Payments', badge: 'payments', screen: 'payments' },
     ],
     [
-      { to: '/bills/utility', label: 'Utility Bills', badge: 'bills_utility', screen: 'bills_utility', phase: PHASE.bills },
-      { to: '/bills/amc', label: 'AMC Bills', badge: 'bills_amc', screen: 'bills_amc', phase: PHASE.bills },
-    ],
-    [
-      { to: '/corporate', label: 'Corporate', badge: 'corporate', screen: 'corporate', phase: PHASE.corporate },
-      { to: '/warehouse', label: 'Warehouse', badge: 'warehouse', screen: 'warehouse', phase: PHASE.warehouse },
+      { to: '/corporate', label: 'Corporate', badge: 'corporate', screen: 'corporate' },
+      { to: '/warehouse', label: 'Warehouse', badge: 'warehouse', screen: 'warehouse' },
     ],
     [
       { to: '/vendors', label: 'Vendors', badge: 'vendors', screen: 'vendors' },
       { to: '/items', label: 'Items (SKU)', screen: 'items' },
       { to: '/vendor-mapping', label: 'Vendor Mapping', screen: 'vendor_mapping' },
+      { to: '/settings/master-approvals', label: 'Masters to approve', badge: 'master_approvals', screen: 'master_approvals' },
     ],
-    [{ to: '/reports', label: 'Reports', screen: 'reports', phase: PHASE.reports }],
+    [{ to: '/reports', label: 'Reports', screen: 'reports' }],
   ]
   const settings: NavItem[] = [
     { to: '/settings/properties', label: 'Properties', screen: 'properties' },
     { to: '/settings/cities', label: 'Cities & Clusters', screen: 'cities' },
-    { to: '/settings/budgets', label: 'Budgets', screen: 'budgets', phase: PHASE.budgets },
-    { to: '/settings/corporate', label: 'Corporate Setup', screen: 'corporate_setup', phase: PHASE.corporate },
-    { to: '/settings/bill-types', label: 'Bill Types', screen: 'bill_types', phase: PHASE.bills },
+    { to: '/settings/budgets', label: 'Budgets', screen: 'budgets' },
+    { to: '/settings/corporate', label: 'Corporate Setup', screen: 'corporate_setup' },
+    { to: '/settings/bill-types', label: 'Bill Types', screen: 'bill_types' },
     { to: '/settings/item-setup', label: 'Item Setup', screen: 'item_setup' },
     { to: '/settings/users', label: 'Users & Rights', screen: 'users' },
     { to: '/settings/flow', label: 'Flow Settings', screen: 'flow' },
-    { to: '/settings/zoho', label: 'Zoho Books', screen: 'zoho', phase: PHASE.zoho },
+    { to: '/settings/zoho', label: 'Zoho Books', screen: 'zoho' },
     { to: '/settings/templates', label: 'Message Templates', screen: 'templates' },
     { to: '/settings/activity', label: 'Activity Log', screen: 'activity' },
   ]
   // A screen shows when the user's roles give at least view on it (screen levels from /me).
   const sees = (n: NavItem) => !n.screen || !!me?.is_admin || (me?.screens?.[n.screen] || 'none') !== 'none'
-  const shown = (n: NavItem) => n.show !== false && sees(n) && (!n.phase || on(n.phase))
+  const shown = (n: NavItem) => n.show !== false && sees(n)
   const link = (n: NavItem, cls = '') => !shown(n) ? null : (
     <NavLink key={n.to} to={n.to} end={n.to === '/'} className={({ isActive }) => cls + (isActive ? ' active' : '')}>
       <span>{n.label}</span>{n.badge && counts[n.badge] ? <span className="badge">{counts[n.badge]}</span> : null}
@@ -97,12 +92,12 @@ export function Shell({ children }: { children: ReactNode }) {
       <div style={{ minWidth: 0 }}>
         <div className="top">
           <button className="btn ghost menu-btn" onClick={() => setOpen(true)} aria-label="Open menu">Menu</button>
-          {hasRight('raise') && (on(PHASE.corporate) && hasStep('creq', 'dh') && !me?.is_admin ? <>
+          {hasRight('raise') && (hasStep('creq', 'dh') && !me?.is_admin ? <>
             <button className="btn" onClick={() => nav('/corporate/new/purchase')}>+ Corporate purchase</button>
             <button className="btn ghost" onClick={() => nav('/corporate/new/bill')}>+ Corporate bill</button>
           </> : <>
             <button className="btn" onClick={() => nav('/requests/new')}>+ Purchase request</button>
-            {on(PHASE.bills) && <button className="btn ghost" onClick={() => nav('/bills/new/utility')}>+ Bill</button>}
+            <button className="btn ghost" onClick={() => nav('/bills/new/utility')}>+ Bill</button>
           </>)}
           <input type="search" placeholder="Find PR, PO or invoice no. and press Enter" aria-label="Find a request, PO or invoice" style={{ maxWidth: 300 }}
             onKeyDown={async (e) => {

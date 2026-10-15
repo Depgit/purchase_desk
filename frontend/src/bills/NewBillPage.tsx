@@ -94,7 +94,7 @@ export function NewBillPage() {
     { section, typeId, pid, vid, period, months, invNo, invDate, amt, gst, remark } satisfies BillFields, { invoice: file })
   return (
     <>
-      <div className="head"><div><button className="link" onClick={() => nav('/bills/' + section)}>‹ {amc ? 'AMC Bills' : 'Utility Bills'}</button><h1>New {amc ? 'AMC' : 'utility'} bill</h1>
+      <div className="head"><div><button className="link" onClick={() => nav('/requests')}>‹ Purchase Requests</button><h1>New {amc ? 'AMC' : 'utility'} bill</h1>
         <p className="sub">{from ? `A copy of ${from.number} (${from.bill_type}, ${from.property}) for the next period. Enter the new invoice and send it for approval; ${from.number} itself is not changed.`
           : 'A bill needs no PO or goods receipt. Enter the invoice and send it for approval.'}</p></div></div>
       {!draftId && !cloneId && <DraftList form="bill" label="Your bill drafts" onOpen={(d) => nav(`/bills/new/${d.fields.section}?draft=${d.id}`)} />}
@@ -125,7 +125,7 @@ export function NewBillPage() {
           <div className="btns"><DraftControls draft={draft} onSave={saveDraft} />
             <button className="btn" disabled={a.busy} onClick={() => a.run(() => upload('/bills', {
             bill_type_id: typeId, property_id: pid, vendor_id: vid, period_start: period, months: amc ? months : 1, invoice_number: invNo, invoice_date: invDate, invoice_amount: +amt, gst_pct: gst, remark,
-          }, { invoice: file }), (r: any) => { draft.clear(); nav('/bills/' + section); return r.message })}>Submit for approval</button></div>
+          }, { invoice: file }), (r: any) => { draft.clear(); nav('/requests'); return r.message })}>Submit for approval</button></div>
         </section>
         <section className="card"><h2>Approval route</h2><p>{data?.approver === 'cc' ? 'Cost Controller' : 'Cluster Manager'} → Finance payment approval → Zoho</p>
           <p className="hint">The system blocks a second bill for the same item, property and period, and a repeated invoice number for the same vendor.</p></section>

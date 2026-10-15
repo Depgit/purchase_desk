@@ -63,7 +63,7 @@ export function SearchSelect({ value, items, onChange, emptyLabel, placeholder =
     if (e.key === 'ArrowDown') { e.preventDefault(); setHi((h) => Math.min(h + 1, list.length - 1)) }
     else if (e.key === 'ArrowUp') { e.preventDefault(); setHi((h) => Math.max(h - 1, 0)) }
     else if (e.key === 'Enter') { e.preventDefault(); if (list[hi]) pick(list[hi].value) }
-    else if (e.key === 'Escape') { setOpen(false); btn.current?.focus() }
+    else if (e.key === 'Escape') { e.stopPropagation(); setOpen(false); btn.current?.focus() } // only the dropdown, not a popup it sits in
   }
   useEffect(() => { box.current?.querySelector('[data-hi="1"]')?.scrollIntoView({ block: 'nearest' }) }, [hi])
 

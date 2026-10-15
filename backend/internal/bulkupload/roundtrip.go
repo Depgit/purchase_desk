@@ -20,7 +20,6 @@ import (
 	"purchasedesk/internal/csvfile"
 	"purchasedesk/internal/database"
 	"purchasedesk/internal/httpjson"
-	"purchasedesk/internal/releasephase"
 	"purchasedesk/internal/textclean"
 	"purchasedesk/internal/vendormapping"
 )
@@ -376,7 +375,7 @@ type mappingProperty struct {
 // mappingProperties lists the properties that order from vendors: live and pre-opening ones, and the warehouse.
 func mappingProperties(ctx context.Context, q database.Q) ([]mappingProperty, error) {
 	rows, err := q.Query(ctx, `SELECT p.id, p.code, p.code||' · '||p.name, k.name FROM property p JOIN cluster k ON k.id=p.cluster_id
-		WHERE p.active AND coalesce(p.code,'')<>'' AND (p.kind IN ('live','preopening') OR (p.kind='warehouse' AND $1)) ORDER BY p.code`, releasephase.PropertyKindOn("warehouse"))
+		WHERE p.active AND coalesce(p.code,'')<>'' AND p.kind IN ('live','preopening','warehouse') ORDER BY p.code`)
 	if err != nil {
 		return nil, err
 	}

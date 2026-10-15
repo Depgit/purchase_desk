@@ -47,6 +47,8 @@ H="Authorization: Zoho-oauthtoken $AT"
 | 13 | Look for an existing bill before creating one (used when the custom field is missing) | `GET /bills?vendor_id=&bill_number=` | `FindBill` |
 | 13c | Download from Zoho (Excel), Settings → Zoho Books: every bill, every page | `GET /bills?page=N&per_page=200` | `zohoexport` (`ListAll`) |
 | 13d | Download from Zoho (Excel): every journal, every page | `GET /journals?page=N&per_page=200` | `zohoexport` (`ListAll`) |
+| 13e | Look for a purchase order by number before creating it (a retry after a lost reply) | `GET /purchaseorders?purchaseorder_number=PO_HZ_0001` | `FindPurchaseOrder` |
+| 13f | One purchase order with its line ids | `GET /purchaseorders/{purchaseorder_id}` | `GetPurchaseOrder` |
 
 ```bash
 curl -s "$B/organizations?$O" -H "$H"
@@ -90,6 +92,13 @@ Nothing below runs while `ZOHO_PUSH_ENABLED=false`, including the "Create in Zoh
 | 20c | Create a Purchase Desk item in Zoho (Items tab, Create in Zoho): name = brand + item (pack), sku = SKU code, item_type purchases, goods or service, purchase account from the sub-category mapping, GST via item_tax_preferences (intra and inter) from the tax mapping, rate from the current rate card | `POST /items` | `CreateItem` | First live use pending |
 | 16b | Create a region reporting tag (named after the property's Zoho location) when Zoho has none, enabled on purchases and journals at line level; the property is then added as its option | `POST /reportingtags` | `CreateReportingTag` |
 | 21 | Monthly warehouse journal per property | `POST /journals` | `CreateJournal` | Not yet |
+| 22 | Create the purchase order when a PO is issued here (or raised after Finance approves its advance), under the same number; reference_number = the PR number; lines with item_id / account_id, rate, quantity, tax_id, hsn_or_sac and the property tag | `POST /purchaseorders?ignore_auto_number_generation=true` | `CreatePurchaseOrder` (job `zoho-purchase-orders`) | Not yet; tested against a stand-in server |
+| 23 | Update it when a balance is rejected or the PO closes short (lower quantities; each line keeps its `line_item_id`) | `PUT /purchaseorders/{purchaseorder_id}?ignore_auto_number_generation=true` | `UpdatePurchaseOrder` | Not yet |
+| 24 | Issue a draft purchase order | `POST /purchaseorders/{purchaseorder_id}/status/open` | `MarkPurchaseOrderOpen` | Not yet |
+| 25 | Cancel it when nothing will be delivered (balance rejected with nothing received) | `POST /purchaseorders/{purchaseorder_id}/status/cancelled` | `MarkPurchaseOrderCancelled` | Not yet |
+| 26 | A paid vendor advance becomes a Zoho vendor payment from the account chosen on the Connection tab (amount paid = advance less its TDS, reference = UTR), with no bill: Zoho keeps it as an unapplied payment | `POST /vendorpayments` | `CreateVendorPayment` (job `zoho-send`) | Not yet; tested against a stand-in server |
+| 27 | Once the bill the advance was adjusted on is open in Zoho, the advance is applied to it; the full list of the advance's bills is sent each time | `PUT /vendorpayments/{payment_id}` (body with `bills[]`: `bill_id`, `amount_applied`) | `UpdateVendorPayment` | Not yet: check the bill's balance on the first one |
+| 14b | A bill for a PO quotes the Zoho purchase order (`purchaseorder_ids`) and each PO line (`line_items[].purchaseorder_item_id`), so Zoho shows the PO billed | in calls 14 / 15 | `payload`, `alignToPO` | Live 14 Oct 2026: Zoho refused a bill whose line had an item while the PO line had none (code 4197, "no common items"; the item was linked after the PO was sent). The push now reads the Zoho PO first (`GET /purchaseorders/{id}`) and gives each bill line the PO line's item and account; if Zoho still answers 4197 the bill goes without the PO link and the history says so |
 
 Example bill as the app builds it. Open any invoice in Payments and click "Preview what is sent" to see the exact body.
 
@@ -126,6 +135,10 @@ curl -s -X POST "$B/journals?$O" -H "$H" -H "Content-Type: application/json" \
     {"account_id":"<stock loss account>","debit_or_credit":"debit","amount":702,"description":"Pilferage","tags":[{"tag_id":"<tag_id>","tag_option_id":"<option_id>"}]},
     {"account_id":"<warehouse stock account>","debit_or_credit":"credit","amount":4212,"description":"Stock issued","tags":[{"tag_id":"<tag_id>","tag_option_id":"<option_id>"}]}]}'
 ```
+
+## Daily allowance and pace
+
+Every reply from Zoho carries the organisation's daily allowance: `X-Rate-Limit-Limit` (1,000 a day on Free, 2,000 Standard, 5,000 Professional, 10,000 Premium, Elite and Ultimate), `X-Rate-Limit-Remaining` and `X-Rate-Limit-Reset` (seconds until it resets). The client records them (`zohoapi.CurrentUsage`), the Connection tab shows "Zoho calls today", and the automatic `zoho-send` job waits while less than a fifth is left (`LowOnCalls`), keeping the rest for the buttons. Calls are spaced 750 ms apart (about 80 a minute, under Zoho's 100 a minute per organisation). The development organisation in `.env` reported 1,000 a day on 14 Oct 2026.
 
 ## Errors the app handles
 

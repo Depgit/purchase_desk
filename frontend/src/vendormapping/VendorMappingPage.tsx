@@ -1,4 +1,5 @@
 // Who supplies what, where. One item has one vendor at a property; a SKU mapping wins over a sub-category mapping.
+import { MultiSelect } from '../ui/MultiSelect'
 import { useEffect, useState } from 'react'
 import { download, post, put } from '../api/client'
 import { useLookups } from '../api/lookups'
@@ -73,7 +74,6 @@ function Mappings({ level }: { level: 'sc' | 'sku' }) {
         actions={ed ? <>{hasRight('upload') && <button className="btn ghost" onClick={() => setUpload(true)}>Bulk upload / edit mappings</button>}<button className="btn" onClick={() => setEdit('new')}>+ Add mapping</button></> : null}
         filters={[
           { id: 'p', label: 'Property', options: [['', 'Any property'], ...(l?.properties || []).filter((p) => p.active).map((p) => [String(p.id), p.name] as [string, string])], test: (m, v) => m.all_properties || m.property_ids.includes(+v) },
-          { id: 'act', label: 'Active', options: [['', 'Active and inactive'], ['1', 'Active only'], ['0', 'Inactive only']], test: (m, v) => m.active === (v === '1') },
         ]}
         columns={[
           { key: 'vendor', label: 'Vendor', render: (m) => <>{m.vendor}{!m.vendor_usable && <> <Pill tone="warn">not usable</Pill></>}</>, csv: (m) => m.vendor },
@@ -115,8 +115,8 @@ function MappingModal({ level, m, onClose, onDone }: { level: 'sc' | 'sku'; m: M
       <Field label="Properties" hint="All properties also covers the warehouse, pre-opening properties and any property added later.">
         <select value={f.all_properties ? 'all' : 'sel'} onChange={(e) => setF({ ...f, all_properties: e.target.value === 'all' })}><option value="all">All properties</option><option value="sel">Choose clusters or properties</option></select></Field>
       {!f.all_properties && <>
-        <div className="field"><span>Whole clusters</span><Checks value={f.cluster_ids} onChange={(v) => setF({ ...f, cluster_ids: v })} options={(l?.clusters || []).map((c) => [c.id, c.name])} /><span className="hint">Ticks every live property in the cluster.</span></div>
-        <div className="field"><span>Individual properties</span><Checks value={f.property_ids} onChange={(v) => setF({ ...f, property_ids: v })} options={(l?.properties || []).filter((p) => p.active).map((p) => [p.id, p.name])} /></div>
+        <div className="field"><span>Whole clusters</span><Checks label="Clusters" placeholder="Choose clusters" value={f.cluster_ids} onChange={(v) => setF({ ...f, cluster_ids: v })} options={(l?.clusters || []).map((c) => [c.id, c.name])} /><span className="hint">Ticks every live property in the cluster.</span></div>
+        <div className="field"><span>Individual properties</span><Checks label="Properties" placeholder="Choose properties" value={f.property_ids} onChange={(v) => setF({ ...f, property_ids: v })} options={(l?.properties || []).filter((p) => p.active).map((p) => [p.id, p.name])} /></div>
       </>}
       <Errors list={a.errors} />
       <div className="btns"><button className="btn ghost" onClick={onClose}>Cancel</button>
@@ -193,16 +193,16 @@ function FormatModal({ onClose }: { onClose: () => void }) {
   const vendors = useApi<Vendor[]>('/vendors')
   const l = useLookups()
   const [vid, setVid] = useState(0)
-  const [cat, setCat] = useState(0)
+  const [cats, setCats] = useState<string[]>([])
   return (
     <Modal title="Rate format for a vendor" onClose={onClose}>
       <p className="sub">The file lists every active SKU the vendor is approved for, with the current rate. The vendor fills the new rate and validity. Rows without a rate are skipped on upload.</p>
       <div className="grid2">
         <Field label="Vendor"><select value={vid} onChange={(e) => setVid(+e.target.value)}><option value={0}>Choose</option>{(vendors.data || []).filter((v) => v.vendor_type === 'goods' && v.active).map((v) => <option key={v.id} value={v.id}>{v.legal_name}</option>)}</select></Field>
-        <Field label="Category"><select value={cat} onChange={(e) => setCat(+e.target.value)}><option value={0}>All categories</option>{l?.categories.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}</select></Field>
+        <Field label="Categories"><MultiSelect ariaLabel="Category" value={cats} onChange={setCats} options={[['', 'All categories'], ...(l?.categories || []).map((c) => [String(c.id), c.name] as [string, string])]} /></Field>
       </div>
       <div className="btns"><button className="btn ghost" onClick={onClose}>Cancel</button>
-        <button className="btn" disabled={!vid} onClick={() => download(`/rates/format?vendor_id=${vid}&category_id=${cat}`, 'rate-format.csv')}>Download</button></div>
+        <button className="btn" disabled={!vid} onClick={() => download(`/rates/format?vendor_id=${vid}&category_id=${cats.join(',')}`, 'rate-format.csv')}>Download</button></div>
     </Modal>
   )
 }

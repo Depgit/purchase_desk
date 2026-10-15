@@ -7,6 +7,7 @@ import { get, post } from '../api/client'
 import type { Doc } from '../api/types'
 import { inr, lineValue, qty } from '../format/format'
 import { Errors } from '../ui/Errors'
+import { usePopup } from '../ui/Toast'
 import { useAction } from '../ui/useAction'
 
 export function RejectBalanceForm({ doc, onCancel, onDone }: { doc: Doc; onCancel: () => void; onDone: () => void }) {
@@ -16,6 +17,7 @@ export function RejectBalanceForm({ doc, onCancel, onDone }: { doc: Doc; onCance
   const [reason, setReason] = useState('')
   const [note, setNote] = useState('')
   const a = useAction()
+  const popup = usePopup()
   useEffect(() => { get<Record<string, string[]>>('/pick-lists').then((l) => setReasons(l.balance_reasons || [])).catch(() => {}) }, [])
   const n = (id: number) => Math.max(0, +q[id] || 0)
   const left = due.reduce((t, l) => t + (l.qty - l.received_qty - Math.min(n(l.id), l.qty - l.received_qty)), 0)
@@ -54,7 +56,7 @@ export function RejectBalanceForm({ doc, onCancel, onDone }: { doc: Doc; onCance
         <button className="btn ghost" onClick={onCancel}>Back</button>
         <button className="btn no" disabled={a.busy || !any || !reason || (other && note.trim().length < 3)} onClick={() => a.run(() => post(`/documents/${doc.id}/reject-balance`, {
           quantities: Object.fromEntries(Object.entries(q).map(([k, v]) => [k, +v || 0])), reason, note,
-        }), (r: any) => { onDone(); return r.message })}>Reject {inr(value)}</button>
+        }), (r: any) => { onDone(); if (r.closed) popup('PO closed', r.closed); return r.message })}>Reject {inr(value)}</button>
       </div>
     </>
   )

@@ -42,6 +42,7 @@ func (s *Service) Routes(r chi.Router) {
 	r.Get("/invoices/{id}/zoho-preview", httpjson.Wrap(s.preview))
 	r.Post("/zoho/push", httpjson.Wrap(s.push))
 	r.Post("/zoho/read-payments", httpjson.Wrap(s.readPayments))
+	s.poRoutes(r)
 }
 
 // bill is everything needed to build one Zoho bill.
@@ -91,9 +92,12 @@ type bill struct {
 	Lines                          []line
 	Connected                      bool
 	KeyField                       string
+	ZohoPOID                       string // the Zoho purchase order this bill is made against
 }
 
 type line struct {
+	LineID                           int64
+	POLineID                         string // the Zoho purchase order line it bills against
 	SKUCode, Item, Pack, HSN, SubCat string
 	SubCatID                         int64
 	Qty, Rate, GST                   float64
@@ -110,7 +114,7 @@ func load(ctx context.Context, q database.Q, invoiceID int64) (*bill, error) {
 		d.bill_type_id, coalesce(bt.name, eh.name, ''), coalesce(to_char(d.period_start,'Mon YYYY'), cd.name, ''), coalesce(d.months,0),
 		coalesce(o.tag_id,''), coalesce(mp.tag_option_id,''), coalesce(mp.location_id,''), coalesce(o.active AND zt.active,false), coalesce(zt.name,''),
 		coalesce(mv.contact_id,''), coalesce(zc.active,false), coalesce(ma.account_id,''), coalesce(za.active,false),
-		coalesce(z.connected,false), coalesce(z.bill_key_field,''), coalesce(cd.name,'')
+		coalesce(z.connected,false), coalesce(z.bill_key_field,''), coalesce(cd.name,''), coalesce(d.zoho_po_id,'')
 		FROM invoice i JOIN document d ON d.id=i.document_id JOIN property p ON p.id=i.property_id JOIN cluster k ON k.id=p.cluster_id JOIN city c ON c.id=k.city_id
 		JOIN vendor v ON v.id=i.vendor_id LEFT JOIN goods_receipt g ON g.id=i.goods_receipt_id LEFT JOIN bill_type bt ON bt.id=d.bill_type_id
 		LEFT JOIN zoho_connection z ON z.id=1 LEFT JOIN zoho_map_property mp ON mp.property_id=p.id LEFT JOIN zoho_tag_option o ON o.option_id=mp.tag_option_id LEFT JOIN zoho_tag zt ON zt.tag_id=o.tag_id
@@ -122,7 +126,7 @@ func load(ctx context.Context, q database.Q, invoiceID int64) (*bill, error) {
 		&b.FileID, &b.ZohoBillID, &b.ZohoStep, &b.Voids, &b.MatchRemark,
 		&b.PropertyID, &b.Property, &b.PropertyKind, &b.PropertyState, &b.VendorID, &b.VendorGST, &b.VendorGSTIN, &b.VendorState, &b.Terms,
 		&b.BillTypeID, &b.BillType, &b.Period, &b.Months,
-		&b.TagID, &b.TagOptionID, &b.LocationID, &b.TagOK, &b.TagName, &b.ContactID, &b.ContactOK, &b.BillAccount, &b.BillAccountOK, &b.Connected, &b.KeyField, &b.Department)
+		&b.TagID, &b.TagOptionID, &b.LocationID, &b.TagOK, &b.TagName, &b.ContactID, &b.ContactOK, &b.BillAccount, &b.BillAccountOK, &b.Connected, &b.KeyField, &b.Department, &b.ZohoPOID)
 	if err == pgx.ErrNoRows {
 		return nil, httpjson.NotFound("Invoice")
 	}
@@ -136,7 +140,7 @@ func load(ctx context.Context, q database.Q, invoiceID int64) (*bill, error) {
 		rows, err := q.Query(ctx, `SELECT coalesce(k.code,''), coalesce(concat_ws(' ', b.name, k.item_name), l.description), coalesce(ps.name, l.unit), coalesce(k.hsn,''), coalesce(sc.name, eh.name, ''), coalesce(sc.id,0), gl.qty, l.rate, l.gst_pct,
 			coalesce(CASE WHEN l.sku_id IS NULL THEN mh.account_id WHEN $2<>'' THEN ms.account_id ELSE ma.account_id END,''),
 			coalesce(CASE WHEN l.sku_id IS NULL THEN zh.active WHEN $2<>'' THEN zs.active ELSE za.active END,false),
-			coalesce(zi.item_id,'')
+			coalesce(zi.item_id,''), coalesce(l.zoho_po_line_id,'')
 			FROM invoice i JOIN goods_receipt_line gl ON gl.goods_receipt_id=i.goods_receipt_id JOIN document_line l ON l.id=gl.line_id
 			LEFT JOIN sku k ON k.id=l.sku_id LEFT JOIN brand b ON b.id=k.brand_id LEFT JOIN pack_size ps ON ps.id=k.pack_size_id LEFT JOIN sub_category sc ON sc.id=k.sub_category_id
 			LEFT JOIN expense_head eh ON eh.id=l.expense_head_id
@@ -150,7 +154,7 @@ func load(ctx context.Context, q database.Q, invoiceID int64) (*bill, error) {
 		}
 		b.Lines, err = pgx.CollectRows(rows, func(row pgx.CollectableRow) (line, error) {
 			var l line
-			return l, row.Scan(&l.SKUCode, &l.Item, &l.Pack, &l.HSN, &l.SubCat, &l.SubCatID, &l.Qty, &l.Rate, &l.GST, &l.Account, &l.AccountOK, &l.ItemID)
+			return l, row.Scan(&l.SKUCode, &l.Item, &l.Pack, &l.HSN, &l.SubCat, &l.SubCatID, &l.Qty, &l.Rate, &l.GST, &l.Account, &l.AccountOK, &l.ItemID, &l.POLineID)
 		})
 		if err != nil {
 			return nil, err
@@ -307,7 +311,7 @@ func payload(b *bill, taxes map[float64]string) (map[string]any, []string) {
 	if b.Advance > 0 {
 		paid := b.Advance - b.AdvanceTDS
 		notes += fmt.Sprintf(" · Advance already paid: %s %s, pay the vendor %s", money.INR(paid), b.AdvanceRefs, money.INR(b.Amount-b.TDS-paid))
-		warn = append(warn, fmt.Sprintf("An advance of %s (%s) was paid before this bill. It is written in the bill notes but not applied in Zoho; apply the vendor advance to this bill in Zoho when paying.", money.INR(paid), b.AdvanceRefs))
+		warn = append(warn, fmt.Sprintf("An advance of %s (%s) was paid before this bill. It is in the bill notes, and once the bill is open in Zoho the advance's vendor payment is applied to it automatically (not yet tested on a live Zoho organisation: check the bill's balance in Zoho).", money.INR(paid), b.AdvanceRefs))
 	}
 	tags := []map[string]string{{"tag_id": b.TagID, "tag_option_id": b.TagOptionID}}
 	items := []map[string]any{}
@@ -343,6 +347,9 @@ func payload(b *bill, taxes map[float64]string) (map[string]any, []string) {
 				"quantity": l.Qty, "rate": l.Rate, "tags": tags}
 			if l.ItemID != "" {
 				it["item_id"] = l.ItemID // the linked Zoho item; name, rate and account above are still sent explicitly
+			}
+			if b.ZohoPOID != "" && l.POLineID != "" {
+				it["purchaseorder_item_id"] = l.POLineID // bills this line of the Zoho purchase order
 			}
 			if l.HSN != "" {
 				it["hsn_or_sac"] = l.HSN
@@ -384,6 +391,10 @@ func payload(b *bill, taxes map[float64]string) (map[string]any, []string) {
 	}
 	if b.LocationID != "" {
 		p["location_id"] = b.LocationID
+	}
+	if b.ZohoPOID != "" {
+		p["purchaseorder_ids"] = []string{b.ZohoPOID}
+		warn = append(warn, "Billed against Zoho purchase order "+b.PONumber+". Billing a PO from the API is not yet tried in a Zoho test organisation: check the first one in Zoho.")
 	}
 	if adj := money.Round2(b.Amount - computed); math.Abs(adj) >= 0.01 {
 		p["adjustment"] = adj
@@ -503,14 +514,7 @@ func (s *Service) push(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
-	useKey := false
-	if fields, err := client.BillCustomFields(r.Context()); err == nil {
-		for _, f := range fields {
-			if fmt.Sprint(f["api_name"]) == conn.BillKeyField {
-				useKey = true
-			}
-		}
-	}
+	useKey := s.billKey(r.Context(), client, conn)
 	res := []pushResult{}
 	ok := 0
 	// Bills are sent one after another, not in parallel, to stay within Zoho's limits.
@@ -534,6 +538,18 @@ func (s *Service) push(w http.ResponseWriter, r *http.Request) error {
 		res = append(res, pushResult{InvoiceID: id, OK: true, Message: msg})
 	}
 	return httpjson.OK(w, map[string]any{"pushed": ok, "failed": len(in.IDs) - ok, "results": res})
+}
+
+// billKey says whether the bill custom field that keeps a bill unique (cf_purchase_desk_id) exists in Zoho.
+func (s *Service) billKey(ctx context.Context, c *zohoapi.Client, conn *zohosync.Conn) bool {
+	if fields, err := c.BillCustomFields(ctx); err == nil {
+		for _, f := range fields {
+			if fmt.Sprint(f["api_name"]) == conn.BillKeyField {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // zohoAttachLimit is the size a bill attachment is kept under (Zoho's limit is about 10 MB).
@@ -620,12 +636,25 @@ func (s *Service) pushOne(ctx context.Context, u *access.User, c *zohoapi.Client
 		// A reporting tag set in Zoho for line items only (or for the whole transaction only) refuses the tag at the
 		// other level. Zoho's tag list does not say which, so on that refusal the bill is sent again with the tag on the
 		// lines only, then on the bill only. A refused save creates nothing, so trying again is safe.
+		if b.ZohoPOID != "" {
+			alignToPO(ctx, c, p, b.ZohoPOID)
+		}
 		err = save(p)
 		for _, level := range []string{"line", "bill"} {
 			if err == nil || !tagLevelRefused(err) {
 				break
 			}
-			err = save(tagsAt(p, level))
+			p = tagsAt(p, level)
+			err = save(p)
+		}
+		// Still no common item with the Zoho PO: the bill goes on its own rather than stay stuck; the PO number is in
+		// its reference, and the history says so.
+		if err != nil && zohoapi.NoCommonItems(err) && p["purchaseorder_ids"] != nil {
+			unlinkPO(p)
+			if err = save(p); err == nil {
+				_ = auditlog.Doc(ctx, s.DB, u, "Finance", b.DocID, b.DocNumber, "Zoho", "Bill sent to Zoho without the purchase order link",
+					"Zoho found no common item between the bill and "+b.PONumber+"; link them in Zoho if needed")
+			}
 		}
 		if err != nil {
 			if tagLevelRefused(err) {

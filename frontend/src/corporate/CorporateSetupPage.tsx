@@ -1,4 +1,5 @@
 // Approvers for each department of the corporate office, and the expense heads used instead of SKUs (each mapped to a Zoho account).
+import { useActiveFilter } from '../ui/ActiveFilter'
 import { useEffect, useState } from 'react'
 import { get, post, put } from '../api/client'
 import { useLookups } from '../api/lookups'
@@ -13,9 +14,10 @@ import { Tabs } from '../ui/Tabs'
 import { useAction } from '../ui/useAction'
 import { useToast } from '../ui/Toast'
 import { useScreen } from '../screenaccess/screen'
+import { UploadModal } from '../bulkupload/UploadModal'
 
 interface Dept { id: number; name: string; l1_user_id: number; l1: string; l2_user_id: number; l2: string; backup_user_id: number | null; backup: string; active: boolean; open_requests: number }
-interface Head { id: number; name: string; active: boolean; used: number }
+interface Head { id: number; name: string; active: boolean; used: number; fin_status: string }
 
 export function CorporateSetupPage() {
   const { hasRight, me, hasStep } = useSession()
@@ -23,10 +25,12 @@ export function CorporateSetupPage() {
   const [tab, setTab] = useState<'mx' | 'eh' | 'ru'>('mx')
   const deps = useApi<Dept[]>('/corporate/departments')
   const heads = useApi<Head[]>('/corporate/expense-heads')
+  const st = useActiveFilter()
   const maps = useApi<{ expense_heads: { ref: string; account_id: string; account_active: boolean }[] }>('/zoho/mappings')
   const lists = useApi<{ accounts: { id: string; name: string; code: string; type: string; active: boolean }[] }>('/zoho/lists')
   const [edit, setEdit] = useState<Dept | 'new' | null>(null)
   const [addHead, setAddHead] = useState(false)
+  const [upload, setUpload] = useState(false)
   const [l1Only, setL1Only] = useState<number | null>(null)
   const toast = useToast()
   useEffect(() => { get('/settings').then((s: any) => setL1Only(s.corp_l1_only_below)) }, [])
@@ -35,17 +39,18 @@ export function CorporateSetupPage() {
   return (
     <>
       <div className="head"><div><h1>Corporate Setup</h1><p className="sub">Approvers for each department and the expense heads used instead of SKUs. A change applies to new requests; open requests keep the approvers they started with.</p></div>
-        <div className="acts">{ed && tab === 'mx' && <button className="btn" onClick={() => setEdit('new')}>+ Add department</button>}{ed && tab === 'eh' && <button className="btn" onClick={() => setAddHead(true)}>+ Add expense head</button>}</div></div>
+        <div className="acts">{ed && hasRight('upload') && tab !== 'ru' && <button className="btn ghost" onClick={() => setUpload(true)}>Bulk upload / edit</button>}{ed && tab === 'mx' && <button className="btn" onClick={() => setEdit('new')}>+ Add department</button>}{ed && tab === 'eh' && <button className="btn" onClick={() => setAddHead(true)}>+ Add expense head</button>}</div></div>
       <Tabs value={tab} onChange={setTab} items={[['mx', 'Approval matrix'], ['eh', 'Expense heads'], ['ru', 'Rules and Zoho']]} />
+      {tab !== 'ru' && <div className="tools">{st.control}</div>}
       {tab === 'mx' && <>
         <p className="note">Every corporate purchase and bill goes to the department's <b>L1</b> and then its <b>L2</b>. If the person raising it is the L1, it goes straight to the L2. The backup can approve at either step when the L1 or L2 is away, but never their own request.</p>
         <section className="card flush"><div className="scroll"><table><thead><tr><th>Department</th><th>L1</th><th>L2</th><th>Backup</th><th className="r">Open requests</th><th>Status</th><th></th></tr></thead>
-          <tbody>{(deps.data || []).map((d) => <tr key={d.id} className={d.active ? '' : 'dim'}><td className="id">{d.name}</td><td>{d.l1}</td><td>{d.l2}</td><td>{d.backup || 'None'}</td><td className="r">{d.open_requests}</td>
+          <tbody>{(deps.data || []).filter((d) => st.passes(d.active)).map((d) => <tr key={d.id} className={d.active ? '' : 'dim'}><td className="id">{d.name}</td><td>{d.l1}</td><td>{d.l2}</td><td>{d.backup || 'None'}</td><td className="r">{d.open_requests}</td>
             <td><ActiveToggle kind="department" id={d.id} name={d.name} active={d.active} onDone={deps.reload} /></td><td className="r">{ed && <button className="link" onClick={() => setEdit(d)}>Edit</button>}</td></tr>)}</tbody></table></div></section></>}
       {tab === 'eh' && <>
         <p className="note">Each corporate line, or each bill, picks an expense head. The head decides the Zoho account the cost is posted to; a head without an account holds the bill at the Zoho push.</p>
         <section className="card flush"><div className="scroll"><table><thead><tr><th>Expense head</th><th>Zoho account</th><th className="r">Used on</th><th>Status</th></tr></thead>
-          <tbody>{(heads.data || []).map((h) => { const m = maps.data?.expense_heads.find((x) => x.ref === String(h.id)); return <tr key={h.id} className={h.active ? '' : 'dim'}><td className="id">{h.name}</td>
+          <tbody>{(heads.data || []).filter((h) => st.passes(h.active)).map((h) => { const m = maps.data?.expense_heads.find((x) => x.ref === String(h.id)); return <tr key={h.id} className={h.active ? '' : 'dim'}><td className="id">{h.name}{h.fin_status === 'pending' && <> <Pill tone="warn">Waits for Finance</Pill></>}</td>
             <td><select disabled={!canMap} value={m?.account_id || ''} onChange={async (e) => { try { await put('/zoho/mappings', { kind: 'head', key: String(h.id), value: e.target.value }); toast('Mapping saved'); maps.reload() } catch (err: any) { toast(err.message, true) } }}>
               <option value="">Not mapped</option>{(lists.data?.accounts || []).filter((x) => x.active && ['expense', 'other_expense', 'cost_of_goods_sold', 'fixed_asset', 'other_asset'].includes(x.type)).map((x) => <option key={x.id} value={x.id}>{x.code ? x.code + ' · ' : ''}{x.name}</option>)}</select>
               {!m?.account_id && <> <Pill tone="bad">Bills held</Pill></>}</td>
@@ -61,6 +66,7 @@ export function CorporateSetupPage() {
       </div>}
       {edit && <DeptModal d={edit === 'new' ? null : edit} onClose={() => setEdit(null)} onDone={() => { setEdit(null); deps.reload() }} />}
       {addHead && <HeadModal onClose={() => setAddHead(false)} onDone={() => { setAddHead(false); heads.reload() }} />}
+      {upload && <UploadModal kind="corp_departments" title="Bulk upload or edit departments and expense heads" onClose={() => setUpload(false)} onDone={() => { deps.reload(); heads.reload() }} />}
     </>
   )
 }

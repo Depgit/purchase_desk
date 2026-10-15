@@ -2,6 +2,7 @@
 // action rights, a level on every screen (no access, view, edit), the reports it sees, whether it may add users (which
 // roles, at which properties) and, set by the System Admin only, whether it may manage roles. Someone allowed to
 // manage roles never gives a role more than their own; the server refuses it.
+import { useActiveFilter } from '../ui/ActiveFilter'
 import { useEffect, useMemo, useState } from 'react'
 import { post, put } from '../api/client'
 import { refreshLookups } from '../api/lookups'
@@ -16,7 +17,7 @@ import { Pill } from '../ui/Pill'
 import { Seg } from '../ui/Tabs'
 import { useAction } from '../ui/useAction'
 
-interface Catalogue { screens: { key: string; label: string; group: string; phase: number; view_only: boolean }[]; reports: { key: string; title: string; group: string }[]; rights: string[] }
+interface Catalogue { screens: { key: string; label: string; group: string; view_only: boolean }[]; reports: { key: string; title: string; group: string }[]; rights: string[] }
 interface Group { id: number; name: string; sort: number; roles: number }
 
 const RIGHTS: Record<string, string> = { raise: 'Raise request or bill', approve: 'Approve', issue_po: 'Issue PO', receive: 'Receive or dispatch goods', match: 'Match invoice',
@@ -37,7 +38,8 @@ export function RolesTab() {
   const [group, setGroup] = useState<Group | 'new' | null>(null)
   const a = useAction()
   const manage = !!me?.manages_roles
-  const list = roles.data || []
+  const st = useActiveFilter() // custom roles can be inactive
+  const list = (roles.data || []).filter((r) => st.passes(r.active))
   const chosen = list.find((r) => r.id === pick) || list[0]
   const reload = () => { roles.reload(); groups.reload(); refreshLookups() }
   const byGroup = (groups.data || []).map((g) => ({ g, roles: list.filter((r) => r.group_id === g.id) }))
@@ -45,9 +47,9 @@ export function RolesTab() {
   const copy = (r: Role) => a.run(() => post<{ id: number; message: string }>('/roles/' + r.id + '/copy', {}), (x) => { reload(); setPick(x.id); return x.message })
   return (
     <>
-      {manage && <div className="tools" style={{ justifyContent: 'flex-end' }}>
-        <button className="btn ghost" onClick={() => setGroup('new')}>+ Add group</button>
-        <button className="btn" onClick={() => setAdding(true)}>+ Add role</button></div>}
+      <div className="tools">{st.control}<span style={{ flex: 1 }} />
+        {manage && <><button className="btn ghost" onClick={() => setGroup('new')}>+ Add group</button>
+        <button className="btn" onClick={() => setAdding(true)}>+ Add role</button></>}</div>
       <Errors list={a.errors} />
       <div className="rolesplit">
         <section className="card rolelist">
@@ -118,7 +120,7 @@ function RoleEditor({ r, cat, groups, roles, onCopy, onSaved }: { r: Role; cat: 
 
         <h3>Action rights</h3>
         <p className="hint">What the role may do on the screens it can edit. Edit on a screen without the matching right still cannot, for example, approve.</p>
-        <Checks value={f.rights} onChange={(v) => setF({ ...f, rights: v })} options={cat.rights.map((k) => [k, RIGHTS[k] || k] as [string, string])} />
+        <Checks label="Rights" placeholder="No rights" value={f.rights} onChange={(v) => setF({ ...f, rights: v })} options={cat.rights.map((k) => [k, RIGHTS[k] || k] as [string, string])} />
 
         <div className="ahead"><h3>Screens</h3>{canEdit && <span className="acts"><span className="hint">Set all to</span>
           {LEVELS.map(([k, l]) => <button key={k} className="link" onClick={() => setAll(k)}>{l}</button>)}</span>}</div>
@@ -137,14 +139,14 @@ function RoleEditor({ r, cat, groups, roles, onCopy, onSaved }: { r: Role; cat: 
           <label className="ck"><input type="checkbox" checked={f.all} onChange={(e) => setF({ ...f, all: e.target.checked, reports: e.target.checked ? [] : cat.reports.map((x) => x.key) })} />Every report, including ones added later</label>
           {!f.all && reportGroups.map((g) => (
             <div key={g} className="field"><span>{g}</span>
-              <Checks value={f.reports} onChange={(v) => setF({ ...f, reports: v })} options={cat.reports.filter((x) => x.group === g).map((x) => [x.key, x.title] as [string, string])} /></div>))}
+              <Checks label="Reports" placeholder="Choose reports" value={f.reports} onChange={(v) => setF({ ...f, reports: v })} options={cat.reports.filter((x) => x.group === g).map((x) => [x.key, x.title] as [string, string])} /></div>))}
         </>}
 
         <h3>Special rights</h3>
         <label className="ck"><input type="checkbox" checked={f.can_users} onChange={(e) => setF({ ...f, can_users: e.target.checked })} />Can add users</label>
         {f.can_users && <div className="xpbox">
           <div className="field"><span>Roles they may give</span>
-            <Checks value={f.user_role_ids} onChange={(v) => setF({ ...f, user_role_ids: v })} options={giveable.map((x) => [x.id, x.name] as [number, string])} /></div>
+            <Checks label="Roles" placeholder="Choose roles" value={f.user_role_ids} onChange={(v) => setF({ ...f, user_role_ids: v })} options={giveable.map((x) => [x.id, x.name] as [number, string])} /></div>
           <div className="field"><span>Properties they may give access to</span>
             <Seg label="User scope" value={f.user_scope} onChange={(v) => setF({ ...f, user_scope: v })} items={[['own', 'Only their own properties'], ['any', 'Any property']]} /></div>
           <p className="hint">They see and edit only the users they added.</p>
@@ -169,7 +171,7 @@ function NewRole({ groups, onClose, onDone }: { groups: Group[]; onClose: () => 
       <Field label="Role name"><input value={f.name} onChange={(e) => setF({ ...f, name: e.target.value })} placeholder="e.g. Regional Cost Controller" /></Field>
       <Field label="Group"><select value={f.group_id || ''} onChange={(e) => setF({ ...f, group_id: +e.target.value })}>{groups.map((g) => <option key={g.id} value={g.id}>{g.name}</option>)}</select></Field>
       <Field label="Works in the flow as" hint="Decides which documents wait for this role."><select value={f.step} onChange={(e) => setF({ ...f, step: e.target.value })}>{STEPS.map(([k, v]) => <option key={k} value={k}>{v}</option>)}</select></Field>
-      <div className="field"><span>Rights</span><Checks value={f.rights} onChange={(v) => setF({ ...f, rights: v })} options={Object.entries(RIGHTS)} /></div>
+      <div className="field"><span>Rights</span><Checks label="Rights" placeholder="No rights" value={f.rights} onChange={(v) => setF({ ...f, rights: v })} options={Object.entries(RIGHTS)} /></div>
       <Errors list={a.errors} />
       <div className="btns"><button className="btn ghost" onClick={onClose}>Cancel</button>
         <button className="btn" disabled={a.busy} onClick={() => a.run(() => post<{ id: number; message: string }>('/roles', f), (x) => { onDone(x.id); return x.message })}>Add role</button></div>

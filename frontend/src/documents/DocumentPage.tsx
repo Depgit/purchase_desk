@@ -7,8 +7,9 @@ import { AdvancesCard } from '../advances/AdvancesCard'
 import type { Doc, Invoice } from '../api/types'
 import { ReasonModal, type ReasonKind } from '../approvals/ReasonModal'
 import { useSession } from '../auth/session'
-import { dateTime, day, inr, month, qty } from '../format/format'
-import { ReceivePanel } from '../goodsreceipts/ReceivePanel'
+import { dateTime, day, inr, lineValue, month, qty } from '../format/format'
+import { AdvanceFields, advanceBody, advanceProblem, newAdvance, type AdvanceDraft } from '../advances/AdvanceFields'
+import { ReceivePanel, type SentBack } from '../goodsreceipts/ReceivePanel'
 import { BalanceDuePanel } from '../balancereject/RejectBalanceForm'
 import { IssuePOPanel } from '../purchaseorders/IssuePOPanel'
 import { Errors } from '../ui/Errors'
@@ -17,8 +18,8 @@ import { Pill, statusTone } from '../ui/Pill'
 import { useAction } from '../ui/useAction'
 import { BudgetBox } from './BudgetBox'
 import { DispatchPanel } from '../warehouse/DispatchPanel'
-import { PHASE, usePhase } from '../releasephase/phase'
 import { ReceiveTransferPanel } from '../warehouse/ReceiveTransferPanel'
+import { VendorResponse, type PortalInvoice } from '../vendorportal/VendorResponse'
 
 interface Detail {
   document: Doc
@@ -27,6 +28,10 @@ interface Detail {
   actions: string[]
   raised_with: { id: number; number: string; po_number: string; vendor: string; items: number; status: string }[]
   owner_people: string[] | null
+  vendor_invoices: PortalInvoice[]
+  vendor_portal: boolean
+  /** Approving now is the last step and raises the PO (no Purchase Team step). */
+  raises_po: boolean
 }
 
 function stepper(d: Doc, invoices: Invoice[]) {
@@ -47,8 +52,6 @@ function stepper(d: Doc, invoices: Invoice[]) {
 export function DocumentPage() {
   const { id } = useParams()
   const { me } = useSession()
-  const phase = usePhase()
-  const zoho = phase.on(PHASE.zoho)
   const nav = useNavigate()
   const { data, reload, error } = useApi<Detail>(`/documents/${id}`)
   const inv = useApi<Invoice[]>(`/invoices?document_id=${id}`)
@@ -92,7 +95,9 @@ export function DocumentPage() {
       {d.status === 'WH_BACK' && <p className="note bad"><b>The warehouse could not supply this order:</b> {d.return_reason}{d.return_note ? ' · ' + d.return_note : ''}. The budget is released. Raise it again when stock is back, or ask Purchase to change the mapping.</p>}
       <div className="cols">
         <div className="stack">
-          <ActionPanel detail={data} onDone={refresh} />
+          <ActionPanel detail={data} invoices={inv.data ?? (inv.error ? [] : null)} onDone={refresh} />
+          {(d.kind === 'purchase' || d.kind === 'corp_purchase') && !d.is_transfer && d.po_number &&
+            <VendorResponse doc={d} invoices={data.vendor_invoices || []} portal={data.vendor_portal} canConfirm={data.actions.includes('vendor_confirm')} onDone={refresh} />}
           {data.actions.includes('reject_balance') && !data.actions.includes('receive') && <BalanceDuePanel doc={d} onDone={refresh} />}
           {d.kind === 'corp_bill' ? (
             <section className="card"><h2>Corporate bill</h2>
@@ -128,11 +133,11 @@ export function DocumentPage() {
           {(inv.data || []).length > 0 && (
             <section className="card flush"><h2>Invoices</h2>
               <div className="scroll"><table>
-                <thead><tr><th>Voucher</th><th>Invoice</th><th>Delivery</th><th className="r">Amount</th><th>Status</th>{zoho && <th>Zoho</th>}<th></th></tr></thead>
+                <thead><tr><th>Voucher</th><th>Invoice</th><th>Delivery</th><th className="r">Amount</th><th>Status</th><th>Zoho</th><th></th></tr></thead>
                 <tbody>{inv.data!.map((i) => (
                   <tr key={i.id}><td className="id">{i.voucher_number}</td><td>{i.invoice_number}</td><td>{i.grn_number ? `${i.grn_number} · delivery ${i.delivery_no}` : '—'}</td>
                     <td className="r">{inr(i.amount)}</td><td><Pill tone={statusTone(i.status)}>{i.status.replace('_', ' ').toLowerCase()}</Pill></td>
-                    {zoho && <td>{i.zoho_bill_id || '—'}</td>}
+                    <td>{i.zoho_bill_id || '—'}</td>
                     <td className="r">{i.file_id && <a className="link" href={fileUrl(i.file_id)} target="_blank" rel="noreferrer">File</a>} <Link className="link" to={'/invoices/' + i.id}>Open ›</Link></td></tr>))}
                 </tbody>
               </table></div>
@@ -152,7 +157,7 @@ export function DocumentPage() {
           )}
         </div>
         <div className="stack">
-          {d.status === 'PENDING' && !bill && phase.on(PHASE.budgets) && <BudgetBox doc={d} />}
+          {d.status === 'PENDING' && !bill && <BudgetBox doc={d} />}
           <section className="card"><h2>Details</h2>
             <dl className="kv">
               <dt>Property</dt><dd>{d.property}</dd><dt>Cluster</dt><dd>{d.cluster} · {d.city}</dd>
@@ -160,6 +165,7 @@ export function DocumentPage() {
               <dt>GST</dt><dd>{d.vendor_gst_registered ? 'Registered' : 'Unregistered'}</dd>
               {d.deliver_by && <><dt>Deliver by</dt><dd>{day(d.deliver_by)}</dd></>}
               {d.payment_terms && <><dt>Terms</dt><dd>{d.payment_terms}</dd></>}
+              {d.po_number && !d.is_transfer && <><dt>Zoho purchase order</dt><dd><ZohoPOState d={d} onDone={refresh} /></dd></>}
               {d.route_steps.length > 0 && <><dt>Approval route</dt><dd>{d.route_steps.map((s) => ({ l2: 'Cluster Manager', cc: 'Cost Controller', preop: 'Pre-opening Team', cl1: 'L1 ' + d.corp_l1, cl2: 'L2 ' + d.corp_l2 } as Record<string, string>)[s] || s).join(' → ')}</dd></>}
               {corp && <><dt>Department</dt><dd>{d.department}</dd>{d.corp_backup && <><dt>Backup approver</dt><dd>{d.corp_backup}</dd></>}{d.kind === 'corp_purchase' && d.remark && <><dt>Why</dt><dd>{d.remark}</dd></>}
                 {d.quote_file_id && <><dt>Quotation</dt><dd><a className="link" href={fileUrl(d.quote_file_id)} target="_blank" rel="noreferrer">Open</a></dd></>}</>}
@@ -174,14 +180,29 @@ export function DocumentPage() {
   )
 }
 
-function ActionPanel({ detail, onDone }: { detail: Detail; onDone: () => void }) {
+/** The latest delivery when Accounts sent it back for a recount, as the store entered it, to fill the receive form again. */
+function sentBack(detail: Detail, invoices: Invoice[]): SentBack | null {
+  const last = [...detail.receipts].sort((a, b) => b.id - a.id)[0]
+  if (!last?.voided) return null
+  const x = invoices.find((i) => i.id === last.invoice_id)
+  return {
+    grn: last.number, reason: last.void_reason, quantities: Object.fromEntries(last.lines.map((l) => [l.line_id, l.qty])),
+    invoice_number: x?.invoice_number || '', invoice_date: x?.invoice_date || '', amount: x?.amount || 0, invoice_file_id: x?.file_id ?? null, photo_file_ids: last.photo_file_ids,
+  }
+}
+
+function ActionPanel({ detail, invoices, onDone }: { detail: Detail; invoices: Invoice[] | null | undefined; onDone: () => void }) {
   const d = detail.document
   const acts = detail.actions
   if (d.status === 'APPROVED' && d.advance_hold_po) return <p className="note warn"><b>{d.advance_hold_po} is prepared on Advance terms and waits for Finance to approve the advance.</b> It is raised and sent to {d.vendor} only once Finance approves it (see Advance to vendor below). If Finance rejects the advance, the Purchase Team issues the PO again.</p>
-  if (acts.includes('approve')) return <ApprovePanel doc={d} canRoute={acts.includes('route')} canPreop={acts.includes('preop_approver')} onDone={onDone} />
+  if (acts.includes('approve')) return <ApprovePanel doc={d} canRoute={acts.includes('route')} canPreop={acts.includes('preop_approver')} raisesPO={!!detail.raises_po} onDone={onDone} />
   if (acts.includes('resubmit')) return <ResubmitPanel doc={d} canEdit={acts.includes('edit')} onDone={onDone} />
   if (acts.includes('issue_po')) return <IssuePOPanel doc={d} onDone={onDone} />
-  if (acts.includes('receive')) return <ReceivePanel doc={d} onDone={onDone} canReject={acts.includes('reject_balance')} />
+  if (acts.includes('receive')) {
+    if (!invoices) return <p className="sub">Loading…</p>
+    return <ReceivePanel doc={d} onDone={onDone} canReject={acts.includes('reject_balance')} sentBack={sentBack(detail, invoices)}
+      fromVendor={(detail.vendor_invoices || []).find((x) => !x.goods_receipt_id)} />
+  }
   if (acts.includes('edit') && d.status === 'PENDING') return <p className="note"><b>Nobody has approved this yet.</b> You can still change anything on it with Edit; once the {d.owner_name} acts, it is locked.</p>
   if (acts.includes('dispatch')) return <DispatchPanel doc={d} onDone={onDone} />
   if (acts.includes('receive_transfer')) return <ReceiveTransferPanel doc={d} onDone={onDone} />
@@ -193,7 +214,7 @@ function ActionPanel({ detail, onDone }: { detail: Detail; onDone: () => void })
   return <p className="note">Next step is with the <b>{owner}</b>{people?.length ? <>: {people.slice(0, 5).join(', ')}{people.length > 5 ? ` and ${people.length - 5} more` : ''}</> : ''}.</p>
 }
 
-function ApprovePanel({ doc, canRoute, canPreop, onDone }: { doc: Doc; canRoute: boolean; canPreop: boolean; onDone: () => void }) {
+function ApprovePanel({ doc, canRoute, canPreop, raisesPO, onDone }: { doc: Doc; canRoute: boolean; canPreop: boolean; raisesPO: boolean; onDone: () => void }) {
   const { me } = useSession()
   const [q, setQ] = useState<Record<number, string>>(Object.fromEntries(doc.lines.map((l) => [l.id, String(l.qty)])))
   const [note, setNote] = useState('')
@@ -201,6 +222,21 @@ function ApprovePanel({ doc, canRoute, canPreop, onDone }: { doc: Doc; canRoute:
   const [preop, setPreop] = useState(false)
   const a = useAction()
   const changed = Object.fromEntries(doc.lines.filter((l) => +q[l.id] !== l.qty).map((l) => [l.id, +q[l.id] || 0]))
+  // The last approval raises the PO: estimated rates are confirmed here, and on Advance terms the advance is asked.
+  const estimated = raisesPO ? doc.lines.filter((l) => l.qty > 0 && (l.estimated || l.rate <= 0)) : []
+  const [rates, setRates] = useState<Record<number, string>>(Object.fromEntries(estimated.map((l) => [l.id, l.rate > 0 ? String(l.rate) : ''])))
+  const advanceTerms = raisesPO && doc.vendor_terms === 'Advance'
+  const [adv, setAdv] = useState<AdvanceDraft>(newAdvance())
+  const poValue = doc.lines.reduce((t, l) => t + lineValue(q[l.id] === undefined ? l.qty : +q[l.id] || 0, estimated.some((e) => e.id === l.id) ? +rates[l.id] || 0 : l.rate, l.gst_pct), 0)
+  const approve = () => {
+    const missing = estimated.filter((l) => !(+rates[l.id] > 0) && (+q[l.id] || 0) > 0)
+    if (missing.length) return a.setErrors(missing.map((l) => `Confirm the rate for ${l.item_name}: it has no rate card.`))
+    if (advanceTerms) { const p = advanceProblem(adv, poValue, poValue); if (p) return a.setErrors([p]) }
+    a.run(() => post(`/documents/${doc.id}/approve`, {
+      quantities: changed, note,
+      ...(raisesPO ? { rates: Object.fromEntries(estimated.map((l) => [l.id, +rates[l.id] || 0])), advance: advanceTerms ? advanceBody(adv, poValue) : undefined } : {}),
+    }), (r: any) => { onDone(); return r.message })
+  }
   return (
     <section className="card act">
       <h2>{me?.is_admin ? `Decision (acting for the ${doc.owner_name})` : 'Your decision'}</h2>
@@ -211,6 +247,16 @@ function ApprovePanel({ doc, canRoute, canPreop, onDone }: { doc: Doc; canRoute:
         </div>
         <p className="hint">Change a quantity before approving, or set it to 0 to drop that item. The requester sees what changed and by whom.</p>
       </>}
+      {raisesPO && <div className="note"><b>Approving raises the PO.</b> {advanceTerms
+        ? `${doc.vendor} is on Advance terms: the PO is prepared and goes to the vendor once Finance approves the advance below.`
+        : `It goes to ${doc.vendor} at once, on its ${doc.vendor_terms || 'usual'} terms.`}</div>}
+      {estimated.length > 0 && <div className="grid2">{estimated.map((l) => (
+        <label className="field" key={l.id}><span>Rate for {l.item_name} (₹, before GST)</span>
+          <input type="number" min="0" step="0.01" inputMode="decimal" value={rates[l.id]} onChange={(e) => setRates({ ...rates, [l.id]: e.target.value })} />
+          <span className="hint">No rate card: the requester estimated {l.rate > 0 ? inr(l.rate) : 'nothing'}. The PO goes out at the rate you confirm.</span></label>))}
+      </div>}
+      {advanceTerms && <><h3>Advance to ask Finance for</h3>
+        <AdvanceFields a={adv} onChange={setAdv} poValue={poValue} room={poValue} poLabel="this PO" noFile /></>}
       <label className="field"><span>Remark (optional)</span><textarea value={note} onChange={(e) => setNote(e.target.value)} /></label>
       <Errors list={a.errors} />
       <div className="btns">
@@ -218,7 +264,7 @@ function ApprovePanel({ doc, canRoute, canPreop, onDone }: { doc: Doc; canRoute:
         <button className="btn no" onClick={() => setReason('reject')}>Reject</button>
         <button className="btn amber" onClick={() => setReason('return')}>Return for changes</button>
         {canRoute && <button className="btn ghost" onClick={() => setReason('route')}>Send to Cluster Manager</button>}
-        <button className="btn" disabled={a.busy} onClick={() => a.run(() => post(`/documents/${doc.id}/approve`, { quantities: changed, note }), (r: any) => { onDone(); return r.message })}>Approve</button>
+        <button className="btn" disabled={a.busy} onClick={approve}>{raisesPO ? 'Approve and raise PO' : 'Approve'}</button>
       </div>
       {reason && <ReasonModal kind={reason} count={1} busy={a.busy} errors={a.errors} onClose={() => setReason(null)}
         onConfirm={(r, n) => a.run(() => post(`/documents/${doc.id}/${reason}`, { reason: r, note: n, quantities: reason === 'route' ? changed : undefined }), (x: any) => { setReason(null); onDone(); return x.message })} />}
@@ -273,3 +319,19 @@ function ResubmitPanel({ doc, canEdit, onDone }: { doc: Doc; canEdit: boolean; o
   )
 }
 
+// Where the PO stands with its Zoho Books purchase order: in step, waiting to be sent, held for a mapping, or refused.
+// Finance, Purchase or the System Admin can send it at once.
+function ZohoPOState({ d, onDone }: { d: Doc; onDone: () => void }) {
+  const { hasRight, hasStep } = useSession()
+  const a = useAction()
+  const what = { create: 'to create', update: 'to update', cancel: 'to cancel' }[d.zoho_po_sync as 'create' | 'update' | 'cancel']
+  const held = d.zoho_po_error.startsWith('Held:')
+  return (
+    <>
+      {!d.zoho_po_sync && d.zoho_po_id ? <Pill tone="ok">In Zoho</Pill> : d.zoho_po_sync ? <Pill tone={d.zoho_po_error ? 'bad' : 'warn'}>{held ? 'Held' : d.zoho_po_error ? 'Refused by Zoho' : 'Waiting'} {what}</Pill> : <span className="hint">Not sent</span>}
+      {d.zoho_po_error && <><br /><span className="hint">{d.zoho_po_error}</span></>}
+      {d.zoho_po_sync && (hasStep('finance') || hasRight('issue_po')) && <><br /><button className="link" disabled={a.busy} onClick={() => a.run(() => post(`/zoho/purchase-orders/${d.id}/sync`), (r: any) => { onDone(); return r.message })}>Sync now</button></>}
+      <Errors list={a.errors} />
+    </>
+  )
+}

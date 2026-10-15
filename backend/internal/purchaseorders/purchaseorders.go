@@ -27,12 +27,14 @@ import (
 	"purchasedesk/internal/screens"
 	"purchasedesk/internal/textclean"
 	"purchasedesk/internal/uploadedfiles"
+	"purchasedesk/internal/vendorportal"
 )
 
 type Service struct {
-	DB       *pgxpool.Pool
-	Messages *messaging.Sender
-	Files    *uploadedfiles.Service
+	DB        *pgxpool.Pool
+	Messages  *messaging.Sender
+	Files     *uploadedfiles.Service
+	PortalURL string // the vendor portal sign-in, named in the PO email to a vendor that has one
 }
 
 func (s *Service) Routes(r chi.Router) {
@@ -163,12 +165,9 @@ func issueOne(ctx context.Context, tx pgx.Tx, u *access.User, id int64, rates ma
 			return "", err
 		}
 	}
-	po, ok := documents.Derived(d.Number, "PO")
-	if !ok {
-		var err error
-		if po, err = documents.NextNumber(ctx, tx, "po_seq", "PO"); err != nil {
-			return "", err
-		}
+	po, err := poNumber(ctx, tx, d)
+	if err != nil {
+		return "", err
 	}
 	note := terms + ", deliver by " + due.Format("2 Jan")
 	if hold {
@@ -184,8 +183,7 @@ func issueOne(ctx context.Context, tx pgx.Tx, u *access.User, id int64, rates ma
 		}
 		return po, auditlog.Doc(ctx, tx, u, g.Name, d.ID, d.Number, module, po+" prepared, waiting for Finance to approve the advance", note)
 	}
-	if _, err := tx.Exec(ctx, `UPDATE document SET status='PO_ISSUED', po_number=$2, po_date=now(), deliver_by=$3, payment_terms=$4, updated_at=now() WHERE id=$1`,
-		id, po, due, terms); err != nil {
+	if err := raise(ctx, tx, id, po, due, terms); err != nil {
 		return "", err
 	}
 	if len(changed) > 0 {
@@ -199,6 +197,142 @@ func issueOne(ctx context.Context, tx pgx.Tx, u *access.User, id int64, rates ma
 		module = "Corporate"
 	}
 	return po, auditlog.Doc(ctx, tx, u, g.Name, d.ID, d.Number, module, po+" issued to vendor", note)
+}
+
+// poNumber is the number the request's PO takes: PO_HZ_0001 for PR_HZ_0001, or the next PO- number for older ones.
+func poNumber(ctx context.Context, tx pgx.Tx, d *documents.Doc) (string, error) {
+	if po, ok := documents.Derived(d.Number, "PO"); ok {
+		return po, nil
+	}
+	return documents.NextNumber(ctx, tx, "po_seq", "PO")
+}
+
+// raise issues the PO on an approved request and queues the same PO for Zoho Books.
+func raise(ctx context.Context, tx pgx.Tx, id int64, po string, due time.Time, terms string) error {
+	if _, err := tx.Exec(ctx, `UPDATE document SET status='PO_ISSUED', po_number=$2, po_date=now(), deliver_by=$3, payment_terms=$4, updated_at=now() WHERE id=$1`,
+		id, po, due, terms); err != nil {
+		return err
+	}
+	return documents.QueueZohoPO(ctx, tx, id, "create")
+}
+
+// AtApproval is what the final approver gives for the PO their approval raises: the confirmed rate of each line that
+// has only an estimated rate (line id → rate), and the advance to ask Finance for when the vendor is on Advance terms.
+type AtApproval struct {
+	Rates   map[int64]float64 `json:"rates"`
+	Advance *advances.Ask     `json:"advance"`
+}
+
+// AutoResult is what Auto did: the PO raised (sent to the vendor), or the PO held for Finance with the advance asked.
+type AutoResult struct {
+	PO, Held, Advance string
+}
+
+// Auto raises the PO of a request at its final approval, by the approver as role. With no Purchase Team step (Flow
+// Settings, all) every vendor request gets its PO: on the vendor's own terms, at the approved rates (estimated lines at
+// the rate the approver confirms), for delivery days after today; on Advance terms the PO is prepared and held, and the
+// advance the approver gave goes to Finance. Otherwise only a request whose items' sub-categories all issue POs
+// automatically gets one, without estimated rates or Advance terms; the rest wait for the Purchase Team.
+func Auto(ctx context.Context, tx pgx.Tx, u *access.User, role string, d *documents.Doc, days int, all bool, a AtApproval) (AutoResult, error) {
+	var out AutoResult
+	if (d.Kind != "purchase" && d.Kind != "corp_purchase") || d.IsTransfer || d.VendorType == "warehouse" {
+		return out, nil
+	}
+	terms := d.VendorTerms
+	if !textclean.Contains(money.PaymentTerms, terms) {
+		if !all {
+			return out, nil
+		}
+		terms = "Net 30" // a vendor without terms on record
+	}
+	live := []documents.Line{}
+	for _, l := range d.Lines {
+		if l.Qty > 0 {
+			live = append(live, l)
+		}
+	}
+	if len(live) == 0 {
+		return out, nil
+	}
+	if !all {
+		if d.Kind != "purchase" || terms == money.Advance {
+			return out, nil
+		}
+		subs := []int64{}
+		for _, l := range live {
+			if l.Estimated || l.Rate <= 0 {
+				return out, nil
+			}
+			subs = append(subs, l.SubCatID)
+		}
+		var ok bool
+		if err := tx.QueryRow(ctx, `SELECT bool_and(auto_po) FROM sub_category WHERE id = ANY($1)`, subs).Scan(&ok); err != nil || !ok {
+			return out, err
+		}
+	}
+	// Estimated rates: the approver confirms each (the PO goes out at that rate).
+	errs := []string{}
+	confirmed := []string{}
+	for _, l := range live {
+		if !l.Estimated && l.Rate > 0 {
+			continue
+		}
+		rate := money.Round2(a.Rates[l.ID])
+		if rate <= 0 {
+			errs = append(errs, fmt.Sprintf("Confirm the rate for %s: it has no rate card, and approving raises the PO at that rate.", l.ItemName))
+			continue
+		}
+		if _, err := tx.Exec(ctx, `UPDATE document_line SET rate=$2, estimated=FALSE WHERE id=$1`, l.ID, rate); err != nil {
+			return out, err
+		}
+		confirmed = append(confirmed, fmt.Sprintf("%s %.2f", l.ItemName, rate))
+	}
+	if terms == money.Advance {
+		if a.Advance == nil {
+			errs = append(errs, d.Vendor+" is on Advance terms: enter the advance to ask Finance for (approving raises the PO, which waits for that advance).")
+		} else if err := a.Advance.Check(ctx, tx); err != nil {
+			errs = append(errs, err.Error())
+		}
+	}
+	if len(errs) > 0 {
+		return out, httpjson.Invalid(errs)
+	}
+	po, err := poNumber(ctx, tx, d)
+	if err != nil {
+		return out, err
+	}
+	due := clock.Today().AddDate(0, 0, days)
+	note := fmt.Sprintf("%s, deliver by %s", terms, due.Format("2 Jan"))
+	if len(confirmed) > 0 {
+		note += ". Rate confirmed: " + strings.Join(confirmed, "; ")
+	}
+	module := "Purchases"
+	if d.IsCorp() {
+		module = "Corporate"
+	}
+	if terms == money.Advance {
+		// Prepared and held: the PO is raised and sent once Finance approves the advance (advances.decide).
+		if _, err := tx.Exec(ctx, `UPDATE document SET advance_hold_po=$2, deliver_by=$3, payment_terms=$4, updated_at=now() WHERE id=$1`, d.ID, po, due, terms); err != nil {
+			return out, err
+		}
+		if err := auditlog.Doc(ctx, tx, u, role, d.ID, d.Number, module, po+" prepared at approval, waiting for Finance to approve the advance", note); err != nil {
+			return out, err
+		}
+		held, err := documents.Load(ctx, tx, d.ID, false)
+		if err != nil {
+			return out, err
+		}
+		if out.Advance, err = advances.CreateAtApproval(ctx, tx, u, role, held, *a.Advance); err != nil {
+			return out, err
+		}
+		out.Held = po
+		return out, nil
+	}
+	if err := raise(ctx, tx, d.ID, po, due, terms); err != nil {
+		return out, err
+	}
+	out.PO = po
+	return out, auditlog.Doc(ctx, tx, u, role, d.ID, d.Number, module, po+" issued to vendor at approval", note)
 }
 
 type bulkResult struct {
@@ -275,8 +409,28 @@ func (s *Service) SendPO(u *access.User, docID int64) {
 		}
 		text := flowsettings.Fill(body, map[string]string{"vendor": d.Vendor, "po_number": d.PONumber, "property": d.Property, "value": money.INR(d.Total), "due": d.DeliverBy})
 		text += "\n\nItems:\n" + strings.Join(lines, "\n")
+		if s.PortalURL != "" && vendorportal.HasLogin(ctx, s.DB, d.VendorID) {
+			text += "\n\nPlease accept this order and give its dispatch date on the Saltstayz vendor portal: " + s.PortalURL
+		}
 		if _, err := s.Messages.Email(ctx, d.VendorEmail, "Purchase order "+d.PONumber+" · "+d.Property, text, nil, d.PONumber, &u.ID); err != nil {
 			log.Printf("PO email %s: %v", d.PONumber, err)
+			return
+		}
+		if d.SentToVendor == nil {
+			if err := documents.MarkSentToVendor(ctx, s.DB, d.ID); err == nil {
+				_ = auditlog.Doc(ctx, s.DB, u, "", d.ID, d.Number, "Purchases", "Sent to vendor", d.PONumber+" emailed to "+d.VendorEmail)
+			}
 		}
 	}()
+}
+
+// Release sends the vendor a PO raised without the Purchase Team (at the final approval, or when Finance approves its
+// advance). A purchase PO waits as "Push to vendor" and reaches the vendor in its order sheet, sent by the approvers;
+// a corporate PO (not in order sheets) is emailed now.
+func (s *Service) Release(u *access.User, docID int64) {
+	var kind string
+	if err := s.DB.QueryRow(context.Background(), `SELECT kind FROM document WHERE id=$1`, docID).Scan(&kind); err == nil && kind == "purchase" {
+		return
+	}
+	s.SendPO(u, docID)
 }

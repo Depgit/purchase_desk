@@ -13,7 +13,6 @@ import (
 	"purchasedesk/internal/database"
 	"purchasedesk/internal/indiantax"
 	"purchasedesk/internal/money"
-	"purchasedesk/internal/releasephase"
 	"purchasedesk/internal/spreadsheet"
 )
 
@@ -127,6 +126,8 @@ func rulesFor(kind string) sheetRules {
 			{Column: "unit", Source: "{Ref - Pack sizes.unit}", ErrorTitle: "Unknown pack size", Error: "Pick a pack size from the list. Add a new one under Settings, Item Setup first."},
 			{Column: "gst_percent", List: gstRates(), ErrorTitle: "GST %", Error: "GST % is 0, 5, 12, 18, 28 or 40."},
 			{Column: "tds_section", List: tdsCodes(), ErrorTitle: "TDS section", Error: "Pick a TDS section from the list (service items only), or leave it blank."},
+			{Column: "stocked_at_warehouse", List: []string{"yes", "no"}, PromptTitle: "Stocked at warehouse", Prompt: "yes: every property's request for it goes to the Central Warehouse (it buys a shortfall from the vendor). no: properties order it from the vendor.", ErrorTitle: "yes or no", Error: "Pick yes or no."},
+			{Column: "daily_consumption", List: []string{"yes", "no"}, PromptTitle: "Daily consumption", Prompt: "yes: one vendor supplies it at a property. no: several vendors may be mapped, and the requester picks one.", ErrorTitle: "yes or no", Error: "Pick yes or no."},
 			rulePropsCell,
 		}}
 	case "rates":
@@ -144,8 +145,15 @@ func rulesFor(kind string) sheetRules {
 			{Column: "stage", List: []string{"live", "preopening", "warehouse", "corporate"}, ErrorTitle: "Stage", Error: "Pick live, preopening, warehouse or corporate."},
 			{Column: "property_manager_login", Source: "{Ref - Users.login}", ErrorTitle: "Unknown user", Error: "Pick a user's login from the list (see Ref - Users), or leave it blank."},
 		}}
+	case "corp_departments":
+		return sheetRules{locked: []string{"department"}, rules: []spreadsheet.Validation{
+			{Column: "l1_login", PromptTitle: "L1 approver", Prompt: "The email, mobile or employee ID the person signs in with (see Ref - Users)."},
+			{Column: "l2_login", PromptTitle: "L2 approver", Prompt: "A different person from the L1: email, mobile or employee ID (see Ref - Users)."},
+			{Column: "backup_login", PromptTitle: "Backup approver", Prompt: "Optional: a third person who can approve at either step."},
+		}}
 	case "users":
 		return sheetRules{rules: []spreadsheet.Validation{
+			{Column: "employee_id", PromptTitle: "Employee ID", Prompt: "Needed for a new user, and unique. Blank on an existing user keeps the current one."},
 			{Column: "role", Source: "{Ref - Roles.role}", ErrorTitle: "Unknown role", Error: "Pick a role from the list (see Ref - Roles)."},
 			{Column: "access", PromptTitle: "Property access", Prompt: "all, or property codes separated by ; (P01;P02), or cluster:Name;Name (see Ref - Properties and Ref - Clusters)."},
 			{Column: "categories", PromptTitle: "Category limits", Prompt: "Blank for every category, or names from Ref - Categories separated by ;"},
@@ -172,6 +180,7 @@ func rulesFor(kind string) sheetRules {
 		return sheetRules{locked: []string{"code"}, rules: []spreadsheet.Validation{
 			{Column: "code", PromptTitle: "SKU code letters", Prompt: "2 letters for a new sub-category, for example LN: its SKU codes become LN-0001 onwards. Fixed once added."},
 			{Column: "category", Source: "{Categories.category}", ErrorTitle: "Category not on the Categories sheet", Error: "Pick a category from the Categories sheet. A new category must be added there first."},
+			{Column: "auto_po", List: []string{"yes", "no"}, PromptTitle: "Issue PO automatically", Prompt: "yes: a request of only such items gets its PO at the final approval, at the mapped rate and the vendor's terms.", ErrorTitle: "yes or no", Error: "Pick yes or no."},
 		}}
 	case "budgets":
 		return sheetRules{locked: []string{"property_code", "property_name", "month", "sub_category"}}
@@ -196,7 +205,7 @@ func listsSheet(ctx context.Context, q database.Q) (spreadsheet.Sheet, error) {
 		`SELECT c.name, k.code FROM sku k JOIN sub_category sc ON sc.id=k.sub_category_id JOIN category c ON c.id=sc.category_id WHERE k.active ORDER BY c.name, k.code`,
 		`SELECT t.name, o.name FROM zoho_tag_option o JOIN zoho_tag t ON t.tag_id=o.tag_id WHERE o.active AND t.active ORDER BY t.name, o.name`,
 		`SELECT name FROM zoho_tag WHERE active ORDER BY name`,
-		fmt.Sprintf(`SELECT code, legal_name FROM vendor WHERE active AND (vendor_type='goods' OR (vendor_type='warehouse' AND %v)) ORDER BY code`, releasephase.VendorTypeOn("warehouse")),
+		`SELECT code, legal_name FROM vendor WHERE active AND vendor_type IN ('goods','warehouse') ORDER BY code`,
 		`SELECT ` + itemLabelSQL + `, c.name, sc.name, ` + fmt.Sprintf(scopeSQL, "k.scope='all'", "k.cluster_ids", "k.property_ids") + `
 			FROM sku k JOIN brand b ON b.id=k.brand_id JOIN pack_size ps ON ps.id=k.pack_size_id JOIN sub_category sc ON sc.id=k.sub_category_id JOIN category c ON c.id=sc.category_id
 			WHERE k.active ORDER BY c.name, sc.name, 1`,

@@ -13,6 +13,8 @@ import (
 	"purchasedesk/internal/database"
 	"purchasedesk/internal/httpjson"
 	"purchasedesk/internal/money"
+	"purchasedesk/internal/screens"
+	"purchasedesk/internal/zohowake"
 )
 
 // Document statuses.
@@ -113,33 +115,44 @@ type Doc struct {
 	PaymentTerms  string     `json:"payment_terms"`
 	ClosedShort   bool       `json:"po_closed_short"`
 	AdvanceHold   string     `json:"advance_hold_po"` // set while the PO waits for Finance to approve its advance: the PO number it will get
-	IsTransfer    bool       `json:"is_transfer"`
-	DispatchedAt  *time.Time `json:"dispatched_at"`
-	WaitUntil     string     `json:"wait_until"`
-	WaitNote      string     `json:"wait_note"`
-	BillTypeID    *int64     `json:"bill_type_id"`
-	BillType      string     `json:"bill_type"`
-	BillSection   string     `json:"bill_section"`
-	PeriodStart   string     `json:"period_start"`
-	Months        int        `json:"months"`
-	Remark        string     `json:"remark"`
-	CreatedAt     time.Time  `json:"created_at"`
-	ParentID      *int64     `json:"parent_id"`
-	TransferRecv  *time.Time `json:"transfer_received_at"`
-	DepartmentID  *int64     `json:"department_id"`
-	Department    string     `json:"department"`
-	CorpL1        *int64     `json:"corp_l1_user_id"`
-	CorpL1Name    string     `json:"corp_l1"`
-	CorpL2        *int64     `json:"corp_l2_user_id"`
-	CorpL2Name    string     `json:"corp_l2"`
-	CorpBackup    *int64     `json:"corp_backup_user_id"`
-	CorpBackupNm  string     `json:"corp_backup"`
-	HeadID        *int64     `json:"expense_head_id"`
-	Head          string     `json:"expense_head"`
-	QuoteFileID   *int64     `json:"quote_file_id"`
-	Delivery      *Delivery  `json:"delivery"`
-	Lines         []Line     `json:"lines"`
-	Total         float64    `json:"total"`
+	ZohoPOID      string     `json:"zoho_po_id"`      // the Zoho Books purchase order kept in step with this PO
+	ZohoPOSync    string     `json:"zoho_po_sync"`    // what is still to send to Zoho: create, update, cancel, or "" when in step
+	ZohoPOError   string     `json:"zoho_po_error"`
+	VendorStatus  string     `json:"vendor_status"` // what the vendor did with the PO: "", accepted (awaiting delivery) or declined
+	VendorActedAt *time.Time `json:"vendor_acted_at"`
+	VendorNote    string     `json:"vendor_note"`
+	DispatchDate  string     `json:"dispatch_date"`     // when the vendor says it will dispatch
+	SentToVendor  *time.Time `json:"sent_to_vendor_at"` // when the PO reached the vendor (order sheet or PO email); nil = still to push
+	// ReceiptByRequester (Flow Settings): goods at a live property are received by the person who raised the request,
+	// so the receipt step is theirs; anyone with the Receiving / Store role there can still receive.
+	ReceiptByRequester bool       `json:"-"`
+	IsTransfer         bool       `json:"is_transfer"`
+	DispatchedAt       *time.Time `json:"dispatched_at"`
+	WaitUntil          string     `json:"wait_until"`
+	WaitNote           string     `json:"wait_note"`
+	BillTypeID         *int64     `json:"bill_type_id"`
+	BillType           string     `json:"bill_type"`
+	BillSection        string     `json:"bill_section"`
+	PeriodStart        string     `json:"period_start"`
+	Months             int        `json:"months"`
+	Remark             string     `json:"remark"`
+	CreatedAt          time.Time  `json:"created_at"`
+	ParentID           *int64     `json:"parent_id"`
+	TransferRecv       *time.Time `json:"transfer_received_at"`
+	DepartmentID       *int64     `json:"department_id"`
+	Department         string     `json:"department"`
+	CorpL1             *int64     `json:"corp_l1_user_id"`
+	CorpL1Name         string     `json:"corp_l1"`
+	CorpL2             *int64     `json:"corp_l2_user_id"`
+	CorpL2Name         string     `json:"corp_l2"`
+	CorpBackup         *int64     `json:"corp_backup_user_id"`
+	CorpBackupNm       string     `json:"corp_backup"`
+	HeadID             *int64     `json:"expense_head_id"`
+	Head               string     `json:"expense_head"`
+	QuoteFileID        *int64     `json:"quote_file_id"`
+	Delivery           *Delivery  `json:"delivery"`
+	Lines              []Line     `json:"lines"`
+	Total              float64    `json:"total"`
 }
 
 // Delivery is the schedule of a warehouse transfer.
@@ -166,7 +179,9 @@ const selectDoc = `SELECT d.id, d.number, d.kind, d.property_id, p.name, p.kind,
 	d.requester_id, ru.name, coalesce(ru.mobile,''), d.requester_step, d.status, d.route_steps, d.step_idx,
 	d.event_reason, d.event_note, d.routed_reason, d.routed_note, d.cm_approved_at, d.preop_user_id, coalesce(pu.name,''),
 	d.return_reason, d.return_note, d.modified_note, d.modified_by, d.modified_at, d.approved_at,
-	coalesce(d.po_number,''), d.po_date, coalesce(d.deliver_by::text,''), d.payment_terms, d.po_closed_short, coalesce(d.advance_hold_po,''),
+	coalesce(d.po_number,''), d.po_date, coalesce(d.deliver_by::text,''), d.payment_terms, d.po_closed_short, coalesce(d.advance_hold_po,''), coalesce(d.zoho_po_id,''), d.zoho_po_sync, d.zoho_po_error,
+	d.vendor_status, d.vendor_acted_at, d.vendor_note, coalesce(d.dispatch_date::text,''), d.sent_to_vendor_at,
+	coalesce((SELECT value='true'::jsonb FROM setting WHERE key='receipt_by_requester'), false),
 	d.is_transfer, d.dispatched_at, coalesce(d.wait_until::text,''), d.wait_note,
 	d.bill_type_id, coalesce(bt.name,''), coalesce(bt.section,''), coalesce(to_char(d.period_start,'YYYY-MM'),''), coalesce(d.months,0), d.remark, d.created_at,
 	d.parent_id, d.transfer_received_at, d.department_id, coalesce(cd.name,''), d.corp_l1_user_id, coalesce(u1.name,''), d.corp_l2_user_id, coalesce(u2.name,''),
@@ -187,7 +202,8 @@ func scanDoc(row pgx.Row) (*Doc, error) {
 		&d.RequesterID, &d.Requester, &d.RequesterMob, &d.RequesterStep, &d.Status, &d.RouteSteps, &d.StepIdx,
 		&d.EventReason, &d.EventNote, &d.RoutedReason, &d.RoutedNote, &d.CMApprovedAt, &d.PreopUserID, &d.PreopUser,
 		&d.ReturnReason, &d.ReturnNote, &d.ModifiedNote, &d.ModifiedBy, &d.ModifiedAt, &d.ApprovedAt,
-		&d.PONumber, &d.PODate, &d.DeliverBy, &d.PaymentTerms, &d.ClosedShort, &d.AdvanceHold,
+		&d.PONumber, &d.PODate, &d.DeliverBy, &d.PaymentTerms, &d.ClosedShort, &d.AdvanceHold, &d.ZohoPOID, &d.ZohoPOSync, &d.ZohoPOError,
+		&d.VendorStatus, &d.VendorActedAt, &d.VendorNote, &d.DispatchDate, &d.SentToVendor, &d.ReceiptByRequester,
 		&d.IsTransfer, &d.DispatchedAt, &d.WaitUntil, &d.WaitNote,
 		&d.BillTypeID, &d.BillType, &d.BillSection, &d.PeriodStart, &d.Months, &d.Remark, &d.CreatedAt,
 		&d.ParentID, &d.TransferRecv, &d.DepartmentID, &d.Department, &d.CorpL1, &d.CorpL1Name, &d.CorpL2, &d.CorpL2Name,
@@ -363,11 +379,17 @@ func (d *Doc) Owner() string {
 		if d.Kind == "corp_purchase" {
 			return "requester" // the corporate requester confirms receipt and enters the invoice
 		}
-		if d.IsTransfer || d.PropertyKind == "warehouse" || d.PropertyKind == "preopening" {
+		if d.IsTransfer || d.PropertyKind == "preopening" || (d.PropertyKind == "warehouse" && !d.ReceiptByRequester) {
 			return "wh"
+		}
+		if d.ReceiptByRequester {
+			return "requester"
 		}
 		return "store"
 	case WHSent:
+		if d.ReceiptByRequester {
+			return "requester"
+		}
 		return "store"
 	}
 	return ""
@@ -377,7 +399,7 @@ var StepNames = map[string]string{
 	"staff": "Property Staff", "l1": "Property Manager", "l2": "Cluster Manager", "cc": "Cost Controller", "purchase": "Purchase Team",
 	"store": "Receiving / Store", "ap": "Accounts Payable", "finance": "Finance", "wh": "Warehouse Manager", "preop": "Pre-opening Team",
 	"creq": "Corporate Requester", "dh": "Department Head", "capp": "Corporate Approver", "admin": "System Admin", "requester": "Requester",
-	"cl1": "Department L1", "cl2": "Department L2",
+	"cl1": "Department L1", "cl2": "Department L2", "chef": "Property Chef", "hchef": "Head Chef", "whs": "Warehouse Staff",
 }
 
 // StatusLabel is the plain-English status shown in lists.
@@ -425,7 +447,19 @@ func (d *Doc) StatusLabel() string {
 		if d.Kind == "corp_purchase" {
 			return "PO issued, receipt to confirm"
 		}
-		return "Awaiting delivery"
+		switch d.VendorStatus {
+		case "declined":
+			return "Declined by vendor"
+		case "accepted":
+			if d.DispatchDate != "" {
+				return "Awaiting delivery, dispatch " + d.DispatchDate
+			}
+			return "Awaiting delivery"
+		}
+		if d.SentToVendor == nil {
+			return "Push to vendor" // raised, but not yet sent in a vendor order sheet
+		}
+		return "Sent to vendor"
 	case Received:
 		return "Received, invoice in progress"
 	case Closed:
@@ -484,6 +518,69 @@ func CanAct(u *access.User, d *Doc, step, right string) *access.Grant {
 	return g
 }
 
+// Receiver returns the role a user records a delivery on this vendor PO as, or nil: the receiving step (the store, or
+// the corporate requester), or the person who raised a purchase request, on their own PO, when their role at the
+// property may edit Goods Receipts.
+func Receiver(u *access.User, d *Doc) *access.Grant {
+	if d.Status != POIssued || d.IsTransfer {
+		return nil
+	}
+	if d.Kind == "corp_purchase" {
+		return CanAct(u, d, "requester", "") // the corporate requester confirms receipt
+	}
+	return receiver(u, d)
+}
+
+// TransferReceiver returns the role a user receives a warehouse delivery (in transit) at a property as, or nil: the
+// same people as for a vendor PO.
+func TransferReceiver(u *access.User, d *Doc) *access.Grant {
+	if d.Status != WHSent || !d.IsTransfer {
+		return nil
+	}
+	return receiver(u, d)
+}
+
+// receiver: the Warehouse Manager at a warehouse or pre-opening property; elsewhere anyone with the Receiving / Store
+// role there, and the person who raised the request when their role there may edit Goods Receipts (Flow Settings
+// decides whose step it is: the requester's or the store's).
+func receiver(u *access.User, d *Doc) *access.Grant {
+	if !d.IsTransfer && (d.PropertyKind == "warehouse" || d.PropertyKind == "preopening") {
+		if g := CanAct(u, d, "wh", access.Receive); g != nil {
+			return g
+		}
+		if g := CanAct(u, d, "whs", access.Receive); g != nil && d.PropertyKind == "warehouse" {
+			return g // Warehouse Staff receive at the warehouse
+		}
+	} else if g := CanAct(u, d, "store", access.Receive); g != nil {
+		return g
+	}
+	if d.Kind == "purchase" && u.ID == d.RequesterID && u.Level("goods_receipts", d.PropertyID, d.ClusterID) >= screens.Edit {
+		return &access.Grant{Name: "Requester", Step: "requester"}
+	}
+	return nil
+}
+
+// MarkSentToVendor records that a PO reached its vendor (the PO email, or a vendor order sheet); the first time counts.
+func MarkSentToVendor(ctx context.Context, q database.Q, docID int64) error {
+	_, err := q.Exec(ctx, `UPDATE document SET sent_to_vendor_at=now() WHERE id=$1 AND sent_to_vendor_at IS NULL`, docID)
+	return err
+}
+
+// POKeeper returns the role a user looks after a vendor PO as, or nil: the Purchase Team where it still works, or,
+// with no Purchase Team step, any approver on the request's route (they raised the PO by approving it). They confirm
+// it for the vendor and sort out a vendor's decline.
+func POKeeper(u *access.User, d *Doc) *access.Grant {
+	if g := CanAct(u, d, "purchase", access.IssuePO); g != nil {
+		return g
+	}
+	for _, step := range d.RouteSteps {
+		if g := CanAct(u, d, step, access.Approve); g != nil {
+			return g
+		}
+	}
+	return nil
+}
+
 // NextNumber returns the next number from a sequence with a prefix, for example PR-1001.
 func NextNumber(ctx context.Context, q database.Q, seq, prefix string) (string, error) {
 	var n int64
@@ -505,8 +602,9 @@ func CloseIfPaid(ctx context.Context, q database.Q, docID int64) error {
 // ReleaseHeldPO issues a PO that was waiting for Finance to approve its advance: it takes the number it was held
 // under. It returns that number, or "" when the document was not on hold.
 func ReleaseHeldPO(ctx context.Context, q database.Q, docID int64) (string, error) {
+	zohowake.Now() // something may now go to Zoho
 	var po string
-	err := q.QueryRow(ctx, `UPDATE document SET status='PO_ISSUED', po_number=advance_hold_po, po_date=now(), advance_hold_po=NULL, updated_at=now()
+	err := q.QueryRow(ctx, `UPDATE document SET status='PO_ISSUED', po_number=advance_hold_po, po_date=now(), advance_hold_po=NULL, zoho_po_sync='create', zoho_po_error='', updated_at=now()
 		WHERE id=$1 AND status='APPROVED' AND advance_hold_po IS NOT NULL RETURNING po_number`, docID).Scan(&po)
 	if err == pgx.ErrNoRows {
 		return "", nil
@@ -524,4 +622,18 @@ func ClearHeldPO(ctx context.Context, q database.Q, docID int64) (string, error)
 		return "", nil
 	}
 	return po, err
+}
+
+// QueueZohoPO records that a vendor PO must be sent to Zoho Books (action create, update or cancel); the zoho-purchase-
+// orders job sends it. A change before the PO ever reached Zoho is sent as the create (which carries the latest
+// state), and a cancel of a PO Zoho never had is dropped. Warehouse transfers are internal and never go to Zoho.
+func QueueZohoPO(ctx context.Context, q database.Q, docID int64, action string) error {
+	zohowake.Now() // something may now go to Zoho
+	_, err := q.Exec(ctx, `UPDATE document SET zoho_po_sync = CASE
+			WHEN $2='create' THEN 'create'
+			WHEN zoho_po_id IS NULL AND $2='cancel' THEN ''
+			WHEN zoho_po_id IS NULL THEN 'create'
+			ELSE $2 END,
+		zoho_po_error='' WHERE id=$1 AND kind IN ('purchase','corp_purchase') AND NOT is_transfer AND po_number IS NOT NULL AND po_number<>''`, docID, action)
+	return err
 }

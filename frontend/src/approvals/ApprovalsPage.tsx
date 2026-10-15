@@ -11,7 +11,6 @@ import { day, inr, month, qty } from '../format/format'
 import { Pill } from '../ui/Pill'
 import { Seg } from '../ui/Tabs'
 import { useAction } from '../ui/useAction'
-import { PHASE, usePhase } from '../releasephase/phase'
 import { ReasonModal, type ReasonKind } from './ReasonModal'
 import { useScreen } from '../screenaccess/screen'
 
@@ -41,7 +40,6 @@ function withEdits(d: Doc, e?: Record<number, number>) {
 export function ApprovalsPage() {
   const { hasStep, me } = useSession()
   const sc = useScreen('approvals')
-  const bud = usePhase().on(PHASE.budgets) // budget columns and filters open with budgets in phase 3
   const l = useLookups()
   const { data, reload, loading } = useApi<Doc[]>('/approvals')
   const [g, setG] = useState<GroupBy>('property')
@@ -101,7 +99,7 @@ export function ApprovalsPage() {
 
   const table = (docs: Doc[]) => (
     <div className="scroll"><table>
-      <thead><tr><th></th><th>Request</th>{g !== 'property' && <th>Property</th>}<th>Item</th><th className="r">Quantity</th><th className="r">Amount</th>{bud && <th>Budget</th>}<th></th></tr></thead>
+      <thead><tr><th></th><th>Request</th>{g !== 'property' && <th>Property</th>}<th>Item</th><th className="r">Quantity</th><th className="r">Amount</th><th>Budget</th><th></th></tr></thead>
       <tbody>{docs.map((d) => {
         const one = d.kind === 'purchase' && d.lines.length === 1
         const e = edits[d.id]
@@ -119,9 +117,9 @@ export function ApprovalsPage() {
               <br /><span className="hint">{d.lines[0].pack_size}{e ? ' · was ' + qty(d.lines[0].qty) : ''}</span></>
               : d.kind === 'bill' ? '—' : <button className="btn ghost small" onClick={() => { const s = new Set(open); s.has(d.id) ? s.delete(d.id) : s.add(d.id); setOpen(s) }}>{open.has(d.id) ? '▾ Hide items' : '▸ Review items'}</button>}</td>
             <td className="r">{inr(withEdits(d, e))}</td>
-            {bud && <td>{d.kind === 'bill' ? (d.bill_flags.length ? d.bill_flags.map((x) => <Pill key={x} tone="warn">{x}</Pill>) : <Pill>Bill</Pill>)
+            <td>{d.kind === 'bill' ? (d.bill_flags.length ? d.bill_flags.map((x) => <Pill key={x} tone="warn">{x}</Pill>) : <Pill>Bill</Pill>)
               : d.property_kind !== 'live' ? <Pill tone="off">No monthly budget</Pill>
-              : d.over_month > 0 ? <Pill tone="bad">Over month by {inr(d.over_month)}</Pill> : d.over_week > 0 ? <Pill tone="warn">Over week by {inr(d.over_week)}</Pill> : <Pill tone="ok">Within</Pill>}</td>}
+              : d.over_month > 0 ? <Pill tone="bad">Over month by {inr(d.over_month)}</Pill> : d.over_week > 0 ? <Pill tone="warn">Over week by {inr(d.over_week)}</Pill> : <Pill tone="ok">Within</Pill>}</td>
             <td><div className="tools" style={{ justifyContent: 'flex-end', flexWrap: 'nowrap' }}>
               <button className="link" onClick={() => setReason({ kind: 'reject', ids: [d.id] })}>Reject</button>
               <button className="link" onClick={() => setReason({ kind: 'return', ids: [d.id] })}>Return</button>
@@ -147,7 +145,7 @@ export function ApprovalsPage() {
         {fsel('city', [['', 'All cities'], ...(l?.cities || []).map((c) => [c.name, c.name] as [string, string])], 'City')}
         {fsel('cluster', [['', 'All clusters'], ...(l?.clusters || []).map((c) => [String(c.id), c.name] as [string, string])], 'Cluster')}
         {fsel('cat', [['', 'All categories'], ...(l?.categories || []).map((c) => [c.name, c.name] as [string, string]), ['Utilities & AMC', 'Utilities & AMC']], 'Category')}
-        {bud && fsel('budget', [['', 'Any budget status'], ['in', 'Within budget'], ['wk', 'Over week budget'], ['mo', 'Over month budget']], 'Budget')}
+        {fsel('budget', [['', 'Any budget status'], ['in', 'Within budget'], ['wk', 'Over week budget'], ['mo', 'Over month budget']], 'Budget')}
         {fsel('type', [['', 'All requests'], ['multi', 'More than one item'], ['evt', 'Event requests'], ['cm', 'Cluster Manager approved'], ['rt', 'Sent by Cost Controller'], ['bill', 'Utility and AMC bills']], 'Type')}
         {fsel('raised', [['', 'Raised any day'], ['today', 'Raised today'], ['yday', 'Raised yesterday'], ['old', 'Waiting more than a day'], ['d7', 'Last 7 days']], 'Raised')}
         <input type="search" placeholder="Search item, vendor, request" value={f.q} onChange={(e) => setF({ ...f, q: e.target.value })} aria-label="Search" />
@@ -159,12 +157,12 @@ export function ApprovalsPage() {
               <input type="checkbox" aria-label={'Select all in ' + x.name} checked={x.docs.every((d) => sel.has(d.id))} onChange={() => {
                 const s = new Set(sel); const all = x.docs.every((d) => s.has(d.id)); x.docs.forEach((d) => all ? s.delete(d.id) : s.add(d.id)); setSel(s)
               }} />
-              <button onClick={() => setCur(x.key)}><span>{x.name}<small>{x.docs.length} · {inr(x.sum)}</small></span>{bud && (x.flagged ? <Pill tone="bad">{x.flagged} over</Pill> : <Pill tone="ok">All within</Pill>)}</button>
+              <button onClick={() => setCur(x.key)}><span>{x.name}<small>{x.docs.length} · {inr(x.sum)}</small></span>{x.flagged ? <Pill tone="bad">{x.flagged} over</Pill> : <Pill tone="ok">All within</Pill>}</button>
             </div>))}</section>}
           <section className="card flush">
             <div className="shead" style={{ background: 'none', borderTop: 0 }}><div style={{ flex: 1 }}><h2>{g === 'none' ? 'All requests' : current?.name}</h2>
               <p className="sub">{shown.length} requests · {inr(shown.reduce((t, d) => t + withEdits(d, edits[d.id]), 0))}</p></div></div>
-            {ok.length > 0 && <><div className="shead"><b>{bud ? 'Within budget' : 'Requests'} · {ok.length}</b><button className="btn" disabled={a.busy} onClick={() => bulk('approve', ok.map((d) => d.id))}>Approve all {ok.length}</button></div>{table(ok)}</>}
+            {ok.length > 0 && <><div className="shead"><b>Within budget · {ok.length}</b><button className="btn" disabled={a.busy} onClick={() => bulk('approve', ok.map((d) => d.id))}>Approve all {ok.length}</button></div>{table(ok)}</>}
             {flagged.length > 0 && <><div className="shead"><b>Needs a closer look · {flagged.length}</b></div>{table(flagged)}</>}
             <p className="hint" style={{ padding: '10px 14px' }}>Change a quantity before approving and the requester is told. "To CM" sends a request to the Cluster Manager; if approved there it goes straight to the PO stage.</p>
           </section>

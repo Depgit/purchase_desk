@@ -28,7 +28,7 @@ import (
 	"purchasedesk/internal/httpjson"
 	"purchasedesk/internal/messaging"
 	"purchasedesk/internal/money"
-	"purchasedesk/internal/releasephase"
+	"purchasedesk/internal/purchaseorders"
 	"purchasedesk/internal/screens"
 )
 
@@ -36,6 +36,8 @@ type Service struct {
 	DB       *pgxpool.Pool
 	Guard    *access.Guard
 	Messages *messaging.Sender
+	// POSent emails the vendor a PO issued automatically at approval (purchaseorders.SendPO).
+	POSent func(u *access.User, docID int64)
 }
 
 func (s *Service) Routes(r chi.Router) {
@@ -48,8 +50,14 @@ func (s *Service) Routes(r chi.Router) {
 }
 
 // Chain returns the approval steps for a new purchase request.
-func Chain(st flowsettings.Settings, propertyKind string, vendorIsWarehouse, event bool, amount float64) []string {
-	if propertyKind == "warehouse" || propertyKind == "preopening" {
+func Chain(st flowsettings.Settings, propertyKind string, vendorIsWarehouse, event bool, amount float64, requesterStep string) []string {
+	if propertyKind == "warehouse" {
+		if requesterStep == "wh" {
+			return []string{"cc"} // the Warehouse Manager's own purchase (a shortfall) goes to the Cost Controller
+		}
+		return []string{"wh"} // raised by Warehouse Staff, approved by the Warehouse Manager
+	}
+	if propertyKind == "preopening" {
 		return []string{"preop"}
 	}
 	if vendorIsWarehouse && !st.WHApproval {
@@ -93,6 +101,9 @@ type Decision struct {
 	Quantities map[int64]float64 `json:"quantities"` // line id → new quantity (approve only)
 	Reason     string            `json:"reason"`
 	Note       string            `json:"note"`
+	// At the final approval, what the PO it raises needs: confirmed rates of estimated lines, and the advance when the
+	// vendor is on Advance terms.
+	purchaseorders.AtApproval
 }
 
 type outcome struct {
@@ -100,6 +111,7 @@ type outcome struct {
 	message string
 	notify  string // template code to send the requester, if any
 	reason  string
+	autoPO  string // the PO issued automatically at the final approval
 }
 
 // Act applies one decision inside a transaction.
@@ -194,8 +206,18 @@ func (s *Service) Act(ctx context.Context, tx pgx.Tx, u *access.User, st flowset
 		d.StepIdx++
 		out.message = d.Number + " approved"
 		if d.StepIdx >= len(d.RouteSteps) {
-			if err := Finalize(ctx, tx, u, d); err != nil {
+			res, err := Finalize(ctx, tx, u, g.Name, d, dec.AtApproval)
+			if err != nil {
 				return out, err
+			}
+			out.autoPO = res.PO
+			switch {
+			case res.PO != "" && d.Kind == "purchase":
+				out.message += ", " + res.PO + " raised: push it to the vendor with the vendor order sheet"
+			case res.PO != "":
+				out.message += ", " + res.PO + " issued to the vendor"
+			case res.Held != "":
+				out.message += ". " + res.Advance + "; " + res.Held + " goes to the vendor once Finance approves it"
 			}
 			out.notify = "ok"
 			if changed {
@@ -256,19 +278,21 @@ func applyQuantities(ctx context.Context, tx pgx.Tx, u *access.User, st flowsett
 }
 
 // Finalize runs when the last approver approves: bills go to Finance; purchases count against the budget,
-// and an order on the warehouse becomes a transfer order (WT number) in the dispatch queue.
-func Finalize(ctx context.Context, tx pgx.Tx, u *access.User, d *documents.Doc) error {
+// an order on the warehouse becomes a transfer order (WT number) in the dispatch queue, and a vendor request gets its
+// PO (purchaseorders.Auto: every request with no Purchase Team step, else per sub-category). role is the approver's.
+func Finalize(ctx context.Context, tx pgx.Tx, u *access.User, role string, d *documents.Doc, a purchaseorders.AtApproval) (purchaseorders.AutoResult, error) {
+	var none purchaseorders.AutoResult
 	module := moduleOf(d)
 	if d.IsBill() {
 		if _, err := tx.Exec(ctx, `UPDATE document SET status='APPROVED', approved_at=now(), updated_at=now() WHERE id=$1`, d.ID); err != nil {
-			return err
+			return none, err
 		}
 		_, err := tx.Exec(ctx, `UPDATE invoice SET status='MATCHED', matched_at=now(), matched_by=$2 WHERE document_id=$1 AND status='AWAITING'`, d.ID, u.ID)
-		return err
+		return none, err
 	}
 	if !d.NoBudget() {
 		if err := budgets.Commit(ctx, tx, d.PropertyID, d.ID, d.SubCatTotals()); err != nil {
-			return err
+			return none, err
 		}
 	}
 	if d.VendorType == "warehouse" {
@@ -276,17 +300,23 @@ func Finalize(ctx context.Context, tx pgx.Tx, u *access.User, d *documents.Doc) 
 		if !ok {
 			var err error
 			if wt, err = documents.NextNumber(ctx, tx, "wt_seq", "WT"); err != nil {
-				return err
+				return none, err
 			}
 		}
 		if _, err := tx.Exec(ctx, `UPDATE document SET status='PO_ISSUED', approved_at=now(), is_transfer=TRUE, po_number=$2, po_date=now(),
 			deliver_by=current_date+1, payment_terms='Internal transfer', updated_at=now() WHERE id=$1`, d.ID, wt); err != nil {
-			return err
+			return none, err
 		}
-		return auditlog.Doc(ctx, tx, u, "System", d.ID, d.Number, module, wt+" raised on the warehouse", "")
+		return none, auditlog.Doc(ctx, tx, u, "System", d.ID, d.Number, module, wt+" raised on the warehouse", "")
 	}
-	_, err := tx.Exec(ctx, `UPDATE document SET status='APPROVED', approved_at=now(), updated_at=now() WHERE id=$1`, d.ID)
-	return err
+	if _, err := tx.Exec(ctx, `UPDATE document SET status='APPROVED', approved_at=now(), updated_at=now() WHERE id=$1`, d.ID); err != nil {
+		return none, err
+	}
+	st, err := flowsettings.Load(ctx, tx)
+	if err != nil {
+		return none, err
+	}
+	return purchaseorders.Auto(ctx, tx, u, role, d, st.AutoPODays, st.POOnApproval, a)
 }
 
 func (s *Service) single(action string) httpjson.Handler {
@@ -314,6 +344,7 @@ func (s *Service) single(action string) httpjson.Handler {
 			return err
 		}
 		s.notify(u, out)
+		s.sendPO(u, out)
 		return httpjson.OK(w, map[string]string{"message": out.message})
 	}
 }
@@ -366,9 +397,17 @@ func (s *Service) bulk(w http.ResponseWriter, r *http.Request) error {
 		}
 		ok++
 		s.notify(u, out)
+		s.sendPO(u, out)
 		res = append(res, bulkResult{ID: id, OK: true, Message: out.message})
 	}
 	return httpjson.OK(w, map[string]any{"done": ok, "failed": len(in.IDs) - ok, "results": res})
+}
+
+// sendPO emails the vendor a PO issued automatically at the approval. It runs after the save.
+func (s *Service) sendPO(u *access.User, out outcome) {
+	if out.autoPO != "" && s.POSent != nil {
+		s.POSent(u, out.docID)
+	}
 }
 
 // notify tells the requester on WhatsApp, using the Admin's message templates. It runs after the save.
@@ -449,7 +488,7 @@ func Enrich(ctx context.Context, q database.Q, st flowsettings.Settings, docs []
 		if d.IsBill() {
 			row.BillFlags, row.PrevBill = BillFlags(ctx, q, st, d)
 			row.Flagged = len(row.BillFlags) > 0
-		} else if !d.NoBudget() && d.Status == documents.Pending && releasephase.On(releasephase.Budgets) {
+		} else if !d.NoBudget() && d.Status == documents.Pending {
 			m, err := cache.Get(ctx, d.PropertyID)
 			if err != nil {
 				return nil, err

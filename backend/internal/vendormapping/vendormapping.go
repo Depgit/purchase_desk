@@ -1,6 +1,7 @@
 // Package vendormapping decides which vendor supplies each item at each property, and at what rate.
-// Rules: at a property a SKU has exactly one vendor; a SKU mapping wins over a sub-category mapping;
-// two vendors cannot hold the same SKU, or the same sub-category, at the same property.
+// Rules: at a property a daily consumption SKU has exactly one vendor; a SKU mapping wins over a sub-category mapping;
+// two vendors cannot hold the same daily SKU, or the same sub-category, at the same property. A SKU that is not for
+// daily consumption may be mapped to several vendors at a property: the requester picks one (Options).
 // It also keeps the vendor rate cards (price lists with validity, history kept).
 package vendormapping
 
@@ -22,7 +23,6 @@ import (
 	"purchasedesk/internal/database"
 	"purchasedesk/internal/httpjson"
 	"purchasedesk/internal/indiantax"
-	"purchasedesk/internal/releasephase"
 )
 
 type Service struct{ DB *pgxpool.Pool }
@@ -64,11 +64,31 @@ type Source struct {
 	Orderable   bool     `json:"orderable"`
 	Status      string   `json:"status"` // ok, none (not mapped), bad (mapped but not usable)
 	Problem     string   `json:"problem"`
+	DailyUse    bool     `json:"daily_use"`
+	WHStocked   bool     `json:"wh_stocked"` // stocked at the Central Warehouse: supplied from there at a property
+	propKind    string
+	// Options are the vendors the requester may pick from for an item that is not for daily consumption, the default
+	// (the vendor above) first. Empty for a daily item.
+	Options []Option `json:"options"`
 }
 
+// Option is one vendor a non-daily item can be ordered from at a property.
+type Option struct {
+	VendorID   int64    `json:"vendor_id"`
+	VendorName string   `json:"vendor_name"`
+	Rate       *float64 `json:"rate"`
+	RateGST    *float64 `json:"rate_gst"`
+	Estimate   bool     `json:"estimate_allowed"`
+	Orderable  bool     `json:"orderable"`
+	Problem    string   `json:"problem"`
+}
+
+// resolveSQL resolves items at property $1. $2 is a vendor to resolve with instead of the default (0 for the default);
+// %s is LIMIT 1 for the one mapping that applies, or empty for every mapping (the options of non-daily items).
 const resolveSQL = `SELECT k.id, k.code, k.item_name, coalesce(b.name,''), ps.name, sc.id, sc.name, c.id, c.name, k.gst_pct,
 	m.id, coalesce(m.level,''), m.vendor_id, coalesce(v.legal_name,''), coalesce(v.vendor_type='warehouse',false),
-	coalesce(v.active,false), coalesce(v.bank_verified,false), coalesce(v.vendor_type,''), coalesce(m.estimate_allowed,false), rc.rate, rc.gst_pct
+	coalesce(v.active,false), coalesce(v.bank_verified,false), coalesce(v.vendor_type,''), coalesce(m.estimate_allowed,false), rc.rate, rc.gst_pct, k.daily_use,
+	(k.fin_status='approved' AND sc.fin_status='approved' AND c.fin_status='approved'), k.wh_stocked, p.kind
 	FROM sku k
 	JOIN sub_category sc ON sc.id=k.sub_category_id JOIN category c ON c.id=sc.category_id
 	LEFT JOIN brand b ON b.id=k.brand_id JOIN pack_size ps ON ps.id=k.pack_size_id
@@ -77,7 +97,8 @@ const resolveSQL = `SELECT k.id, k.code, k.item_name, coalesce(b.name,''), ps.na
 		SELECT m.* FROM vendor_mapping m
 		WHERE m.active AND ((m.level='sku' AND m.sku_id=k.id) OR (m.level='sc' AND m.sub_category_id=k.sub_category_id))
 		  AND (m.all_properties OR EXISTS (SELECT 1 FROM vendor_mapping_property mp WHERE mp.mapping_id=m.id AND mp.property_id=$1))
-		ORDER BY (m.level='sku') DESC, m.id LIMIT 1) m ON TRUE
+		  AND ($2::bigint=0 OR k.daily_use OR m.vendor_id=$2)
+		ORDER BY (m.level='sku') DESC, m.id %s) m ON TRUE
 	LEFT JOIN vendor v ON v.id=m.vendor_id
 	LEFT JOIN LATERAL (
 		SELECT r.rate, r.gst_pct FROM rate_card r
@@ -87,14 +108,16 @@ const resolveSQL = `SELECT k.id, k.code, k.item_name, coalesce(b.name,''), ps.na
 
 func scanSource(row pgx.CollectableRow) (Source, error) {
 	var x Source
-	var vActive, vBank bool
+	var vActive, vBank, finOK bool
 	var vType string
 	err := row.Scan(&x.SKUID, &x.SKUCode, &x.ItemName, &x.Brand, &x.PackSize, &x.SubCatID, &x.SubCat, &x.CategoryID, &x.Category, &x.SKUGST,
-		&x.MappingID, &x.Level, &x.VendorID, &x.VendorName, &x.IsWarehouse, &vActive, &vBank, &vType, &x.Estimate, &x.Rate, &x.RateGST)
+		&x.MappingID, &x.Level, &x.VendorID, &x.VendorName, &x.IsWarehouse, &vActive, &vBank, &vType, &x.Estimate, &x.Rate, &x.RateGST, &x.DailyUse, &finOK, &x.WHStocked, &x.propKind)
 	if err != nil {
 		return x, err
 	}
 	switch {
+	case !finOK: // a new item (or its sub-category or category) not approved by Finance yet
+		x.Status, x.Problem = "bad", "Waits for Finance approval"
 	case x.MappingID == nil:
 		x.Status, x.Problem = "none", "Not mapped"
 	case !vActive:
@@ -114,18 +137,88 @@ func scanSource(row pgx.CollectableRow) (Source, error) {
 	return x, nil
 }
 
-// ForProperty resolves every active item available at a property.
+// fromWarehouse makes an item stocked at the warehouse come from the Central Warehouse at a property (not at the
+// warehouse itself, nor the corporate office): at the warehouse's rate card, else the rate of the vendor mapped there,
+// else an estimate. The warehouse buys any shortfall from the vendor itself. An item still waiting for Finance stays so.
+func fromWarehouse(ctx context.Context, q database.Q, list []Source) {
+	var whID int64
+	var whName string
+	looked := false
+	for i := range list {
+		x := &list[i]
+		if !x.WHStocked || x.propKind == "warehouse" || x.propKind == "corporate" || x.Problem == "Waits for Finance approval" {
+			continue
+		}
+		if !looked {
+			looked = true
+			_ = q.QueryRow(ctx, `SELECT id, legal_name FROM vendor WHERE vendor_type='warehouse' AND active ORDER BY id LIMIT 1`).Scan(&whID, &whName)
+		}
+		if whID == 0 {
+			return // no Central Warehouse vendor: items stay with their vendors
+		}
+		if rate, gst, ok := CurrentRate(ctx, q, whID, x.SKUID); ok {
+			x.Rate, x.RateGST = &rate, &gst
+		}
+		id := whID
+		x.VendorID, x.VendorName, x.IsWarehouse, x.Level = &id, whName, true, "sku"
+		x.Status, x.Problem, x.Orderable, x.Options = "ok", "", true, []Option{}
+		x.Estimate = x.Rate == nil
+		if x.MappingID == nil {
+			zero := int64(0)
+			x.MappingID = &zero
+		}
+	}
+}
+
+// ForProperty resolves every active item available at a property, with the vendors to pick from for non-daily items.
 func ForProperty(ctx context.Context, q database.Q, propertyID int64) ([]Source, error) {
-	rows, err := q.Query(ctx, resolveSQL+` ORDER BY c.name, sc.name, k.code`, propertyID)
+	rows, err := q.Query(ctx, fmt.Sprintf(resolveSQL, "LIMIT 1")+` ORDER BY c.name, sc.name, k.code`, propertyID, 0)
 	if err != nil {
 		return nil, err
 	}
-	return pgx.CollectRows(rows, scanSource)
+	out, err := pgx.CollectRows(rows, scanSource)
+	if err != nil {
+		return nil, err
+	}
+	// Every mapping of the non-daily items, as options.
+	rows, err = q.Query(ctx, fmt.Sprintf(resolveSQL, "")+` AND NOT k.daily_use AND m.id IS NOT NULL ORDER BY k.id, (m.level='sku') DESC, m.id`, propertyID, 0)
+	if err != nil {
+		return nil, err
+	}
+	all, err := pgx.CollectRows(rows, scanSource)
+	if err != nil {
+		return nil, err
+	}
+	opts := map[int64][]Option{}
+	for _, x := range all {
+		if x.VendorID == nil || hasVendor(opts[x.SKUID], *x.VendorID) {
+			continue // a vendor mapped both by SKU and by sub-category is offered once, at the SKU mapping
+		}
+		opts[x.SKUID] = append(opts[x.SKUID], Option{*x.VendorID, x.VendorName, x.Rate, x.RateGST, x.Estimate, x.Orderable, x.Problem})
+	}
+	for i := range out {
+		out[i].Options = opts[out[i].SKUID]
+		if out[i].Options == nil {
+			out[i].Options = []Option{}
+		}
+	}
+	fromWarehouse(ctx, q, out)
+	return out, nil
 }
 
-// One resolves a single SKU at a property. ok is false if the SKU is not available there.
-func One(ctx context.Context, q database.Q, skuID, propertyID int64) (Source, bool, error) {
-	rows, err := q.Query(ctx, resolveSQL+` AND k.id=$2`, propertyID, skuID)
+func hasVendor(list []Option, id int64) bool {
+	for _, o := range list {
+		if o.VendorID == id {
+			return true
+		}
+	}
+	return false
+}
+
+// One resolves a single SKU at a property, from vendorID when given and the item is not for daily consumption, else
+// from its default vendor. ok is false if the SKU is not available there.
+func One(ctx context.Context, q database.Q, skuID, propertyID, vendorID int64) (Source, bool, error) {
+	rows, err := q.Query(ctx, fmt.Sprintf(resolveSQL, "LIMIT 1")+` AND k.id=$3`, propertyID, vendorID, skuID)
 	if err != nil {
 		return Source{}, false, err
 	}
@@ -133,6 +226,7 @@ func One(ctx context.Context, q database.Q, skuID, propertyID int64) (Source, bo
 	if err != nil || len(out) == 0 {
 		return Source{}, false, err
 	}
+	fromWarehouse(ctx, q, out)
 	return out[0], true, nil
 }
 
@@ -264,7 +358,7 @@ func CheckRate(ctx context.Context, q database.Q, in RateInput) (string, []strin
 	errs := []string{}
 	var vType string
 	var vActive bool
-	if err := q.QueryRow(ctx, `SELECT vendor_type, active FROM vendor WHERE id=$1`, in.VendorID).Scan(&vType, &vActive); err != nil || (vType != "goods" && vType != "warehouse") || !releasephase.VendorTypeOn(vType) {
+	if err := q.QueryRow(ctx, `SELECT vendor_type, active FROM vendor WHERE id=$1`, in.VendorID).Scan(&vType, &vActive); err != nil || (vType != "goods" && vType != "warehouse") {
 		return "", []string{"Unknown goods vendor."}
 	}
 	if !vActive {
@@ -340,7 +434,7 @@ func (s *Service) createRate(w http.ResponseWriter, r *http.Request) error {
 // rateFormat downloads the file a vendor fills: every SKU it is approved for, with the current rate.
 func (s *Service) rateFormat(w http.ResponseWriter, r *http.Request) error {
 	vid := int64(httpjson.QInt(r, "vendor_id", 0))
-	cid := int64(httpjson.QInt(r, "category_id", 0))
+	cids := httpjson.QInts(r, "category_id")
 	var vcode, vname string
 	if err := s.DB.QueryRow(r.Context(), `SELECT code, legal_name FROM vendor WHERE id=$1`, vid).Scan(&vcode, &vname); err != nil {
 		return httpjson.Bad("Choose a vendor.")
@@ -348,8 +442,8 @@ func (s *Service) rateFormat(w http.ResponseWriter, r *http.Request) error {
 	rows, err := s.DB.Query(r.Context(), `SELECT k.code, coalesce(b.name,''), k.item_name, ps.name, k.gst_pct,
 		(SELECT r.rate::text FROM rate_card r WHERE r.vendor_id=$1 AND r.sku_id=k.id AND NOT r.superseded AND current_date BETWEEN r.valid_from AND r.valid_to ORDER BY r.valid_from DESC LIMIT 1)
 		FROM sku k LEFT JOIN brand b ON b.id=k.brand_id JOIN pack_size ps ON ps.id=k.pack_size_id JOIN sub_category sc ON sc.id=k.sub_category_id
-		WHERE k.active AND ($2=0 OR sc.category_id=$2) AND EXISTS (SELECT 1 FROM vendor_sub_category x WHERE x.vendor_id=$1 AND x.sub_category_id=k.sub_category_id)
-		ORDER BY k.code`, vid, cid)
+		WHERE k.active AND (cardinality($2::bigint[])=0 OR sc.category_id = ANY($2)) AND EXISTS (SELECT 1 FROM vendor_sub_category x WHERE x.vendor_id=$1 AND x.sub_category_id=k.sub_category_id)
+		ORDER BY k.code`, vid, cids)
 	if err != nil {
 		return err
 	}
@@ -482,11 +576,12 @@ func CheckMapping(ctx context.Context, q database.Q, id int64, in *MappingInput)
 	if in.Level != "sku" && in.Level != "sc" {
 		return httpjson.Bad("Map by whole sub-category or by one SKU.")
 	}
-	if err := q.QueryRow(ctx, `SELECT vendor_type FROM vendor WHERE id=$1 AND active`, in.VendorID).Scan(&in.vType); err != nil || (in.vType != "goods" && in.vType != "warehouse") || !releasephase.VendorTypeOn(in.vType) {
+	if err := q.QueryRow(ctx, `SELECT vendor_type FROM vendor WHERE id=$1 AND active`, in.VendorID).Scan(&in.vType); err != nil || (in.vType != "goods" && in.vType != "warehouse") {
 		return httpjson.Bad("Choose an active goods vendor.")
 	}
+	daily := true
 	if in.Level == "sku" {
-		if err := q.QueryRow(ctx, `SELECT sub_category_id FROM sku WHERE id=$1`, in.SKUID).Scan(&in.SubCategoryID); err != nil {
+		if err := q.QueryRow(ctx, `SELECT sub_category_id, daily_use FROM sku WHERE id=$1`, in.SKUID).Scan(&in.SubCategoryID, &daily); err != nil {
 			return httpjson.Bad("Choose the SKU.")
 		}
 	} else if in.SubCategoryID == 0 {
@@ -513,7 +608,8 @@ func CheckMapping(ctx context.Context, q database.Q, id int64, in *MappingInput)
 		LEFT JOIN property p ON p.id=mp.property_id
 		WHERE m.active AND m.id<>$1 AND m.level=$2 AND (($2='sku' AND m.sku_id=$3) OR ($2='sc' AND m.sub_category_id=$4))
 		  AND (m.all_properties OR $5 OR EXISTS (SELECT 1 FROM vendor_mapping_property x WHERE x.mapping_id=m.id AND x.property_id = ANY($6)))
-		GROUP BY v.legal_name LIMIT 1`, id, in.Level, in.SKUID, in.SubCategoryID, in.All, in.props).Scan(&clashVendor, &clashProps)
+		  AND ($7 OR m.vendor_id=$8)
+		GROUP BY v.legal_name LIMIT 1`, id, in.Level, in.SKUID, in.SubCategoryID, in.All, in.props, daily, in.VendorID).Scan(&clashVendor, &clashProps)
 	if err == nil {
 		where := "these properties"
 		if len(clashProps) > 0 && len(clashProps) <= 3 {
@@ -521,7 +617,10 @@ func CheckMapping(ctx context.Context, q database.Q, id int64, in *MappingInput)
 		} else if len(clashProps) > 3 {
 			where = fmt.Sprintf("%d of these properties", len(clashProps))
 		}
-		return httpjson.Bad("%s is already mapped to this item at %s. One item has one vendor at a property: untick those properties here, or change that mapping first.", clashVendor, where)
+		if !daily {
+			return httpjson.Bad("%s is already mapped to this item at %s. Untick those properties here, or change that mapping.", clashVendor, where)
+		}
+		return httpjson.Bad("%s is already mapped to this item at %s. A daily consumption item has one vendor at a property: untick those properties here, change that mapping first, or set the item to not daily consumption (Items) so the requester can pick between vendors.", clashVendor, where)
 	} else if err != pgx.ErrNoRows {
 		return err
 	}

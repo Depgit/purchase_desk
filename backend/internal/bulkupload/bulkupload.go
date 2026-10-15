@@ -26,7 +26,6 @@ import (
 	"purchasedesk/internal/httpjson"
 	"purchasedesk/internal/items"
 	"purchasedesk/internal/money"
-	"purchasedesk/internal/releasephase"
 	"purchasedesk/internal/textclean"
 	"purchasedesk/internal/users"
 	"purchasedesk/internal/vendormapping"
@@ -145,14 +144,11 @@ type editRow struct {
 
 func (s *Service) Routes(r chi.Router) {
 	s.kinds = s.define()
-	// Uploads that belong to a later release phase are left out until RELEASE_PHASE reaches it.
-	for name, phase := range map[string]int{"budgets": releasephase.Budgets, "fb_sales": releasephase.Budgets, "property_pct": releasephase.Budgets, "zoho_tags": releasephase.Zoho} {
-		if !releasephase.On(phase) {
-			delete(s.kinds, name)
-		}
-	}
 	s.kinds["mappings"] = s.mappingsKind()
 	for name, k := range s.smallMasterKinds() {
+		s.kinds[name] = k
+	}
+	for name, k := range s.corporateKinds() {
 		s.kinds[name] = k
 	}
 	r.Get("/uploads/{kind}/sample", httpjson.Wrap(s.sample))
@@ -170,7 +166,7 @@ func (s *Service) define() map[string]*kind {
 		"items": {
 			title: "Items", module: "Items", allowed: masters,
 			required: []string{"category", "sub_category", "item_name", "unit", "gst_percent"}, // brand may be blank for services
-			sample:   "sku_code,category,sub_category,brand,item_name,unit,gst_percent,hsn,properties,tds_section\n,Housekeeping,Guest Amenities,Aroma Leaf,Body lotion 30 ml,box of 250,18,33049910,ALL,\n,Engineering,Electrical,BrightVolt,Pool pump capacitor,piece,18,,P01;P23,\n",
+			sample:   "sku_code,category,sub_category,brand,item_name,unit,gst_percent,hsn,properties,tds_section,daily_consumption\n,Housekeeping,Guest Amenities,Aroma Leaf,Body lotion 30 ml,box of 250,18,33049910,ALL,,yes\n,Engineering,Electrical,BrightVolt,Pool pump capacitor,piece,18,,P01;P23,,no\n",
 			keyOf:    key("sku_code"),
 			check: func(ctx context.Context, x *run, row csvfile.Row) result {
 				var scID, catID int64
@@ -201,6 +197,22 @@ func (s *Service) define() map[string]*kind {
 					return bad("GST %% must be a number")
 				}
 				in := &items.SKUInput{SubCategoryID: scID, BrandName: row.Get("brand"), ItemName: row.Get("item_name"), PackSizeID: packID, GST: gst, HSN: row.Get("hsn"), Scope: "all", TDSSection: strings.ToUpper(strings.TrimSpace(row.Get("tds_section")))}
+				// stocked_at_warehouse is optional: blank keeps what is on file (no for a new item).
+				if v := row.Get("stocked_at_warehouse"); strings.TrimSpace(v) != "" {
+					st, ok := yesNo(v)
+					if !ok {
+						return bad("stocked_at_warehouse must be yes or no")
+					}
+					in.WHStocked = &st
+				}
+				// daily_consumption is optional: blank keeps what is on file (yes for a new item).
+				if v := row.Get("daily_consumption"); strings.TrimSpace(v) != "" {
+					daily, ok := yesNo(v)
+					if !ok {
+						return bad("daily_consumption must be yes or no")
+					}
+					in.DailyUse = &daily
+				}
 				all, clusters, props, problem := scope(ctx, x.q, row.Get("properties"))
 				if problem != "" {
 					return bad("%s", problem)
@@ -240,9 +252,9 @@ func (s *Service) define() map[string]*kind {
 				return nil
 			},
 			export: func(ctx context.Context, q database.Q, r *http.Request) ([]string, [][]string, error) {
-				heads := []string{"sku_code", "category", "sub_category", "brand", "item_name", "unit", "gst_percent", "hsn", "properties", "tds_section"}
+				heads := []string{"sku_code", "category", "sub_category", "brand", "item_name", "unit", "gst_percent", "hsn", "properties", "tds_section", "daily_consumption", "stocked_at_warehouse"}
 				rows, err := rowsOf(ctx, q, `SELECT k.code, c.name, sc.name, coalesce(b.name,''), k.item_name, ps.name, k.gst_pct::float8::text, k.hsn,
-					`+fmt.Sprintf(scopeSQL, "k.scope='all'", "k.cluster_ids", "k.property_ids")+`, coalesce(k.tds_section,'')
+					`+fmt.Sprintf(scopeSQL, "k.scope='all'", "k.cluster_ids", "k.property_ids")+`, coalesce(k.tds_section,''), CASE WHEN k.daily_use THEN 'yes' ELSE 'no' END, CASE WHEN k.wh_stocked THEN 'yes' ELSE 'no' END
 					FROM sku k JOIN sub_category sc ON sc.id=k.sub_category_id JOIN category c ON c.id=sc.category_id LEFT JOIN brand b ON b.id=k.brand_id JOIN pack_size ps ON ps.id=k.pack_size_id
 					WHERE k.active ORDER BY k.code`)
 				return heads, rows, err
@@ -319,6 +331,9 @@ func (s *Service) define() map[string]*kind {
 				}
 				if err := x.q.QueryRow(ctx, `SELECT id FROM sub_category WHERE norm_key(name)=norm_key($1)`, row.Get("sub_category")).Scan(&sid); err != nil {
 					return bad("Unknown sub-category")
+				}
+				if wait := budgets.PendingFinance(ctx, x.q, pid, sid); wait != "" {
+					return bad("%s waits for Finance approval: set its budget once approved", wait)
 				}
 				m := clock.MonthStart(clock.Today())
 				if v := row.Get("month"); v != "" {
@@ -510,7 +525,7 @@ func (s *Service) define() map[string]*kind {
 		"users": {
 			title: "Users", module: "Users", allowed: func(u *access.User) bool { return u.IsAdmin },
 			required: []string{"name", "department", "role"},
-			sample:   "name,email,mobile,department,role,access,categories,password\nRavi Kumar,ravi.kumar@saltstayz.com,9810000001,Operations,Property Manager (L1),P01,,\nNeha Bansal,neha.bansal@saltstayz.com,,Operations,Cluster Manager (L2),cluster:Gurugram North,,\nSunil Yadav,,9810000002,Housekeeping,Property Staff,P01,Housekeeping,\n",
+			sample:   "name,employee_id,email,mobile,department,role,access,categories,password\nRavi Kumar,SS1001,ravi.kumar@saltstayz.com,9810000001,Operations,Property Manager (L1),P01,,\nNeha Bansal,SS1002,neha.bansal@saltstayz.com,,Operations,Cluster Manager (L2),cluster:Gurugram North,,\nSunil Yadav,SS1003,,9810000002,Housekeeping,Property Staff,P01,Housekeeping,\n",
 			// A user's unchanged role rows are skipped but still count: if another of their rows changed, their roles are
 			// rebuilt from every row, unchanged ones included. A user whose rows are all unchanged is not touched.
 			keyOf: func(row csvfile.Row) string {
@@ -546,8 +561,8 @@ func (s *Service) define() map[string]*kind {
 					var id int64
 					var n int
 					in := &users.UserInput{}
-					if err := x.q.QueryRow(ctx, `SELECT u.id, u.name, coalesce(u.email::text,''), coalesce(u.mobile,''), u.department, (SELECT count(*) FROM user_role ur WHERE ur.user_id=u.id)
-						FROM app_user u WHERE ($1 LIKE '%@%' AND u.email=$1::citext) OR u.mobile=$1 LIMIT 1`, login).Scan(&id, &in.Name, &in.Email, &in.Mobile, &in.Department, &n); err != nil || n <= len(grants) {
+					if err := x.q.QueryRow(ctx, `SELECT u.id, u.name, u.employee_id, coalesce(u.email::text,''), coalesce(u.mobile,''), u.department, (SELECT count(*) FROM user_role ur WHERE ur.user_id=u.id)
+						FROM app_user u WHERE ($1 LIKE '%@%' AND u.email=$1::citext) OR u.mobile=$1 LIMIT 1`, login).Scan(&id, &in.Name, &in.EmployeeID, &in.Email, &in.Mobile, &in.Department, &n); err != nil || n <= len(grants) {
 						continue
 					}
 					in.Roles = grants
@@ -574,16 +589,11 @@ func (s *Service) define() map[string]*kind {
 							return bad("This role is listed twice for %s", in.Name)
 						}
 					}
-					var step string
-					_ = x.q.QueryRow(ctx, `SELECT step FROM role WHERE id=$1`, g.RoleID).Scan(&step)
-					if !releasephase.RoleOn(step) {
-						return bad("Warehouse and corporate roles open in a later phase of the rollout")
-					}
 					in.Roles = append(in.Roles, g)
 					return result{ok: true, msg: "Adds the role " + row.Get("role") + " to " + in.Name}
 				}
 				pending, _ := x.memo["pending:"+login].([]users.RoleGrant)
-				in := &users.UserInput{Name: row.Get("name"), Email: row.Get("email"), Mobile: row.Get("mobile"), Department: row.Get("department"), Password: row.Get("password"), Roles: append(pending, g)}
+				in := &users.UserInput{Name: row.Get("name"), EmployeeID: row.Get("employee_id"), Email: row.Get("email"), Mobile: row.Get("mobile"), Department: row.Get("department"), Password: row.Get("password"), Roles: append(pending, g)}
 				id := int64(0)
 				_ = x.q.QueryRow(ctx, `SELECT id FROM app_user WHERE ($1<>'' AND email=$1::citext) OR ($2<>'' AND mobile=$2) ORDER BY (email=$1::citext) DESC NULLS LAST LIMIT 1`,
 					strings.TrimSpace(in.Email), strings.TrimSpace(in.Mobile)).Scan(&id)
@@ -626,8 +636,8 @@ func (s *Service) define() map[string]*kind {
 				return nil
 			},
 			export: func(ctx context.Context, q database.Q, r *http.Request) ([]string, [][]string, error) {
-				heads := []string{"name", "email", "mobile", "department", "role", "access", "categories", "password"}
-				rows, err := rowsOf(ctx, q, `SELECT u.name, coalesce(u.email::text,''), coalesce(u.mobile,''), u.department, r.name,
+				heads := []string{"name", "employee_id", "email", "mobile", "department", "role", "access", "categories", "password"}
+				rows, err := rowsOf(ctx, q, `SELECT u.name, u.employee_id, coalesce(u.email::text,''), coalesce(u.mobile,''), u.department, r.name,
 					CASE ur.scope WHEN 'all' THEN 'all' WHEN 'clusters' THEN 'cluster:'||(SELECT string_agg(c.name, ';' ORDER BY c.name) FROM cluster c WHERE c.id = ANY(ur.cluster_ids))
 						ELSE (SELECT string_agg(p.code, ';' ORDER BY p.code) FROM property p WHERE p.id = ANY(ur.property_ids)) END,
 					coalesce((SELECT string_agg(c.name, ';' ORDER BY c.name) FROM category c WHERE c.id = ANY(ur.category_ids)),''), ''
@@ -762,7 +772,7 @@ func (s *Service) define() map[string]*kind {
 				if !ok || q <= 0 {
 					return bad("Quantity must be above 0")
 				}
-				src, found, err := vendormapping.One(ctx, x.q, sid, x.propertyID)
+				src, found, err := vendormapping.One(ctx, x.q, sid, x.propertyID, 0)
 				if err != nil || !found {
 					return bad("Item is not available at this property")
 				}

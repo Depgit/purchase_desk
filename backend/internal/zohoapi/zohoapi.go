@@ -60,6 +60,70 @@ func DailyLimit(err error) bool {
 	return errors.As(err, &e) && e.HTTP == 429 && e.Code == 45
 }
 
+// Usage is the organisation's daily API allowance as Zoho reports it on every reply (X-Rate-Limit-Limit,
+// X-Rate-Limit-Remaining, X-Rate-Limit-Reset in seconds). It is the plan's real figure: 1,000 a day on Free up to
+// 10,000 on Premium, Elite and Ultimate, shared by every app using the organisation.
+type Usage struct {
+	Limit     int       `json:"limit"`
+	Remaining int       `json:"remaining"`
+	ResetAt   time.Time `json:"reset_at"`
+	SeenAt    time.Time `json:"seen_at"` // zero until the first call since the server started
+}
+
+// Calls are spaced to stay under Zoho's 100 calls a minute per organisation, with room for the people using Zoho
+// at the same time: about 80 a minute.
+const callGap = 750 * time.Millisecond
+
+var (
+	usageMu  sync.Mutex
+	usage    Usage
+	lastCall time.Time
+)
+
+// CurrentUsage is the allowance seen on the last reply from Zoho.
+func CurrentUsage() Usage {
+	usageMu.Lock()
+	defer usageMu.Unlock()
+	return usage
+}
+
+// LowOnCalls reports that less than a fifth of today's allowance is left. The automatic jobs then wait for the reset,
+// keeping the rest for the buttons people press.
+func LowOnCalls() bool {
+	u := CurrentUsage()
+	return !u.SeenAt.IsZero() && u.Limit > 0 && time.Now().Before(u.ResetAt) && u.Remaining*5 < u.Limit
+}
+
+func noteUsage(h http.Header) {
+	limit, err1 := strconv.Atoi(h.Get("X-Rate-Limit-Limit"))
+	left, err2 := strconv.Atoi(h.Get("X-Rate-Limit-Remaining"))
+	if err1 != nil || err2 != nil {
+		return
+	}
+	reset, _ := strconv.Atoi(h.Get("X-Rate-Limit-Reset"))
+	usageMu.Lock()
+	usage = Usage{Limit: limit, Remaining: left, ResetAt: time.Now().Add(time.Duration(reset) * time.Second), SeenAt: time.Now()}
+	usageMu.Unlock()
+}
+
+// pace waits until the next call is allowed.
+func pace(ctx context.Context) error {
+	usageMu.Lock()
+	wait := time.Until(lastCall.Add(callGap))
+	usageMu.Unlock()
+	if wait > 0 {
+		select {
+		case <-time.After(wait):
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	usageMu.Lock()
+	lastCall = time.Now()
+	usageMu.Unlock()
+	return nil
+}
+
 // TokenRevoked reports that the refresh token no longer works and a new one is needed.
 var ErrTokenRevoked = errors.New("the Zoho refresh token was rejected; enter a new one under Settings, Zoho Books")
 
@@ -144,10 +208,14 @@ func (c *Client) Do(ctx context.Context, method, path string, query url.Values, 
 		for k, v := range headers {
 			req.Header.Set(k, v)
 		}
+		if err := pace(ctx); err != nil {
+			return err
+		}
 		res, err := c.http.Do(req)
 		if err != nil {
 			return fmt.Errorf("could not reach Zoho Books: %w", err)
 		}
+		noteUsage(res.Header)
 		raw, _ := io.ReadAll(io.LimitReader(res.Body, 20<<20))
 		res.Body.Close()
 		var env struct {
@@ -585,6 +653,79 @@ type Bill struct {
 	LastMod     string  `json:"last_modified_time"`
 }
 
+// PurchaseOrder is a Zoho purchase order as Purchase Desk reads it back: its id, number, status and the ids Zoho gives
+// its lines (in the order they were sent), which a bill quotes to bill against the PO.
+type PurchaseOrder struct {
+	ID        string `json:"purchaseorder_id"`
+	Number    string `json:"purchaseorder_number"`
+	Status    string `json:"status"`
+	LineItems []struct {
+		ID        string `json:"line_item_id"`
+		ItemID    string `json:"item_id"`
+		AccountID string `json:"account_id"`
+	} `json:"line_items"`
+}
+
+// NoCommonItems reports Zoho's refusal to link a bill to a purchase order whose lines carry other items (code 4197).
+func NoCommonItems(err error) bool {
+	var e *Error
+	return errors.As(err, &e) && e.Code == 4197
+}
+
+// CreatePurchaseOrder creates a PO under Purchase Desk's own number (ignore_auto_number_generation), so the number in
+// Zoho is the PO number the vendor was sent.
+func (c *Client) CreatePurchaseOrder(ctx context.Context, body map[string]any) (PurchaseOrder, error) {
+	var out struct {
+		PO PurchaseOrder `json:"purchaseorder"`
+	}
+	err := c.Do(ctx, http.MethodPost, "/purchaseorders", url.Values{"ignore_auto_number_generation": {"true"}}, body, nil, &out)
+	return out.PO, err
+}
+
+// UpdatePurchaseOrder replaces a PO's details and lines (after a balance is rejected or the PO closes short).
+func (c *Client) UpdatePurchaseOrder(ctx context.Context, id string, body map[string]any) (PurchaseOrder, error) {
+	var out struct {
+		PO PurchaseOrder `json:"purchaseorder"`
+	}
+	err := c.Do(ctx, http.MethodPut, "/purchaseorders/"+url.PathEscape(id), url.Values{"ignore_auto_number_generation": {"true"}}, body, nil, &out)
+	return out.PO, err
+}
+
+// FindPurchaseOrder looks for a PO by number, so a retry after a lost reply does not create it twice.
+func (c *Client) FindPurchaseOrder(ctx context.Context, number string) (*PurchaseOrder, error) {
+	var out struct {
+		POs []PurchaseOrder `json:"purchaseorders"`
+	}
+	if err := c.Do(ctx, http.MethodGet, "/purchaseorders", url.Values{"purchaseorder_number": {number}}, nil, nil, &out); err != nil {
+		return nil, err
+	}
+	for _, p := range out.POs {
+		if p.Number == number {
+			return &p, nil
+		}
+	}
+	return nil, nil
+}
+
+// GetPurchaseOrder reads a PO with its line ids.
+func (c *Client) GetPurchaseOrder(ctx context.Context, id string) (PurchaseOrder, error) {
+	var out struct {
+		PO PurchaseOrder `json:"purchaseorder"`
+	}
+	err := c.Do(ctx, http.MethodGet, "/purchaseorders/"+url.PathEscape(id), nil, nil, nil, &out)
+	return out.PO, err
+}
+
+// MarkPurchaseOrderOpen issues a draft PO (status open).
+func (c *Client) MarkPurchaseOrderOpen(ctx context.Context, id string) error {
+	return c.Do(ctx, http.MethodPost, "/purchaseorders/"+url.PathEscape(id)+"/status/open", nil, nil, nil, nil)
+}
+
+// MarkPurchaseOrderCancelled cancels a PO that will not be supplied.
+func (c *Client) MarkPurchaseOrderCancelled(ctx context.Context, id string) error {
+	return c.Do(ctx, http.MethodPost, "/purchaseorders/"+url.PathEscape(id)+"/status/cancelled", nil, nil, nil, nil)
+}
+
 // UpsertBill creates the bill, or updates it if a bill with the same unique custom field value exists (PUT /bills with X-Upsert).
 func (c *Client) UpsertBill(ctx context.Context, keyField, keyValue string, body map[string]any) (Bill, error) {
 	var out struct {
@@ -682,6 +823,24 @@ func (c *Client) CreateJournal(ctx context.Context, body map[string]any) (string
 	}
 	err := c.Do(ctx, http.MethodPost, "/journals", nil, body, nil, &out)
 	return out.Journal.ID, out.Journal.Number, err
+}
+
+// CreateVendorPayment records a payment to a vendor (POST /vendorpayments). With no bills it stays in Zoho as an
+// unapplied (excess) payment: how a vendor advance is kept until its bill arrives.
+func (c *Client) CreateVendorPayment(ctx context.Context, body map[string]any) (string, error) {
+	var out struct {
+		Payment struct {
+			ID string `json:"payment_id"`
+		} `json:"vendorpayment"`
+	}
+	err := c.Do(ctx, http.MethodPost, "/vendorpayments", nil, body, nil, &out)
+	return out.Payment.ID, err
+}
+
+// UpdateVendorPayment changes a vendor payment (PUT /vendorpayments/{id}); its bills list says how much of it is
+// applied to which bill, and replaces the list Zoho had.
+func (c *Client) UpdateVendorPayment(ctx context.Context, id string, body map[string]any) error {
+	return c.Do(ctx, http.MethodPut, "/vendorpayments/"+url.PathEscape(id), nil, body, nil, nil)
 }
 
 // BillCustomFields lists custom fields on bills, to check the unique key field exists.

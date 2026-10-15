@@ -3,7 +3,7 @@
 import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from 'react'
 import { get, getToken, post, setToken } from '../api/client'
 import type { Me } from '../api/types'
-import { refreshLookups, setBillsOpen } from '../api/lookups'
+import { refreshLookups } from '../api/lookups'
 
 interface Session {
   me: Me | null
@@ -20,7 +20,7 @@ export const useSession = () => useContext(Ctx)
 
 export function SessionProvider({ children }: { children: ReactNode }) {
   const [me, setMeState] = useState<Me | null>(null)
-  const setMe = useCallback((m: Me | null) => { if (m) setBillsOpen((m.phase || 5) >= 3); setMeState(m) }, [])
+  const setMe = useCallback((m: Me | null) => setMeState(m), [])
   const [ready, setReady] = useState(false)
   useEffect(() => {
     const out = () => setMe(null)

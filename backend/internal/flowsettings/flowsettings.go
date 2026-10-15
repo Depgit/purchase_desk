@@ -34,21 +34,24 @@ func (s *Service) Routes(r chi.Router) {
 
 // Settings are the flow rules the Admin changes on the Flow Settings screen.
 type Settings struct {
-	EvtL2           bool    `json:"evt_l2"`
-	L2Above         float64 `json:"l2_above"`
-	CCAll           bool    `json:"cc_all"`
-	WHApproval      bool    `json:"wh_approval"`
-	QtyUp           bool    `json:"qty_up"`
-	WeekFlag        bool    `json:"week_flag"`
-	BillApprover    string  `json:"bill_approver"`
-	BillJumpPct     float64 `json:"bill_jump_pct"`
-	AMCWarnDays     int     `json:"amc_warn_days"`
-	AMCDurations    []int   `json:"amc_durations"`
-	MatchTolPct     float64 `json:"match_tol_pct"`
-	MSMEDays        int     `json:"msme_days"`
-	NeedSchedule    bool    `json:"need_schedule"`
-	SheetApproved   bool    `json:"sheet_approved"`
-	CorpL1OnlyBelow float64 `json:"corp_l1_only_below"`
+	EvtL2              bool    `json:"evt_l2"`
+	L2Above            float64 `json:"l2_above"`
+	CCAll              bool    `json:"cc_all"`
+	WHApproval         bool    `json:"wh_approval"`
+	QtyUp              bool    `json:"qty_up"`
+	WeekFlag           bool    `json:"week_flag"`
+	BillApprover       string  `json:"bill_approver"`
+	BillJumpPct        float64 `json:"bill_jump_pct"`
+	AMCWarnDays        int     `json:"amc_warn_days"`
+	AMCDurations       []int   `json:"amc_durations"`
+	MatchTolPct        float64 `json:"match_tol_pct"`
+	MSMEDays           int     `json:"msme_days"`
+	NeedSchedule       bool    `json:"need_schedule"`
+	SheetApproved      bool    `json:"sheet_approved"`
+	CorpL1OnlyBelow    float64 `json:"corp_l1_only_below"`
+	AutoPODays         int     `json:"auto_po_days"`         // delivery date of a PO issued automatically: approval day + this
+	POOnApproval       bool    `json:"po_on_approval"`       // no Purchase Team step: the final approval raises every request's PO
+	ReceiptByRequester bool    `json:"receipt_by_requester"` // goods are received by the person who raised the request
 }
 
 // Load reads the current flow settings.
@@ -117,6 +120,9 @@ func (s *Service) putSettings(w http.ResponseWriter, r *http.Request) error {
 	}
 	if next.L2Above < 0 || next.MatchTolPct < 0 || next.MatchTolPct > 50 || next.MSMEDays <= 0 || next.BillJumpPct < 0 || next.AMCWarnDays < 0 || next.CorpL1OnlyBelow < 0 {
 		return httpjson.Bad("Numbers must be 0 or more, and the tolerance at most 50%%.")
+	}
+	if next.AutoPODays < 0 || next.AutoPODays > 60 {
+		return httpjson.Bad("Delivery days for an automatic PO must be between 0 and 60.")
 	}
 	durs := []int{}
 	for _, d := range next.AMCDurations {

@@ -1,4 +1,5 @@
 // Cities and clusters. A property belongs to a cluster and a cluster to a city; the cluster sets the Cluster Manager.
+import { useActiveFilter } from '../ui/ActiveFilter'
 import { useState } from 'react'
 import { post, put } from '../api/client'
 import { refreshLookups, useLookups, type Lookups } from '../api/lookups'
@@ -21,15 +22,17 @@ export function CitiesClustersPage() {
   const [cl, setCl] = useState<Cl | 'new' | null>(null)
   const [upload, setUpload] = useState(false)
   const ed = sc.edit && hasRight('masters')
+  const st = useActiveFilter()
   const count = (c: number) => (l?.properties || []).filter((p) => p.cluster_id === c).length
   return (
     <>
       <div className="head"><div><h1>Cities &amp; Clusters</h1><p className="sub">The cluster sets the Cluster Manager. City and cluster are the filters used in approvals, reports and budgets. The city's state code decides CGST + SGST or IGST.</p></div>
         <div className="acts">{ed && <>{hasRight('upload') && <button className="btn ghost" onClick={() => setUpload(true)}>Bulk upload / edit</button>}<button className="btn ghost" onClick={() => setCity('new')}>+ Add city</button><button className="btn" onClick={() => setCl('new')}>+ Add cluster</button></>}</div></div>
+      <div className="tools">{st.control}</div>
       <div className="cols">
         <section className="card flush"><h2>Clusters</h2><div className="scroll"><table>
           <thead><tr><th>Cluster</th><th>City</th><th>Cluster Manager</th><th className="r">Properties</th><th>Status</th><th></th></tr></thead>
-          <tbody>{l?.clusters.map((c) => <tr key={c.id} className={c.active ? '' : 'dim'}><td className="id">{c.name}</td><td>{c.city}</td><td>{c.manager_name || 'Not set'}</td><td className="r">{count(c.id)}</td>
+          <tbody>{l?.clusters.filter((c) => st.passes(c.active)).map((c) => <tr key={c.id} className={c.active ? '' : 'dim'}><td className="id">{c.name}</td><td>{c.city}</td><td>{c.manager_name || 'Not set'}</td><td className="r">{count(c.id)}</td>
             <td><ActiveToggle kind="cluster" id={c.id} name={c.name} active={c.active} onDone={refreshLookups} /></td>
             <td className="r">{ed && <button className="link" onClick={() => setCl(c)}>Edit</button>}</td></tr>)}</tbody></table></div>
           <p className="hint" style={{ padding: '10px 14px' }}>To move a property to another cluster, use Edit on the Properties page.</p></section>

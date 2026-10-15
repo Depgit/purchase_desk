@@ -20,7 +20,7 @@ import { AccessGrid } from './AccessGrid'
 import { RolesTab } from './RolesTab'
 
 interface RoleGrant { role_id: number; role_name?: string; step?: string; scope: string; cluster_ids: number[]; property_ids: number[]; category_ids: number[] }
-interface User { id: number; name: string; email: string; mobile: string; department: string; has_password: boolean; active: boolean; roles: RoleGrant[]
+interface User { id: number; name: string; employee_id: string; email: string; mobile: string; department: string; has_password: boolean; active: boolean; roles: RoleGrant[]
   created_by: number; can_edit: boolean }
 
 type Tab = 'people' | 'roles' | 'access'
@@ -52,10 +52,11 @@ function People() {
     <>
       {!admin && adds && <p className="note">Your role lets you add people as {roleNames(me?.user_roles || []) || 'no role yet'}, {me?.user_scope_any ? 'at any property' : 'for the properties you have access to'}. You can edit or deactivate only the people you added.</p>}
       <div className="tools" style={{ justifyContent: 'flex-end' }}>{admin && <button className="btn ghost" onClick={() => setUpload(true)}>Bulk upload / edit users</button>}{adds && <button className="btn" onClick={() => setEdit('new')}>+ Add user</button>}</div>
-      <DataTable screen="users" rows={data || []} rowKey={(u) => u.id} dim={(u) => !u.active} search={(u) => [u.name, u.email, u.mobile, u.department, ...u.roles.map((r) => r.role_name || '')].join(' ')}
+      <DataTable screen="users" rows={data || []} rowKey={(u) => u.id} dim={(u) => !u.active} search={(u) => [u.name, u.employee_id, u.email, u.mobile, u.department, ...u.roles.map((r) => r.role_name || '')].join(' ')}
         filters={[{ id: 'role', label: 'Role', multi: true, options: [['', 'All roles'], ...(l?.roles || []).map((r) => [String(r.id), r.name] as [string, string])], test: (u, v) => u.roles.some((g) => String(g.role_id) === v) }]}
         columns={[
           { key: 'name', label: 'Name', render: (u) => u.name, csv: (u) => u.name },
+          { key: 'emp', label: 'Employee ID', render: (u) => u.employee_id || '—', sort: (u) => u.employee_id, csv: (u) => u.employee_id },
           { key: 'login', label: 'Signs in with', render: (u) => [u.email, u.mobile].filter(Boolean).join(' · '), csv: (u) => u.email || u.mobile },
           { key: 'dep', label: 'Department', render: (u) => u.department, csv: (u) => u.department },
           { key: 'roles', label: 'Roles and access', render: (u) => u.roles.map((g) => <div key={g.role_id}>{g.role_name} <span className="hint">· {scopeText(g)}{g.category_ids.length ? ' · ' + g.category_ids.map((c) => l?.categories.find((x) => x.id === c)?.name).join(', ') : ''}</span></div>),
@@ -84,7 +85,7 @@ function UserModal({ u, onClose, onDone }: { u: User | null; onClose: () => void
   const clusterOpts = (l?.clusters || []).filter((c) => myAll || myClusters.includes(c.id))
   const propOpts = (l?.properties || []).filter((p) => p.active && (myAll || myClusters.includes(p.cluster_id) || myProps.includes(p.id)))
   const firstRole = admin ? l?.roles.find((r) => r.code === 'staff')?.id : roleOpts[0]?.id
-  const [f, setF] = useState({ name: u?.name || '', email: u?.email || '', mobile: u?.mobile || '', department: u?.department || '', password: '',
+  const [f, setF] = useState({ name: u?.name || '', employee_id: u?.employee_id || '', email: u?.email || '', mobile: u?.mobile || '', department: u?.department || '', password: '',
     roles: u?.roles.map((g) => ({ ...g })) || [{ role_id: firstRole || 0, scope: 'properties', cluster_ids: [], property_ids: [], category_ids: [] } as RoleGrant] })
   const a = useAction()
   const setRole = (i: number, patch: Partial<RoleGrant>) => setF({ ...f, roles: f.roles.map((g, j) => j === i ? { ...g, ...patch } : g) })
@@ -92,6 +93,8 @@ function UserModal({ u, onClose, onDone }: { u: User | null; onClose: () => void
     <Modal title={u ? 'Edit ' + u.name : 'Add user'} onClose={onClose} wide>
       <div className="grid2">
         <Field label="Name"><input value={f.name} onChange={(e) => setF({ ...f, name: e.target.value })} /></Field>
+        <Field label="Employee ID" hint={u?.employee_id ? undefined : u ? 'Not given yet. Add it now.' : 'Must be unique, for example SS1024.'}>
+          <input value={f.employee_id} maxLength={30} onChange={(e) => setF({ ...f, employee_id: e.target.value.toUpperCase() })} placeholder="e.g. SS1024" /></Field>
         <Field label="Department"><input value={f.department} onChange={(e) => setF({ ...f, department: e.target.value })} /></Field>
         <Field label="Email"><input type="email" value={f.email} onChange={(e) => setF({ ...f, email: e.target.value })} /></Field>
         <Field label="Mobile number"><input inputMode="numeric" maxLength={10} value={f.mobile} onChange={(e) => setF({ ...f, mobile: e.target.value })} /></Field>
@@ -103,14 +106,18 @@ function UserModal({ u, onClose, onDone }: { u: User | null; onClose: () => void
       {f.roles.map((g, i) => (
         <div key={i} className="xpbox">
           <div className="grid2">
-            <Field label="Role"><select value={g.role_id} onChange={(e) => setRole(i, { role_id: +e.target.value })}>{roleOpts.map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}</select></Field>
+            <Field label="Role"><select value={g.role_id} onChange={(e) => {
+              // A Property Chef starts limited to the F&B categories; untick them to let this chef order every item.
+              const step = (l?.roles || []).find((r) => r.id === +e.target.value)?.step
+              setRole(i, { role_id: +e.target.value, ...(step === 'chef' && !g.category_ids.length ? { category_ids: (l?.categories || []).filter((c) => c.is_fb).map((c) => c.id) } : {}) })
+            }}>{roleOpts.map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}</select></Field>
             <Field label="Property access"><select value={g.scope} onChange={(e) => setRole(i, { scope: e.target.value })}>{(myAll || g.scope === 'all') && <option value="all">All properties</option>}
               {(clusterOpts.length > 0 || g.scope === 'clusters') && <option value="clusters">Whole clusters</option>}<option value="properties">Named properties</option></select></Field>
           </div>
-          {g.scope === 'clusters' && <Checks value={g.cluster_ids} onChange={(v) => setRole(i, { cluster_ids: v })} options={clusterOpts.map((c) => [c.id, c.name])} />}
-          {g.scope === 'properties' && <Checks value={g.property_ids} onChange={(v) => setRole(i, { property_ids: v })} options={propOpts.map((p) => [p.id, p.name])} />}
+          {g.scope === 'clusters' && <Checks label="Clusters" placeholder="Choose clusters" value={g.cluster_ids} onChange={(v) => setRole(i, { cluster_ids: v })} options={clusterOpts.map((c) => [c.id, c.name])} />}
+          {g.scope === 'properties' && <Checks label="Properties" placeholder="Choose properties" value={g.property_ids} onChange={(v) => setRole(i, { property_ids: v })} options={propOpts.map((p) => [p.id, p.name])} />}
           <div className="field"><span>Category limits (leave all unticked for every category)</span>
-            <Checks value={g.category_ids} onChange={(v) => setRole(i, { category_ids: v })} options={(l?.categories || []).map((c) => [c.id, c.name])} /></div>
+            <Checks label="Categories" placeholder="Every category (no limit)" value={g.category_ids} onChange={(v) => setRole(i, { category_ids: v })} options={(l?.categories || []).map((c) => [c.id, c.name])} /></div>
           {f.roles.length > 1 && <div><button className="link" onClick={() => setF({ ...f, roles: f.roles.filter((_, j) => j !== i) })}>Remove this role</button></div>}
         </div>))}
       <div><button className="btn ghost" onClick={() => setF({ ...f, roles: [...f.roles, { role_id: roleOpts[0]?.id || 0, scope: myAll ? 'all' : 'properties', cluster_ids: [], property_ids: [], category_ids: [] }] })}>+ Add another role</button></div>

@@ -17,7 +17,6 @@ type Config struct {
 
 	AdminEmail, AdminPassword, AdminName string
 	SeedDemo                             bool
-	ReleasePhase                         int
 
 	StorageDriver   string
 	StorageLocalDir string
@@ -68,7 +67,6 @@ func Load() Config {
 		AdminPassword:       env("ADMIN_PASSWORD", ""),
 		AdminName:           strings.Trim(env("ADMIN_NAME", "System Admin"), `"`),
 		SeedDemo:            envBool("SEED_DEMO", false),
-		ReleasePhase:        envInt("RELEASE_PHASE", 5),
 		StorageDriver:       env("STORAGE_DRIVER", "local"),
 		StorageLocalDir:     env("STORAGE_LOCAL_DIR", "./data/files"),
 		SupabaseURL:         strings.TrimRight(env("SUPABASE_URL", ""), "/"),

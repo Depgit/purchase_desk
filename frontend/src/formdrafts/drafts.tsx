@@ -17,14 +17,20 @@ type Files = Record<string, File | File[] | null | undefined>
 const kept = new WeakMap<File, number>()
 export const isKept = (f: File | null | undefined) => !!f && kept.has(f)
 
+/** A stored file fetched back as a File object, to put into a form again; null if it cannot be read. */
+export async function fetchFile(id: number, name: string): Promise<File | null> {
+  const res = await fetch(fileUrl(id))
+  if (!res.ok) return null
+  const blob = await res.blob()
+  return new File([blob], name, { type: blob.type })
+}
+
 /** The draft's attached files, fetched back as File objects, by form field. */
 export async function restoreFiles(d: Draft): Promise<Record<string, File[]>> {
   const out: Record<string, File[]> = {}
   for (const f of d.files) {
-    const res = await fetch(fileUrl(f.id))
-    if (!res.ok) continue
-    const blob = await res.blob()
-    const file = new File([blob], f.name, { type: blob.type })
+    const file = await fetchFile(f.id, f.name)
+    if (!file) continue
     kept.set(file, f.id)
     ;(out[f.field] ||= []).push(file)
   }

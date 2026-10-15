@@ -51,8 +51,12 @@ func Who(u *access.User, d *documents.Doc) *access.Grant {
 	if g := documents.CanAct(u, d, "purchase", access.IssuePO); g != nil {
 		return g
 	}
-	if d.Kind == "purchase" {
-		return documents.CanAct(u, d, d.Owner(), access.Receive)
+	if d.Kind == "purchase" { // the receiving store (or the Warehouse Manager there), never the requester alone
+		step := "store"
+		if d.Owner() == "wh" {
+			step = "wh"
+		}
+		return documents.CanAct(u, d, step, access.Receive)
 	}
 	return nil
 }
@@ -80,7 +84,7 @@ func (s *Service) reject(w http.ResponseWriter, r *http.Request) error {
 	if err := flowsettings.CheckReason(r.Context(), s.DB, "balance_reasons", in.Reason, note); err != nil {
 		return err
 	}
-	var msg, number string
+	var msg, number, closed string
 	var gone []rejected
 	err = pgx.BeginFunc(r.Context(), s.DB, func(tx pgx.Tx) error {
 		d, err := documents.Load(r.Context(), tx, id, true)
@@ -150,11 +154,21 @@ func (s *Service) reject(w http.ResponseWriter, r *http.Request) error {
 				return err
 			}
 			msg += " Nothing more is due, so the PO is closed."
+			closed = number + " is closed: nothing more is due from the vendor."
 		default:
 			if _, err := tx.Exec(r.Context(), `UPDATE document SET status='CANCELLED', po_closed_short=TRUE, updated_at=now() WHERE id=$1`, id); err != nil {
 				return err
 			}
 			msg += " Nothing was delivered, so the PO is cancelled."
+			closed = number + " is cancelled: nothing was delivered."
+		}
+		// The Zoho purchase order follows: lower quantities, or cancelled when nothing was delivered.
+		zohoAction := "update"
+		if left <= 0 && !received {
+			zohoAction = "cancel"
+		}
+		if err := documents.QueueZohoPO(r.Context(), tx, id, zohoAction); err != nil {
+			return err
 		}
 		if left <= 0 {
 			// Nothing more is due. With nothing delivered the PO is cancelled, so advances not paid yet are cancelled too;
@@ -182,7 +196,8 @@ func (s *Service) reject(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 	s.notify(u, id, gone, strings.TrimSpace(in.Reason+" "+note))
-	return httpjson.OK(w, map[string]string{"message": msg})
+	// closed tells the form to show that the PO is now closed.
+	return httpjson.OK(w, map[string]string{"message": msg, "closed": closed})
 }
 
 func texts(rs []rejected) string {

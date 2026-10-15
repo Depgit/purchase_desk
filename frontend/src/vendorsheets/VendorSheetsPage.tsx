@@ -22,7 +22,7 @@ interface Preview { sheet: { vendor: string; version: number; file_name: string;
 export function VendorSheetsPage() {
   const { hasStep } = useSession()
   const sc = useScreen('vendor_sheets')
-  const cc = sc.edit && hasStep('cc')
+  const cc = sc.edit && hasStep('cc', 'l2', 'preop', 'purchase') // whoever approves requests looks after the sheets
   const { data, reload } = useApi<Row[]>('/vendor-sheets')
   const [open, setOpen] = useState<number | null>(null)
   const [sending, setSending] = useState<number[] | null>(null)

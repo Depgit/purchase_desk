@@ -13,7 +13,7 @@ import { Pill } from '../ui/Pill'
 import { useAction } from '../ui/useAction'
 import { useScreen } from '../screenaccess/screen'
 
-interface BT { id: number; name: string; section: string; default_gst: number; active: boolean; vendors: string[]; usable_vendors: number; bills: number }
+interface BT { id: number; name: string; section: string; default_gst: number; active: boolean; vendors: string[]; usable_vendors: number; bills: number; fin_status: string }
 
 export function BillTypesPage() {
   const { hasRight } = useSession()
@@ -32,7 +32,7 @@ export function BillTypesPage() {
           { key: 'gst', label: 'Default GST', right: true, render: (b) => b.default_gst + '%', csv: (b) => b.default_gst },
           { key: 'vendors', label: 'Vendors', render: (b) => b.vendors.length ? <>{b.vendors.join(', ')}{b.usable_vendors === 0 && <> <Pill tone="warn">none verified</Pill></>}</> : <Pill tone="bad">No vendor yet</Pill>, csv: (b) => b.vendors.join('; ') },
           { key: 'bills', label: 'Bills raised', right: true, render: (b) => b.bills, sort: (b) => b.bills, csv: (b) => b.bills },
-          { key: 'status', label: 'Status', render: (b) => <ActiveToggle kind="bill_type" id={b.id} name={b.name} active={b.active} onDone={reload} />, csv: (b) => b.active ? 'Active' : 'Inactive' },
+          { key: 'status', label: 'Status', render: (b) => b.fin_status === 'pending' ? <Pill tone="warn">Waits for Finance</Pill> : <ActiveToggle kind="bill_type" id={b.id} name={b.name} active={b.active} onDone={reload} />, csv: (b) => b.active ? 'Active' : 'Inactive' },
           { key: 'edit', label: '', render: (b) => (sc.edit && hasRight('masters')) ? <button className="link" onClick={() => setEdit(b)}>Edit</button> : null },
         ]} csvName="bill-types" />
       {edit && <BTModal b={edit === 'new' ? null : edit} onClose={() => setEdit(null)} onDone={() => { setEdit(null); reload(); refreshLookups() }} />}

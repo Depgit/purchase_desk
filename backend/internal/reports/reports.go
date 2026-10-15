@@ -51,14 +51,14 @@ type Result struct {
 
 // Filter is what every report takes.
 type Filter struct {
-	From, To   time.Time
-	Basis      string // req, po, gr
-	PropertyID int64
-	ClusterID  int64
-	City       string
-	Period     string // budget reports: mtd, lm, m3, m6, fy
-	all        bool
-	ids        []int64
+	From, To    time.Time
+	Basis       string   // req, po, gr
+	PropertyIDs []int64  // empty = every property in the viewer's access
+	ClusterIDs  []int64  // empty = every cluster
+	Cities      []string // empty = every city
+	Period      string   // budget reports: mtd, lm, m3, m6, fy
+	all         bool
+	ids         []int64
 }
 
 type def struct {
@@ -119,7 +119,7 @@ func init() {
 
 func (s *Service) filter(r *http.Request) (Filter, error) {
 	q := r.URL.Query()
-	f := Filter{Basis: q.Get("basis"), City: q.Get("city"), Period: q.Get("period"), PropertyID: int64(httpjson.QInt(r, "property_id", 0)), ClusterID: int64(httpjson.QInt(r, "cluster_id", 0))}
+	f := Filter{Basis: q.Get("basis"), Cities: httpjson.QStrings(r, "city"), Period: q.Get("period"), PropertyIDs: httpjson.QInts(r, "property_id"), ClusterIDs: httpjson.QInts(r, "cluster_id")}
 	today := clock.Today()
 	f.From, f.To = clock.MonthStart(today), today
 	if t, ok := clock.ParseDate(q.Get("from")); ok {
@@ -138,8 +138,9 @@ func (s *Service) filter(r *http.Request) (Filter, error) {
 
 // place is the shared property filter on alias p (property), k (cluster), ci (city), starting at parameter $n.
 func place(f Filter, n int) (string, []any) {
-	return fmt.Sprintf(` AND ($%d OR p.id = ANY($%d)) AND ($%d=0 OR p.id=$%d) AND ($%d=0 OR p.cluster_id=$%d) AND ($%d='' OR ci.name=$%d)`, n, n+1, n+2, n+2, n+3, n+3, n+4, n+4),
-		[]any{f.all, f.ids, f.PropertyID, f.ClusterID, f.City}
+	return fmt.Sprintf(` AND ($%d OR p.id = ANY($%d)) AND (cardinality($%d::bigint[])=0 OR p.id = ANY($%d)) AND (cardinality($%d::bigint[])=0 OR p.cluster_id = ANY($%d))
+		AND (cardinality($%d::text[])=0 OR ci.name = ANY($%d))`, n, n+1, n+2, n+2, n+3, n+3, n+4, n+4),
+		[]any{f.all, f.ids, f.PropertyIDs, f.ClusterIDs, f.Cities}
 }
 
 const placeJoin = ` JOIN property p ON p.id=d.property_id JOIN cluster k ON k.id=p.cluster_id JOIN city ci ON ci.id=k.city_id `
@@ -194,7 +195,7 @@ func collect(rows pgx.Rows, err error, width int) ([][]any, []int64, error) {
 }
 
 var stageSQL = `CASE d.status WHEN 'PENDING' THEN 'In approval' WHEN 'RETURNED' THEN 'Returned' WHEN 'REJECTED' THEN 'Rejected' WHEN 'CANCELLED' THEN 'Cancelled'
-	WHEN 'APPROVED' THEN 'Approved, PO pending' WHEN 'PO_ISSUED' THEN 'Awaiting delivery' WHEN 'RECEIVED' THEN 'Received' WHEN 'CLOSED' THEN 'Paid and closed'
+	WHEN 'APPROVED' THEN 'Approved, PO pending' WHEN 'PO_ISSUED' THEN CASE WHEN d.is_transfer THEN 'Awaiting delivery' WHEN d.vendor_status='accepted' THEN 'Awaiting delivery' WHEN d.vendor_status='declined' THEN 'Declined by vendor' WHEN d.sent_to_vendor_at IS NULL THEN 'Push to vendor' ELSE 'Sent to vendor' END WHEN 'RECEIVED' THEN 'Received' WHEN 'CLOSED' THEN 'Paid and closed'
 	WHEN 'WH_SENT' THEN 'In transit' WHEN 'WH_DONE' THEN 'Received from warehouse' WHEN 'WH_BACK' THEN 'Returned by warehouse' ELSE d.status END`
 
 const lineValue = `l.qty*l.rate*(1+l.gst_pct/100)`

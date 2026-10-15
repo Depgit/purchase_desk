@@ -475,14 +475,33 @@ func (s *Service) Send(ctx context.Context, u *access.User, vendorID int64, chan
 	if automatic {
 		how = "sent automatically"
 	}
+	// Every PO in the sheet has now reached the vendor: "Push to vendor" becomes "Sent to vendor".
+	rows, err := s.DB.Query(ctx, `UPDATE document SET sent_to_vendor_at=now() WHERE vendor_id=$1 AND po_number = ANY($2) AND sent_to_vendor_at IS NULL
+		RETURNING id, number, po_number`, vendorID, sh.PONumbers)
+	if err != nil {
+		return "", err
+	}
+	type pushed struct {
+		ID         int64
+		Number, PO string
+	}
+	sent, err := pgx.CollectRows(rows, pgx.RowToStructByPos[pushed])
+	if err != nil {
+		return "", err
+	}
+	for _, p := range sent {
+		_ = auditlog.Doc(ctx, s.DB, u, "", p.ID, p.Number, "Vendor Orders", "Sent to vendor", fmt.Sprintf("%s in order sheet v%d (%s)", p.PO, sh.Version, strings.Join(results, ", ")))
+	}
 	_ = auditlog.Write(ctx, s.DB, u, "Vendor Orders", fmt.Sprintf("Order sheet v%d %s (%s)", sh.Version, how, strings.Join(results, ", ")), v.Code, fmt.Sprintf("%s · %d confirmed POs", v.Name, sh.Confirmed))
 	return fmt.Sprintf("Order sheet v%d for %s: %s", sh.Version, v.Name, strings.Join(results, ", ")), nil
 }
 
 func (s *Service) send(w http.ResponseWriter, r *http.Request) error {
 	u := access.From(r)
-	if !u.IsAdmin && !u.HasStep("cc") && !u.HasStep("purchase") {
-		return httpjson.Forbidden("The Cost Controller, the Purchase Team or the System Admin sends order sheets.")
+	// Whoever approves requests sends the order sheets (there is no Purchase Team step): the Cluster Manager, the Cost
+	// Controller, the pre-opening team, and Purchase or the Admin where they still work.
+	if !u.IsAdmin && !u.HasStep("cc") && !u.HasStep("l2") && !u.HasStep("preop") && !u.HasStep("wh") && !u.HasStep("purchase") {
+		return httpjson.Forbidden("Whoever approves purchase requests (Cluster Manager, Cost Controller, pre-opening team, Warehouse Manager) sends order sheets.")
 	}
 	id, err := httpjson.ID(r, "id")
 	if err != nil {

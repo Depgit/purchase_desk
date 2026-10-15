@@ -54,7 +54,7 @@ func (s *Service) form(w http.ResponseWriter, r *http.Request) error {
 	rows, err := s.DB.Query(r.Context(), `SELECT b.id, b.name, b.section, b.default_gst,
 		coalesce(json_agg(json_build_object('id',v.id,'name',v.legal_name) ORDER BY v.legal_name) FILTER (WHERE v.id IS NOT NULL),'[]')
 		FROM bill_type b LEFT JOIN vendor_bill_type vb ON vb.bill_type_id=b.id LEFT JOIN vendor v ON v.id=vb.vendor_id AND v.active AND v.bank_verified
-		WHERE b.active GROUP BY b.id ORDER BY b.section, b.name`)
+		WHERE b.active AND b.fin_status='approved' GROUP BY b.id ORDER BY b.section, b.name`)
 	if err != nil {
 		return err
 	}
@@ -106,13 +106,13 @@ func (s *Service) create(w http.ResponseWriter, r *http.Request) error {
 	errs := []string{}
 	var section, typeName string
 	var typeActive bool
-	if err := s.DB.QueryRow(ctx, `SELECT section, name, active FROM bill_type WHERE id=$1`, in.BillTypeID).Scan(&section, &typeName, &typeActive); err != nil || !typeActive {
+	if err := s.DB.QueryRow(ctx, `SELECT section, name, active AND fin_status='approved' FROM bill_type WHERE id=$1`, in.BillTypeID).Scan(&section, &typeName, &typeActive); err != nil || !typeActive {
 		errs = append(errs, "Choose an active bill type.")
 	}
 	var propName, propKind string
 	var clusterID int64
 	var propActive bool
-	if err := s.DB.QueryRow(ctx, `SELECT name, kind, cluster_id, active FROM property WHERE id=$1`, in.PropertyID).Scan(&propName, &propKind, &clusterID, &propActive); err != nil || !propActive {
+	if err := s.DB.QueryRow(ctx, `SELECT name, kind, cluster_id, active AND fin_status='approved' FROM property WHERE id=$1`, in.PropertyID).Scan(&propName, &propKind, &clusterID, &propActive); err != nil || !propActive {
 		errs = append(errs, "Choose an active property.")
 	}
 	var vendorOK bool

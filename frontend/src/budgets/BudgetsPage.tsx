@@ -1,4 +1,5 @@
 // Monthly budgets per property and sub-category, split into weeks and days, against approved spend; and the F&B sales that drive F&B budgets.
+import { MultiSelect } from '../ui/MultiSelect'
 import { useEffect, useState } from 'react'
 import { download, put } from '../api/client'
 import { useLookups } from '../api/lookups'
@@ -22,7 +23,8 @@ export function BudgetsPage() {
   const sc = useScreen('budgets')
   const [tab, setTab] = useState<'all' | 'one' | 'fb'>('all')
   const [m, setM] = useState(thisMonth())
-  const [cl, setCl] = useState('')
+  const [cls, setCls] = useState<string[]>([])
+  const cl = cls.join(',') // several clusters, sent as cluster_id=1,2
   const [pid, setPid] = useState(0)
   const [upload, setUpload] = useState<'budgets' | 'fb_sales' | null>(null)
   const canEdit = sc.edit && hasStep('cc')
@@ -35,7 +37,7 @@ export function BudgetsPage() {
           <button className="btn ghost" onClick={() => download(`/budgets/export?month=${m}`, `budgets-${m}.csv`)}>Download budgets CSV</button>
           {canEdit && hasRight('upload') && <><button className="btn ghost" onClick={() => setUpload('budgets')}>Bulk upload / edit budgets</button><button className="btn ghost" onClick={() => setUpload('fb_sales')}>Upload F&amp;B sales</button></>}</div></div>
       <Tabs value={tab} onChange={setTab} items={[['all', 'All properties'], ['one', 'Property detail'], ['fb', 'F&B sales']]} />
-      {tab !== 'one' && <div className="tools"><select value={cl} onChange={(e) => setCl(e.target.value)} aria-label="Cluster"><option value="">All clusters</option>{l?.clusters.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}</select></div>}
+      {tab !== 'one' && <div className="tools"><MultiSelect ariaLabel="Cluster" value={cls} onChange={setCls} options={[['', 'All clusters'], ...(l?.clusters || []).map((c) => [String(c.id), c.name] as [string, string])]} /></div>}
       {tab === 'all' && <Overview m={m} cl={cl} onOpen={(id) => { setPid(id); setTab('one') }} />}
       {tab === 'one' && <PropertyDetail m={m} pid={pid} setPid={setPid} props={live.map((p) => [p.id, p.name])} canEdit={canEdit} />}
       {tab === 'fb' && <Sales m={m} cl={cl} />}

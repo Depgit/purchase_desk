@@ -27,9 +27,9 @@ import (
 	"purchasedesk/internal/flowsettings"
 	"purchasedesk/internal/httpjson"
 	"purchasedesk/internal/money"
-	"purchasedesk/internal/releasephase"
 	"purchasedesk/internal/screens"
 	"purchasedesk/internal/textclean"
+	"purchasedesk/internal/zohowake"
 )
 
 type Service struct {
@@ -37,8 +37,6 @@ type Service struct {
 	Guard *access.Guard
 	// Held returns, per invoice, what stops it being pushed to Zoho. Set by the Zoho push module.
 	Held func(ctx context.Context, ids []int64) (map[int64][]string, error)
-	// ZohoConnected reports whether the Zoho connection is live; the manual "mark paid" is a fallback for when it is not.
-	ZohoConnected func(ctx context.Context) bool
 }
 
 func (s *Service) Routes(r chi.Router) {
@@ -48,7 +46,6 @@ func (s *Service) Routes(r chi.Router) {
 	r.Post("/invoices/{id}/match", httpjson.Wrap(s.match))
 	r.Post("/invoices/{id}/send-back", httpjson.Wrap(s.sendBack))
 	r.Post("/invoices/{id}/approve-payment", httpjson.Wrap(s.approvePayment))
-	r.Post("/invoices/{id}/mark-paid", httpjson.Wrap(s.markPaid))
 }
 
 type Invoice struct {
@@ -247,6 +244,21 @@ func (s *Service) list(w http.ResponseWriter, r *http.Request) error {
 	return httpjson.OK(w, out)
 }
 
+// ForVendor lists one vendor's invoices for the vendor portal, newest first: everything not voided, paid ones from the
+// last year (all of them when all is set, for the vendor's statement).
+func ForVendor(ctx context.Context, q database.Q, vendorID int64, all bool) ([]Invoice, error) {
+	st, err := flowsettings.Load(ctx, q)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := q.Query(ctx, selectInvoice+` WHERE i.vendor_id=$1 AND i.status<>'VOID' AND ($2 OR i.status<>'PAID' OR i.paid_at > now() - interval '365 days')
+		ORDER BY i.created_at DESC LIMIT 5000`, vendorID, all)
+	if err != nil {
+		return nil, err
+	}
+	return pgx.CollectRows(rows, scan(st))
+}
+
 // Load reads one invoice with its receipt lines.
 func Load(ctx context.Context, q database.Q, id int64) (*Invoice, error) {
 	st, err := flowsettings.Load(ctx, q)
@@ -427,6 +439,10 @@ func (s *Service) sendBack(w http.ResponseWriter, r *http.Request) error {
 		if _, err := tx.Exec(r.Context(), `UPDATE goods_receipt SET voided=TRUE, void_reason=$2 WHERE id=$1`, grnID, in.Remark); err != nil {
 			return err
 		}
+		// A vendor's portal invoice it used is free again for the recount.
+		if _, err := tx.Exec(r.Context(), `UPDATE vendor_invoice SET goods_receipt_id=NULL WHERE goods_receipt_id=$1`, grnID); err != nil {
+			return err
+		}
 		if _, err := tx.Exec(r.Context(), `UPDATE invoice SET status='VOID', match_remark=$2 WHERE id=$1`, id, in.Remark); err != nil {
 			return err
 		}
@@ -466,9 +482,6 @@ func (s *Service) approvePayment(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 	msg := "Payment approved. Ready for Zoho."
-	if !releasephase.On(releasephase.Zoho) {
-		msg = "Payment approved."
-	}
 	if x, err := Load(r.Context(), s.DB, id); err == nil && x.AdvanceUsed > 0 {
 		msg += fmt.Sprintf(" Advance of %s adjusted; pay the vendor %s.", money.INR(x.AdvanceUsed-x.AdvanceTDS), money.INR(x.NetPayable))
 	}
@@ -478,6 +491,7 @@ func (s *Service) approvePayment(w http.ResponseWriter, r *http.Request) error {
 // approveOne approves one matched invoice for payment and sets its pay-by date. It adjusts paid advances: picks, or
 // the suggestion when picks is nil (always in bulk).
 func approveOne(ctx context.Context, tx pgx.Tx, u *access.User, st flowsettings.Settings, id int64, bulk bool, picks *[]advances.Pick) error {
+	zohowake.Now() // something may now go to Zoho
 	x, g, err := lockInvoice(ctx, tx, u, id, documents.InvMatched, "finance", access.Pay)
 	if err != nil {
 		return err
@@ -560,46 +574,4 @@ func (s *Service) bulk(w http.ResponseWriter, r *http.Request) error {
 		res = append(res, bulkResult{ID: id, OK: true, Message: map[string]string{"match": "Matched", "approve-payment": "Payment approved"}[in.Action]})
 	}
 	return httpjson.OK(w, map[string]any{"done": done, "failed": len(in.IDs) - done, "results": res})
-}
-
-// markPaid is the Admin's fallback, for example while Zoho is disconnected. Normally payment is read back from Zoho.
-func (s *Service) markPaid(w http.ResponseWriter, r *http.Request) error {
-	u := access.From(r)
-	if err := access.NeedAdmin(u); err != nil {
-		return err
-	}
-	id, err := httpjson.ID(r, "id")
-	if err != nil {
-		return err
-	}
-	var in struct {
-		Reference string `json:"reference"`
-	}
-	if err := httpjson.Decode(r, &in); err != nil {
-		return err
-	}
-	if len(strings.TrimSpace(in.Reference)) < 3 {
-		return httpjson.Bad("Enter the payment reference (UTR or cheque number).")
-	}
-	want := documents.InvPushed
-	if !releasephase.On(releasephase.Zoho) || (s.ZohoConnected != nil && !s.ZohoConnected(r.Context())) {
-		want += "," + documents.InvPayApproved // without Zoho, payment-approved invoices are closed by hand
-	}
-	err = pgx.BeginFunc(r.Context(), s.DB, func(tx pgx.Tx) error {
-		x, g, err := lockInvoice(r.Context(), tx, u, id, want, "finance", access.Pay)
-		if err != nil {
-			return err
-		}
-		if _, err := tx.Exec(r.Context(), `UPDATE invoice SET status='PAID', paid_at=now(), payment_ref=$2 WHERE id=$1`, id, strings.TrimSpace(in.Reference)); err != nil {
-			return err
-		}
-		if err := auditlog.Doc(r.Context(), tx, u, g.Name, x.DocumentID, x.DocNumber, "Payments", "Marked paid by hand · invoice "+x.Number, in.Reference); err != nil {
-			return err
-		}
-		return documents.CloseIfPaid(r.Context(), tx, x.DocumentID)
-	})
-	if err != nil {
-		return err
-	}
-	return httpjson.OK(w, map[string]string{"message": "Marked as paid"})
 }

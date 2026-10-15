@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math"
 	"net/http"
 	"strings"
 	"time"
@@ -76,6 +77,10 @@ type Stock struct {
 	Value     float64 `json:"value"`
 	PilValue  float64 `json:"pilferage_value"`
 	Status    string  `json:"status"`
+	Due       float64 `json:"due"`        // ordered by properties on approved transfers, not yet dispatched
+	OnOrder   float64 `json:"on_order"`   // the warehouse's own POs with vendors, not yet received
+	Short     float64 `json:"short"`      // due − closing − on order: what the warehouse still has to buy
+	Stocked   bool    `json:"wh_stocked"` // the item is marked stocked at the warehouse
 }
 
 const stockSQL = `WITH pur AS (
@@ -84,13 +89,18 @@ const stockSQL = `WITH pur AS (
 		WHERE l.sku_id IS NOT NULL GROUP BY 1),
 	iss AS (SELECT l.sku_id, sum(l.received_qty) q, sum(coalesce(l.dispatched_qty,0)-l.received_qty) pil FROM document_line l JOIN document d ON d.id=l.document_id
 		WHERE d.is_transfer AND d.status='WH_DONE' GROUP BY 1),
-	tr AS (SELECT l.sku_id, sum(coalesce(l.dispatched_qty,0)) q FROM document_line l JOIN document d ON d.id=l.document_id WHERE d.is_transfer AND d.status='WH_SENT' GROUP BY 1)
+	tr AS (SELECT l.sku_id, sum(coalesce(l.dispatched_qty,0)) q FROM document_line l JOIN document d ON d.id=l.document_id WHERE d.is_transfer AND d.status='WH_SENT' GROUP BY 1),
+	due AS (SELECT l.sku_id, sum(l.qty) q FROM document_line l JOIN document d ON d.id=l.document_id WHERE d.is_transfer AND d.status='PO_ISSUED' GROUP BY 1),
+	ord AS (SELECT l.sku_id, sum(greatest(l.qty-l.received_qty,0)) q FROM document_line l JOIN document d ON d.id=l.document_id JOIN property p ON p.id=d.property_id AND p.kind='warehouse'
+		WHERE NOT d.is_transfer AND d.kind='purchase' AND d.status IN ('APPROVED','PO_ISSUED') GROUP BY 1)
 	SELECT k.id, k.code, k.item_name, coalesce(b.name,''), ps.name, sc.name, coalesce(ws.opening_qty,0), coalesce(pur.q,0), coalesce(iss.q,0), coalesce(iss.pil,0), coalesce(tr.q,0), coalesce(ws.min_level,0),
 	coalesce((SELECT r.rate FROM rate_card r JOIN vendor v ON v.id=r.vendor_id AND v.vendor_type='warehouse' WHERE r.sku_id=k.id AND NOT r.superseded ORDER BY r.valid_from DESC LIMIT 1),
-	         (SELECT l.rate FROM goods_receipt_line gl JOIN document_line l ON l.id=gl.line_id JOIN document d ON d.id=l.document_id JOIN property p ON p.id=d.property_id AND p.kind='warehouse' WHERE l.sku_id=k.id ORDER BY gl.goods_receipt_id DESC LIMIT 1), 0)
+	         (SELECT l.rate FROM goods_receipt_line gl JOIN document_line l ON l.id=gl.line_id JOIN document d ON d.id=l.document_id JOIN property p ON p.id=d.property_id AND p.kind='warehouse' WHERE l.sku_id=k.id ORDER BY gl.goods_receipt_id DESC LIMIT 1), 0),
+	coalesce(due.q,0), coalesce(ord.q,0), k.wh_stocked
 	FROM sku k LEFT JOIN brand b ON b.id=k.brand_id JOIN pack_size ps ON ps.id=k.pack_size_id JOIN sub_category sc ON sc.id=k.sub_category_id
 	LEFT JOIN warehouse_stock ws ON ws.sku_id=k.id LEFT JOIN pur ON pur.sku_id=k.id LEFT JOIN iss ON iss.sku_id=k.id LEFT JOIN tr ON tr.sku_id=k.id
-	WHERE ws.sku_id IS NOT NULL OR pur.sku_id IS NOT NULL OR iss.sku_id IS NOT NULL OR tr.sku_id IS NOT NULL`
+	LEFT JOIN due ON due.sku_id=k.id LEFT JOIN ord ON ord.sku_id=k.id
+	WHERE ws.sku_id IS NOT NULL OR pur.sku_id IS NOT NULL OR iss.sku_id IS NOT NULL OR tr.sku_id IS NOT NULL OR due.sku_id IS NOT NULL OR (k.wh_stocked AND k.active)`
 
 // Ledger returns stock per SKU, keyed by SKU id.
 func Ledger(ctx context.Context, q database.Q) (map[int64]*Stock, []*Stock, error) {
@@ -103,11 +113,12 @@ func Ledger(ctx context.Context, q database.Q) (map[int64]*Stock, []*Stock, erro
 	list := []*Stock{}
 	for rows.Next() {
 		x := &Stock{}
-		if err := rows.Scan(&x.SKUID, &x.Code, &x.Item, &x.Brand, &x.PackSize, &x.SubCat, &x.Opening, &x.Purchased, &x.Issued, &x.Pilferage, &x.InTransit, &x.MinLevel, &x.Rate); err != nil {
+		if err := rows.Scan(&x.SKUID, &x.Code, &x.Item, &x.Brand, &x.PackSize, &x.SubCat, &x.Opening, &x.Purchased, &x.Issued, &x.Pilferage, &x.InTransit, &x.MinLevel, &x.Rate, &x.Due, &x.OnOrder, &x.Stocked); err != nil {
 			return nil, nil, err
 		}
 		x.Closing = x.Opening + x.Purchased - x.Issued - x.Pilferage - x.InTransit
 		x.Value, x.PilValue = money.Round2(x.Closing*x.Rate), money.Round2(x.Pilferage*x.Rate)
+		x.Short = math.Max(0, x.Due-math.Max(x.Closing, 0)-x.OnOrder)
 		switch {
 		case x.Closing <= 0:
 			x.Status = "Out of stock"
@@ -685,9 +696,9 @@ func (s *Service) receiveTransfer(w http.ResponseWriter, r *http.Request) error 
 		if !d.IsTransfer || d.Status != documents.WHSent {
 			return httpjson.Conflict("%s is not in transit.", d.PONumber)
 		}
-		g := documents.CanAct(u, d, "store", access.Receive)
+		g := documents.TransferReceiver(u, d)
 		if g == nil {
-			return httpjson.Forbidden("Only the receiving store at %s can record this receipt.", d.Property)
+			return httpjson.Forbidden("Only the person who raised this order, or the receiving store at %s, can record this receipt.", d.Property)
 		}
 		short := []string{}
 		for _, l := range d.Lines {

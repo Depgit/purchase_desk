@@ -9,7 +9,6 @@ import { ActiveToggle } from '../ui/ActiveToggle'
 import { DataTable } from '../ui/DataTable'
 import { Pill } from '../ui/Pill'
 import { useAction } from '../ui/useAction'
-import { PHASE, usePhase } from '../releasephase/phase'
 import type { Vendor } from './VendorForm'
 import { useScreen } from '../screenaccess/screen'
 
@@ -19,7 +18,6 @@ export function VendorsPage() {
   const nav = useNavigate()
   const { hasRight, hasStep } = useSession()
   const sc = useScreen('vendors')
-  const bills = usePhase().on(PHASE.bills)
   const { data, reload } = useApi<Vendor[]>('/vendors')
   const [upload, setUpload] = useState(false)
   const a = useAction()
@@ -32,9 +30,8 @@ export function VendorsPage() {
       <DataTable screen="vendors" rows={data || []} rowKey={(v) => v.id} dim={(v) => !v.active}
         search={(v) => [v.code, v.legal_name, v.city, v.gstin, v.pan, ...v.supplies].join(' ')}
         filters={[
-          { id: 'type', label: 'Type', options: bills ? [['', 'All vendor types'], ['goods', 'Goods'], ['utility', 'Utility'], ['amc', 'AMC'], ['other', 'Other services']] : [['', 'All vendor types'], ['goods', 'Goods']], test: (v, x) => v.vendor_type === x },
+          { id: 'type', label: 'Type', options: [['', 'All vendor types'], ['goods', 'Goods'], ['utility', 'Utility'], ['amc', 'AMC'], ['other', 'Other services']], test: (v, x) => v.vendor_type === x },
           { id: 'bank', label: 'Bank', options: [['', 'Any bank status'], ['1', 'Bank verified'], ['0', 'Verification pending']], test: (v, x) => v.bank_verified === (x === '1') },
-          { id: 'act', label: 'Active', options: [['', 'Active and inactive'], ['1', 'Active only'], ['0', 'Inactive only']], test: (v, x) => v.active === (x === '1') },
         ]}
         columns={[
           { key: 'code', label: 'Code', render: (v) => v.code, csv: (v) => v.code },

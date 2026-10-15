@@ -1,6 +1,5 @@
 // Package demodata loads a small sample company (properties, users for every role, vendors, items, rates,
-// mappings, budgets and F&B sales) so every flow can be tried. It runs only when SEED_DEMO=true, and loads only the
-// release phases that are switched on; raising RELEASE_PHASE adds the next phases' samples on the next start.
+// mappings, budgets and F&B sales) so every flow can be tried. It runs only when SEED_DEMO=true.
 // Every sample user signs in with the password Demo@1234.
 package demodata
 
@@ -16,24 +15,30 @@ import (
 	"purchasedesk/internal/clock"
 	"purchasedesk/internal/encryption"
 	"purchasedesk/internal/passwords"
-	"purchasedesk/internal/releasephase"
 )
 
 const Password = "Demo@1234"
 
-// loadedKey records, in the setting table, the highest release phase whose sample data is loaded.
+// loadedKey records, in the setting table, how far the sample data is loaded: 1 the purchase cycle, 3 bills, budgets
+// and corporate, 5 also the warehouse (the numbers of the old rollout phases, so older demo databases carry on).
 const loadedKey = "demo_loaded_phase"
 
-// Load adds the sample data for every phase up to the switched-on one that is not loaded yet.
-// Phase 1 data loads only into an empty database. Raising RELEASE_PHASE later adds the next phases' samples.
+const (
+	partCore      = 1
+	partBills     = 3
+	partWarehouse = 4
+	partAll       = 5
+)
+
+// Load adds whatever sample data is not loaded yet. The core loads only into an empty database.
 func Load(ctx context.Context, db *pgxpool.Pool, box *encryption.Box) error {
-	upTo := releasephase.Current()
+	upTo := partAll
 	var props, loaded int
 	if err := db.QueryRow(ctx, `SELECT (SELECT count(*) FROM property), coalesce((SELECT (value)::int FROM setting WHERE key=$1),0)`, loadedKey).Scan(&props, &loaded); err != nil {
 		return err
 	}
 	if loaded == 0 && props > 0 {
-		return nil // real data, or a database seeded before phases existed
+		return nil // real data, or a database seeded before the parts were recorded
 	}
 	if loaded >= upTo {
 		return nil
@@ -45,21 +50,25 @@ func Load(ctx context.Context, db *pgxpool.Pool, box *encryption.Box) error {
 	acct, _ := box.Seal("123456789012")
 	err = pgx.BeginFunc(ctx, db, func(tx pgx.Tx) error {
 		d := &loader{ctx: ctx, tx: tx, hash: hash, acct: acct}
-		if loaded < releasephase.Core {
+		if loaded < partCore {
 			d.core()
 		}
-		if loaded < releasephase.Bills && upTo >= releasephase.Bills {
+		if loaded < partBills {
 			d.billsBudgetsCorporate()
 		}
-		if loaded < releasephase.Warehouse && upTo >= releasephase.Warehouse {
+		if loaded < partWarehouse {
 			d.warehouse()
 		}
+		// The sample masters (inserted without an author) count as approved by Finance.
+		for _, t := range []string{"category", "sub_category", "sku", "property", "bill_type", "expense_head"} {
+			d.ex(`UPDATE ` + t + ` SET fin_status='approved' WHERE fin_status='pending' AND created_by IS NULL`)
+		}
 		d.ex(`INSERT INTO setting(key,value) VALUES ($1,to_jsonb($2::int)) ON CONFLICT (key) DO UPDATE SET value=excluded.value, updated_at=now()`, loadedKey, upTo)
-		d.ex(`INSERT INTO activity_log(user_name,role_name,module,action,record,details) VALUES ('System','System','Settings','Demo data loaded',$1, 'Sample users sign in with password Demo@1234')`, fmt.Sprintf("up to phase %d", upTo))
+		d.ex(`INSERT INTO activity_log(user_name,role_name,module,action,record,details) VALUES ('System','System','Settings','Demo data loaded',$1, 'Sample users sign in with password Demo@1234')`, "Sample company")
 		return d.err
 	})
 	if err == nil {
-		log.Printf("demo data loaded up to phase %d; sample users sign in with %s", upTo, Password)
+		log.Printf("demo data loaded; sample users sign in with %s", Password)
 	}
 	return err
 }

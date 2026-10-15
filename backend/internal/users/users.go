@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"regexp"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
@@ -21,7 +22,6 @@ import (
 	"purchasedesk/internal/httpjson"
 	"purchasedesk/internal/indiantax"
 	"purchasedesk/internal/passwords"
-	"purchasedesk/internal/releasephase"
 	"purchasedesk/internal/textclean"
 )
 
@@ -52,6 +52,7 @@ type RoleGrant struct {
 type User struct {
 	ID         int64       `json:"id"`
 	Name       string      `json:"name"`
+	EmployeeID string      `json:"employee_id"`
 	Email      string      `json:"email"`
 	Mobile     string      `json:"mobile"`
 	Department string      `json:"department"`
@@ -63,7 +64,7 @@ type User struct {
 }
 
 func (s *Service) load(ctx context.Context, where string, args ...any) ([]User, error) {
-	rows, err := s.DB.Query(ctx, `SELECT u.id, u.name, coalesce(u.email::text,''), coalesce(u.mobile,''), u.department, u.password_hash IS NOT NULL, u.active,
+	rows, err := s.DB.Query(ctx, `SELECT u.id, u.name, u.employee_id, coalesce(u.email::text,''), coalesce(u.mobile,''), u.department, u.password_hash IS NOT NULL, u.active,
 		coalesce(u.created_by,0)
 		FROM app_user u `+where+` ORDER BY u.name`, args...)
 	if err != nil {
@@ -72,7 +73,7 @@ func (s *Service) load(ctx context.Context, where string, args ...any) ([]User, 
 	out, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (User, error) {
 		var x User
 		x.Roles = []RoleGrant{}
-		return x, row.Scan(&x.ID, &x.Name, &x.Email, &x.Mobile, &x.Department, &x.HasPwd, &x.Active, &x.CreatedBy)
+		return x, row.Scan(&x.ID, &x.Name, &x.EmployeeID, &x.Email, &x.Mobile, &x.Department, &x.HasPwd, &x.Active, &x.CreatedBy)
 	})
 	if err != nil {
 		return nil, err
@@ -164,6 +165,7 @@ func (s *Service) people(w http.ResponseWriter, r *http.Request) error {
 // UserInput is a user from the form or an upload row.
 type UserInput struct {
 	Name       string      `json:"name"`
+	EmployeeID string      `json:"employee_id"` // required for a new user; blank on an edit keeps the current one
 	Email      string      `json:"email"`
 	Mobile     string      `json:"mobile"`
 	Department string      `json:"department"`
@@ -171,13 +173,29 @@ type UserInput struct {
 	Roles      []RoleGrant `json:"roles"`
 }
 
+// employeeID is the shape of an employee ID (stored in capitals).
+var employeeID = regexp.MustCompile(`^[A-Z0-9][A-Z0-9/_-]{0,29}$`)
+
 // ValidateUser tidies the input and returns every problem. id is the user being edited, or 0; selfID is the Admin doing it.
 func ValidateUser(ctx context.Context, q database.Q, in *UserInput, id, selfID int64) []string {
 	in.Name, in.Department = textclean.Clean(in.Name), textclean.Clean(in.Department)
 	in.Email, in.Mobile = strings.ToLower(strings.TrimSpace(in.Email)), strings.TrimSpace(in.Mobile)
+	in.EmployeeID = strings.ToUpper(strings.TrimSpace(in.EmployeeID))
 	errs := []string{}
 	if len(in.Name) < 3 {
 		errs = append(errs, "Enter the name.")
+	}
+	switch {
+	case in.EmployeeID == "" && id == 0:
+		errs = append(errs, "Enter the employee ID.")
+	case in.EmployeeID != "" && !employeeID.MatchString(in.EmployeeID):
+		errs = append(errs, "Employee ID is up to 30 letters, digits, - / or _.")
+	case in.EmployeeID != "":
+		var taken string
+		_ = q.QueryRow(ctx, `SELECT name FROM app_user WHERE id<>$2 AND upper(employee_id)=$1`, in.EmployeeID, id).Scan(&taken)
+		if taken != "" {
+			errs = append(errs, "Employee ID "+in.EmployeeID+" is already given to "+taken+".")
+		}
 	}
 	if in.Email == "" && in.Mobile == "" {
 		errs = append(errs, "Enter an email or a mobile number to sign in with.")
@@ -209,8 +227,6 @@ func ValidateUser(ctx context.Context, q database.Q, in *UserInput, id, selfID i
 		var active bool
 		if err := q.QueryRow(ctx, `SELECT step, active FROM role WHERE id=$1`, g.RoleID).Scan(&step, &active); err != nil || !active {
 			errs = append(errs, "Choose active roles.")
-		} else if !releasephase.RoleOn(step) {
-			errs = append(errs, "Warehouse and corporate roles open in a later phase of the rollout.")
 		}
 		hasAdmin = hasAdmin || step == "admin"
 		if g.Scope == "" {
@@ -263,13 +279,14 @@ func SaveUser(ctx context.Context, tx pgx.Tx, u *access.User, id int64, in UserI
 	act := "User changed"
 	if id == 0 {
 		act = "User added"
-		if err := tx.QueryRow(ctx, `INSERT INTO app_user(name,email,mobile,department,password_hash,created_by) VALUES ($1,$2,$3,$4,$5,$6) RETURNING id`,
-			in.Name, email, mobile, in.Department, hash, u.ID).Scan(&id); err != nil {
+		if err := tx.QueryRow(ctx, `INSERT INTO app_user(name,email,mobile,department,password_hash,created_by,employee_id) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id`,
+			in.Name, email, mobile, in.Department, hash, u.ID, in.EmployeeID).Scan(&id); err != nil {
 			return 0, err
 		}
 	} else {
-		if _, err := tx.Exec(ctx, `UPDATE app_user SET name=$2, email=$3, mobile=$4, department=$5, password_hash=coalesce($6,password_hash) WHERE id=$1`,
-			id, in.Name, email, mobile, in.Department, hash); err != nil {
+		if _, err := tx.Exec(ctx, `UPDATE app_user SET name=$2, email=$3, mobile=$4, department=$5, password_hash=coalesce($6,password_hash),
+			employee_id=coalesce(nullif($7,''),employee_id) WHERE id=$1`,
+			id, in.Name, email, mobile, in.Department, hash, in.EmployeeID); err != nil {
 			return 0, err
 		}
 		if _, err := tx.Exec(ctx, `DELETE FROM user_role WHERE user_id=$1`, id); err != nil {

@@ -20,9 +20,9 @@ import (
 	"purchasedesk/internal/httpjson"
 	"purchasedesk/internal/indiantax"
 	"purchasedesk/internal/money"
-	"purchasedesk/internal/releasephase"
 	"purchasedesk/internal/textclean"
 	"purchasedesk/internal/uploadedfiles"
+	"purchasedesk/internal/zohowake"
 )
 
 type Service struct {
@@ -37,9 +37,7 @@ func (s *Service) Routes(r chi.Router) {
 	r.Post("/vendors", httpjson.Wrap(s.save))
 	r.Put("/vendors/{id}", httpjson.Wrap(s.save))
 	r.Post("/vendors/{id}/verify", httpjson.Wrap(s.verify))
-	if releasephase.On(releasephase.Sheets) {
-		r.Put("/vendors/{id}/sending", httpjson.Wrap(s.setSending))
-	}
+	r.Put("/vendors/{id}/sending", httpjson.Wrap(s.setSending))
 }
 
 type Vendor struct {
@@ -108,13 +106,7 @@ func (s *Service) list(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
-	out := all[:0]
-	for _, v := range all {
-		if releasephase.VendorTypeOn(v.Type) { // vendors of later phases stay hidden until RELEASE_PHASE reaches them
-			out = append(out, v)
-		}
-	}
-	return httpjson.OK(w, out)
+	return httpjson.OK(w, all)
 }
 
 func (s *Service) get(w http.ResponseWriter, r *http.Request) error {
@@ -208,8 +200,6 @@ func (s *Service) Validate(ctx context.Context, in *Input, id int64, proof *uplo
 	in.BankAccount, in.BankAccount2 = strings.TrimSpace(in.BankAccount), strings.TrimSpace(in.BankAccount2)
 	if !textclean.Contains([]string{"goods", "utility", "amc", "other"}, in.Type) {
 		errs = append(errs, "Choose the vendor type.")
-	} else if !releasephase.VendorTypeOn(in.Type) {
-		errs = append(errs, "Utility, AMC and corporate vendors open in a later phase of the rollout.")
 	}
 	if len(in.Name) < 3 {
 		errs = append(errs, "Enter the legal entity name.")
@@ -265,7 +255,9 @@ func (s *Service) Validate(ctx context.Context, in *Input, id int64, proof *uplo
 		if in.BankHolder == "" && id == 0 {
 			errs = append(errs, "Enter the account holder name.")
 		}
-		if !indiantax.Acct.MatchString(in.BankAccount) {
+		if id != 0 && in.BankAccount == "" {
+			errs = append(errs, "To change the IFSC, enter the account number again (twice), so Finance verifies the new bank details.")
+		} else if !indiantax.Acct.MatchString(in.BankAccount) {
 			errs = append(errs, "Account number must be 9 to 18 digits.")
 		} else if in.BankAccount != in.BankAccount2 {
 			errs = append(errs, "Account numbers do not match.")
@@ -422,6 +414,7 @@ func (s *Service) Seal(acct string) (string, string, error) {
 }
 
 func (s *Service) verify(w http.ResponseWriter, r *http.Request) error {
+	zohowake.Now() // something may now go to Zoho
 	u := access.From(r)
 	if !u.IsAdmin && !u.HasStep("finance") {
 		return httpjson.Forbidden("Only Finance or the System Admin can verify bank details.")

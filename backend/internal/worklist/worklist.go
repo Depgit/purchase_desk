@@ -10,6 +10,7 @@ import (
 	"purchasedesk/internal/access"
 	"purchasedesk/internal/documents"
 	"purchasedesk/internal/httpjson"
+	"purchasedesk/internal/masterapproval"
 	"purchasedesk/internal/screens"
 )
 
@@ -34,6 +35,9 @@ func (s *Service) counts(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 	c := map[string]int{}
+	// Vendors with POs raised but not yet pushed in an order sheet, for whoever sends the sheets.
+	toPush := map[int64]bool{}
+	sendsSheets := (u.IsAdmin || u.HasStep("cc") || u.HasStep("l2") || u.HasStep("preop") || u.HasStep("wh") || u.HasStep("purchase"))
 	for _, d := range docs {
 		owner := d.Owner()
 		switch d.Status {
@@ -49,9 +53,7 @@ func (s *Service) counts(w http.ResponseWriter, r *http.Request) error {
 			if d.RequesterID == u.ID {
 				if d.IsCorp() {
 					c["corporate"]++
-				} else if d.Kind == "bill" {
-					c["bills_"+d.BillSection]++
-				} else {
+				} else { // returned bills are listed with the requests
 					c["requests"]++
 				}
 			}
@@ -60,11 +62,18 @@ func (s *Service) counts(w http.ResponseWriter, r *http.Request) error {
 				c["purchase_orders"]++
 			}
 		case documents.POIssued:
+			if sendsSheets && d.Kind == "purchase" && !d.IsTransfer && d.SentToVendor == nil {
+				toPush[d.VendorID] = true
+			}
+			// A PO the vendor declined waits for the Purchase Team to sort it out.
+			if d.VendorStatus == "declined" && documents.POKeeper(u, d) != nil {
+				c["purchase_orders"]++
+			}
 			if d.IsTransfer {
 				if documents.CanAct(u, d, "wh", access.Receive) != nil {
 					c["warehouse"]++
 				}
-			} else if documents.CanAct(u, d, owner, access.Receive) != nil {
+			} else if documents.Receiver(u, d) != nil {
 				if d.IsCorp() {
 					c["corporate"]++
 				} else {
@@ -72,10 +81,16 @@ func (s *Service) counts(w http.ResponseWriter, r *http.Request) error {
 				}
 			}
 		case documents.WHSent:
-			if documents.CanAct(u, d, "store", access.Receive) != nil {
+			if documents.TransferReceiver(u, d) != nil {
 				c["goods_receipts"]++
 			}
 		}
+	}
+	if len(toPush) > 0 {
+		c["vendor_sheets"] = len(toPush)
+	}
+	if u.IsAdmin || u.HasStep("finance") {
+		c["master_approvals"] = masterapproval.Count(r.Context(), s.DB)
 	}
 	rows, err := s.DB.Query(r.Context(), `SELECT i.status, i.property_id, p.cluster_id FROM invoice i JOIN property p ON p.id=i.property_id
 		WHERE i.status IN ('RECEIVED','MATCHED','PAY_APPROVED') AND ($1 OR i.property_id = ANY($2))`, all, ids)

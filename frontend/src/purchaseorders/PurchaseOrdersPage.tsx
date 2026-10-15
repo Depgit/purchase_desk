@@ -28,7 +28,7 @@ export function PurchaseOrdersPage() {
   const [issuing, setIssuing] = useState(false)
   const [results, setResults] = useState<BulkResult[] | null>(null)
   const rows = data || []
-  const st = (r: ListRow) => r.status === 'APPROVED' ? <Pill tone="warn">PO pending</Pill> : r.status === 'PO_ISSUED' ? <Pill>{r.is_transfer ? 'Warehouse to dispatch' : 'Awaiting delivery'}</Pill> : <Pill tone="ok">{r.status_label}</Pill>
+  const st = (r: ListRow) => r.status === 'APPROVED' ? <Pill tone="warn">PO pending</Pill> : r.status === 'PO_ISSUED' ? <Pill tone={r.status_label === 'Declined by vendor' ? 'bad' : r.status_label === 'Push to vendor' ? 'warn' : ''}>{r.is_transfer ? 'Warehouse to dispatch' : r.status_label}</Pill> : <Pill tone="ok">{r.status_label}</Pill>
   return (
     <>
       <div className="head"><div><h1>Purchase Orders</h1><p className="sub">Approved requests to convert, and orders sent to vendors. Tick several approved requests to issue their POs at once.</p></div>
@@ -36,7 +36,7 @@ export function PurchaseOrdersPage() {
       {results && <BulkResults title="Last bulk issue" results={results} label={(id) => rows.find((r) => r.id === id)?.number || String(id)} onClose={() => setResults(null)} />}
       <DataTable screen="purchase-orders" rows={rows} rowKey={(r) => r.id} date={{ label: 'Raised', value: (r) => r.created_at, onFrom: fromChanged }} search={search} onOpen={(r) => nav('/documents/' + r.id)}
         selectable={(sc.edit && hasRight('issue_po')) ? (r) => r.status === 'APPROVED' && !r.is_transfer : undefined} selected={sel} onSelect={setSel}
-        filters={[{ id: 'st', label: 'Status', options: [['', 'All'], ['APPROVED', 'PO pending'], ['PO_ISSUED', 'Awaiting delivery'], ['DONE', 'Received']], test: (r, v) => v === 'DONE' ? !['APPROVED', 'PO_ISSUED'].includes(r.status) : r.status === v }, ...placeFilters(l)]}
+        filters={[{ id: 'st', label: 'Status', options: [['', 'All'], ['APPROVED', 'PO pending'], ['PO_ISSUED', 'Sent / awaiting delivery'], ['DONE', 'Received']], test: (r, v) => v === 'DONE' ? !['APPROVED', 'PO_ISSUED'].includes(r.status) : r.status === v }, ...placeFilters(l)]}
         columns={[col.po, col.number, col.vendor, col.property, col.deliver, col.terms, col.amount, { key: 'status', label: 'Status', render: st, csv: (r) => r.status_label }]} csvName="purchase-orders" />
       {issuing && <BulkIssue ids={[...sel] as number[]} onClose={() => setIssuing(false)} onDone={(r) => { setIssuing(false); setSel(new Set()); setResults(r); reload() }} />}
     </>

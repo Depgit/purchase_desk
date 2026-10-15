@@ -32,13 +32,14 @@ type BillType struct {
 	Vendors    []string `json:"vendors"`
 	Usable     int      `json:"usable_vendors"`
 	Bills      int      `json:"bills"`
+	FinStatus  string   `json:"fin_status"` // pending until Finance approves a new one
 }
 
 func (s *Service) list(w http.ResponseWriter, r *http.Request) error {
 	rows, err := s.DB.Query(r.Context(), `SELECT b.id, b.name, b.section, b.default_gst, b.active,
 		coalesce(array_agg(v.legal_name ORDER BY v.legal_name) FILTER (WHERE v.id IS NOT NULL), '{}'),
 		count(v.id) FILTER (WHERE v.active AND v.bank_verified),
-		(SELECT count(*) FROM document d WHERE d.bill_type_id=b.id)
+		(SELECT count(*) FROM document d WHERE d.bill_type_id=b.id), b.fin_status
 		FROM bill_type b LEFT JOIN vendor_bill_type vb ON vb.bill_type_id=b.id LEFT JOIN vendor v ON v.id=vb.vendor_id
 		GROUP BY b.id ORDER BY b.section, b.name`)
 	if err != nil {
@@ -46,7 +47,7 @@ func (s *Service) list(w http.ResponseWriter, r *http.Request) error {
 	}
 	out, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (BillType, error) {
 		var x BillType
-		return x, row.Scan(&x.ID, &x.Name, &x.Section, &x.DefaultGST, &x.Active, &x.Vendors, &x.Usable, &x.Bills)
+		return x, row.Scan(&x.ID, &x.Name, &x.Section, &x.DefaultGST, &x.Active, &x.Vendors, &x.Usable, &x.Bills, &x.FinStatus)
 	})
 	if err != nil {
 		return err

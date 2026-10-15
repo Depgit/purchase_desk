@@ -23,7 +23,8 @@ export function AdvancesList({ onChange }: { onChange?: () => void }) {
         { key: 'vendor', label: 'Vendor', render: (a) => <>{a.vendor}<br /><span className="hint">{a.property}</span></>, csv: (a) => `${a.vendor} · ${a.property}` },
         { key: 'amt', label: 'Advance', right: true, render: (a) => <><span className="nowrap">{inr(a.amount)}</span>{a.pct ? <span className="hint"> · {a.pct}%</span> : null}
           {a.tds_amount > 0 && <><br /><span className="hint nowrap">TDS {inr(a.tds_amount)} · vendor gets {inr(a.pay_vendor)}</span></>}</>, sort: (a) => a.amount, csv: (a) => a.amount },
-        { key: 'paid', label: 'Paid', render: (a) => a.paid_on ? <><span className="nowrap">{day(a.paid_on)}</span><br /><span className="hint">{a.payment_ref}</span></> : '—', sort: (a) => a.paid_on, csv: (a) => a.paid_on ? `${a.paid_on} ${a.payment_ref}` : '' },
+        { key: 'paid', label: 'Paid', render: (a) => a.paid_on ? <><span className="nowrap">{day(a.paid_on)}</span><br /><span className="hint">{a.payment_ref}</span>
+          {a.status === 'PAID' && <><br /><span className="hint">{a.zoho_payment_id ? 'In Zoho' : a.zoho_error ? 'Zoho: ' + a.zoho_error.replace(/^Held: /, '') : 'Going to Zoho'}</span></>}</> : '—', sort: (a) => a.paid_on, csv: (a) => a.paid_on ? `${a.paid_on} ${a.payment_ref}` : '' },
         { key: 'open', label: 'Used / left', right: true, render: (a) => a.status !== 'PAID' ? '—' : <><span className="nowrap"><b>{inr(a.open)}</b> left</span><br />
           <span className="hint nowrap">{inr(a.adjusted)} adjusted{a.refunded ? ` · ${inr(a.refunded)} refunded` : ''}</span></>, sort: (a) => a.open, csv: (a) => a.open },
         { key: 'status', label: 'Status', render: (a) => <AdvanceStatus a={a} />, csv: (a) => a.status },

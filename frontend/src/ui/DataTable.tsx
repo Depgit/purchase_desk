@@ -5,6 +5,7 @@ import { get, put, saveBlob } from '../api/client'
 import { addDays, thisMonth, today } from '../format/format'
 import { Modal } from './Modal'
 import { MultiSelect } from './MultiSelect'
+import { ACTIVE_OPTIONS } from './ActiveFilter'
 
 export interface Column<T> {
   key: string
@@ -19,9 +20,14 @@ export interface Filter<T> {
   label: string
   options: [string, string][]
   test: (r: T, v: string) => boolean
-  /** Tick several values; a row shows when it passes the test for any of them. */
+  /** Every list filter lets several values be ticked; a row shows when it passes the test for any of them.
+   *  single: true keeps a plain one-choice dropdown. */
   multi?: boolean
+  single?: boolean
 }
+
+// The ticked values of a filter, kept as one string (a separator no value contains).
+const SEP = '\u0001'
 
 /** The date a row is filtered on: a label for the picker and the row's date (YYYY-MM-DD or an ISO timestamp). */
 export interface DateFilter<T> {
@@ -57,6 +63,8 @@ interface Props<T> {
   rowKey: (r: T) => string | number
   search?: (r: T) => string
   filters?: Filter<T>[]
+  /** Leave out the Status (active / inactive) filter a list of masters gets by itself. */
+  noStatus?: boolean
   date?: DateFilter<T>
   onOpen?: (r: T) => void
   selectable?: (r: T) => boolean
@@ -81,6 +89,15 @@ function csvCell(v: unknown) {
 export function DataTable<T>(p: Props<T>) {
   const [q, setQ] = useState('')
   const [fv, setFv] = useState<Record<string, string>>({})
+  // A list of masters (rows with an active flag) gets a Status filter: active, inactive, or both. Never a second one
+  // beside a page's own active/inactive filter.
+  const filters = useMemo<Filter<T>[]>(() => {
+    const base = p.filters || []
+    const r0 = p.rows[0] as Record<string, unknown> | undefined
+    const own = base.some((f) => f.id === '_active' || f.options.some(([v, l]) => v === '' && l === ACTIVE_OPTIONS[0][1]))
+    if (p.noStatus || typeof r0?.active !== 'boolean' || own) return base
+    return [...base, { id: '_active', label: 'Status', options: ACTIVE_OPTIONS, test: (r: T, v: string) => ((r as Record<string, unknown>).active ? '1' : '0') === v }]
+  }, [p.filters, p.rows, p.noStatus])
   const [range, setRange] = useState('')
   const [from, setFrom] = useState('')
   const [to, setTo] = useState('')
@@ -103,10 +120,10 @@ export function DataTable<T>(p: Props<T>) {
 
   const filtered = useMemo(() => {
     let rows = p.rows
-    for (const f of p.filters || []) {
+    for (const f of filters) {
       const v = fv[f.id]
       if (!v) continue
-      const vs = f.multi ? v.split(',') : [v]
+      const vs = v.split(SEP)
       rows = rows.filter((r) => vs.some((x) => f.test(r, x)))
     }
     if (p.date && range) {
@@ -131,7 +148,7 @@ export function DataTable<T>(p: Props<T>) {
       }
     }
     return rows
-  }, [p.rows, p.filters, p.search, p.columns, p.date, range, from, to, fv, q, pref.sort, p.defaultSort])
+  }, [p.rows, filters, p.search, p.columns, p.date, range, from, to, fv, q, pref.sort, p.defaultSort])
 
   const pages = Math.max(1, Math.ceil(filtered.length / size))
   const pg = Math.min(page, pages - 1)
@@ -154,8 +171,8 @@ export function DataTable<T>(p: Props<T>) {
     <>
       <div className="tools">
         {p.search && <input type="search" placeholder="Search" aria-label="Search" value={q} onChange={(e) => { setQ(e.target.value); setPage(0) }} />}
-        {(p.filters || []).map((f) => f.multi ? (
-          <MultiSelect key={f.id} ariaLabel={f.label} options={f.options} value={fv[f.id] ? fv[f.id].split(',') : []} onChange={(vs) => { setFv({ ...fv, [f.id]: vs.join(',') }); setPage(0) }} />
+        {filters.map((f) => !f.single ? (
+          <MultiSelect key={f.id} ariaLabel={f.label} options={f.options} value={fv[f.id] ? fv[f.id].split(SEP) : []} onChange={(vs) => { setFv({ ...fv, [f.id]: vs.join(SEP) }); setPage(0) }} />
         ) : (
           <select key={f.id} aria-label={f.label} value={fv[f.id] || ''} onChange={(e) => { setFv({ ...fv, [f.id]: e.target.value }); setPage(0) }}>
             {f.options.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
@@ -177,7 +194,7 @@ export function DataTable<T>(p: Props<T>) {
       </div>
       <section className="card flush">
         {filtered.length ? (
-          <div className="scroll"><table>
+          <div className="scroll"><table className="dt">
             <thead><tr>
               {p.selectable && <th><input type="checkbox" aria-label="Select all" checked={allTicked} onChange={() => {
                 const s = new Set(p.selected)
@@ -199,8 +216,9 @@ export function DataTable<T>(p: Props<T>) {
                     if ((e.target as HTMLElement).closest('button,a,input,select,label')) return
                     p.onOpen!(r)
                   } : undefined}>
-                    {p.selectable && <td>{p.selectable(r) && <input type="checkbox" aria-label={'Select ' + id} checked={!!p.selected?.has(id)} onChange={() => toggle(id)} />}</td>}
-                    {shown.map((c, i) => <td key={c.key} className={(c.right ? 'r ' : '') + (i === 0 ? 'id' : '')}>{c.render(r)}</td>)}
+                    {p.selectable && <td className="dt-sel" data-label="">{p.selectable(r) && <input type="checkbox" aria-label={'Select ' + id} checked={!!p.selected?.has(id)} onChange={() => toggle(id)} />}</td>}
+                    {/* data-label names the value when a phone shows the row as a card */}
+                    {shown.map((c, i) => <td key={c.key} data-label={c.label} className={(c.right ? 'r ' : '') + (i === 0 ? 'id' : '')}>{c.render(r)}</td>)}
                   </tr>
                 )
               })}

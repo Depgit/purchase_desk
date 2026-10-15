@@ -37,6 +37,14 @@ func (s *Service) Routes(r chi.Router) {
 	r.Get("/fb-sales/export", httpjson.Wrap(s.salesExport))
 }
 
+// PendingFinance names the property or sub-category of a budget that Finance has not approved yet, or "".
+func PendingFinance(ctx context.Context, q database.Q, propertyID, subCategoryID int64) string {
+	var name string
+	_ = q.QueryRow(ctx, `SELECT coalesce((SELECT name FROM property WHERE id=$1 AND fin_status<>'approved'), (SELECT name FROM sub_category WHERE id=$2 AND fin_status<>'approved'), '')`,
+		propertyID, subCategoryID).Scan(&name)
+	return name
+}
+
 // Month holds one property's budget picture for a month, per sub-category.
 type Month struct {
 	PropertyID int64
@@ -313,13 +321,13 @@ type propRow struct {
 	Cluster       string
 }
 
-func (s *Service) liveProperties(ctx context.Context, u *access.User, cluster int64) ([]propRow, error) {
+func (s *Service) liveProperties(ctx context.Context, u *access.User, clusters []int64) ([]propRow, error) {
 	all, ids, err := s.Guard.Visible(ctx, u)
 	if err != nil {
 		return nil, err
 	}
 	rows, err := s.DB.Query(ctx, `SELECT p.id, p.cluster_id, p.code, p.name, k.name FROM property p JOIN cluster k ON k.id=p.cluster_id
-		WHERE p.active AND p.kind='live' AND ($1=0 OR p.cluster_id=$1) AND ($2 OR p.id = ANY($3)) ORDER BY p.name`, cluster, all, ids)
+		WHERE p.active AND p.kind='live' AND (cardinality($1::bigint[])=0 OR p.cluster_id = ANY($1)) AND ($2 OR p.id = ANY($3)) ORDER BY p.name`, clusters, all, ids)
 	if err != nil {
 		return nil, err
 	}
@@ -397,7 +405,7 @@ func Overview(ctx context.Context, q database.Q, props []propRow, scs []subCat, 
 
 func (s *Service) overview(w http.ResponseWriter, r *http.Request) error {
 	u := access.From(r)
-	props, err := s.liveProperties(r.Context(), u, int64(httpjson.QInt(r, "cluster_id", 0)))
+	props, err := s.liveProperties(r.Context(), u, httpjson.QInts(r, "cluster_id"))
 	if err != nil {
 		return err
 	}
@@ -489,6 +497,9 @@ func (s *Service) setBudget(w http.ResponseWriter, r *http.Request) error {
 	if in.Amount < 0 {
 		return httpjson.Bad("Budget must be 0 or more.")
 	}
+	if wait := PendingFinance(r.Context(), s.DB, in.PropertyID, in.SubCategoryID); wait != "" {
+		return httpjson.Bad("%s waits for Finance to approve it; its budget can be set once approved.", wait)
+	}
 	err := pgx.BeginFunc(r.Context(), s.DB, func(tx pgx.Tx) error {
 		old, err := Set(r.Context(), tx, u, in.PropertyID, in.SubCategoryID, m, in.Amount)
 		if err != nil {
@@ -548,7 +559,7 @@ type fbRow struct {
 func (s *Service) fbOverview(w http.ResponseWriter, r *http.Request) error {
 	u := access.From(r)
 	month := monthParam(r)
-	props, err := s.liveProperties(r.Context(), u, int64(httpjson.QInt(r, "cluster_id", 0)))
+	props, err := s.liveProperties(r.Context(), u, httpjson.QInts(r, "cluster_id"))
 	if err != nil {
 		return err
 	}

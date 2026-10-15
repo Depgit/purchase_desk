@@ -71,7 +71,8 @@ func Read(fh *multipart.FileHeader) (*File, error) {
 	return &File{Name: path.Base(fh.Filename), ContentType: ct, Data: data}, nil
 }
 
-// Save stores the file and records it. folder groups files, for example "invoices" or "bank-proofs".
+// Save stores the file and records it. folder groups files, for example "invoices" or "bank-proofs". u is nil for a
+// file a vendor uploads on the vendor portal.
 func (s *Service) Save(ctx context.Context, q database.Q, u *access.User, f *File, folder string, restricted bool) (int64, error) {
 	if f == nil {
 		return 0, nil
@@ -83,8 +84,12 @@ func (s *Service) Save(ctx context.Context, q database.Q, u *access.User, f *Fil
 		return 0, err
 	}
 	var id int64
+	var by *int64
+	if u != nil {
+		by = &u.ID
+	}
 	err := q.QueryRow(ctx, `INSERT INTO file_object(storage_key,file_name,content_type,size_bytes,restricted,created_by) VALUES ($1,$2,$3,$4,$5,$6) RETURNING id`,
-		key, f.Name, f.ContentType, len(f.Data), restricted, u.ID).Scan(&id)
+		key, f.Name, f.ContentType, len(f.Data), restricted, by).Scan(&id)
 	return id, err
 }
 
@@ -123,13 +128,21 @@ func (s *Service) download(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
-	var key, name, ct string
 	var restricted bool
-	if err := s.DB.QueryRow(r.Context(), `SELECT storage_key, file_name, content_type, restricted FROM file_object WHERE id=$1`, id).Scan(&key, &name, &ct, &restricted); err != nil {
-		return err
+	if err := s.DB.QueryRow(r.Context(), `SELECT restricted FROM file_object WHERE id=$1`, id).Scan(&restricted); err != nil {
+		return httpjson.NotFound("File")
 	}
 	if restricted && !u.IsAdmin && !u.HasStep("finance") {
 		return httpjson.Forbidden("Bank proofs are visible only to Finance and the System Admin.")
+	}
+	return s.Serve(w, r, id)
+}
+
+// Serve writes a stored file to the browser. The caller has checked the person may see it.
+func (s *Service) Serve(w http.ResponseWriter, r *http.Request, id int64) error {
+	var key, name, ct string
+	if err := s.DB.QueryRow(r.Context(), `SELECT storage_key, file_name, content_type FROM file_object WHERE id=$1`, id).Scan(&key, &name, &ct); err != nil {
+		return httpjson.NotFound("File")
 	}
 	rc, err := s.Store.Get(r.Context(), key)
 	if err != nil {

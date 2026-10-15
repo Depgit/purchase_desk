@@ -88,7 +88,7 @@ func (s *Service) receive(w http.ResponseWriter, r *http.Request) error {
 	if len(errs) > 0 {
 		return httpjson.Invalid(errs)
 	}
-	var msg string
+	var msg, closed string
 	err = pgx.BeginFunc(r.Context(), s.DB, func(tx pgx.Tx) error {
 		d, err := documents.Load(r.Context(), tx, id, true)
 		if err != nil {
@@ -97,9 +97,9 @@ func (s *Service) receive(w http.ResponseWriter, r *http.Request) error {
 		if d.Status != documents.POIssued || d.IsTransfer {
 			return httpjson.Conflict("%s is not waiting for a delivery.", d.Number)
 		}
-		g := documents.CanAct(u, d, d.Owner(), access.Receive)
+		g := documents.Receiver(u, d)
 		if g == nil {
-			return httpjson.Forbidden("Only the receiving store for %s can record this delivery.", d.Property)
+			return httpjson.Forbidden("Only the receiving store for %s, or the person who raised this request, can record this delivery.", d.Property)
 		}
 		var dup bool
 		_ = tx.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM invoice WHERE vendor_id=$1 AND norm_key(invoice_number)=norm_key($2) AND status<>'VOID')`, d.VendorID, in.InvoiceNumber).Scan(&dup)
@@ -121,6 +121,9 @@ func (s *Service) receive(w http.ResponseWriter, r *http.Request) error {
 		}
 		if total == 0 {
 			return httpjson.Bad("Nothing received. Save a goods receipt only when something has arrived.")
+		}
+		if balance > 0 && in.Balance != "keep" && in.Balance != "close" {
+			return httpjson.Bad("Less than due arrived. Choose whether more is coming (keep the PO open) or nothing more is coming (close the PO short).")
 		}
 		var deliveryNo int
 		_ = tx.QueryRow(r.Context(), `SELECT count(*)+1 FROM goods_receipt WHERE document_id=$1`, id).Scan(&deliveryNo)
@@ -171,6 +174,11 @@ func (s *Service) receive(w http.ResponseWriter, r *http.Request) error {
 			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'RECEIVED',$9) RETURNING voucher_number`, id, grnID, d.VendorID, d.PropertyID, in.InvoiceNumber, invDate, money.Round2(in.InvoiceAmount), fileID, u.ID).Scan(&voucher); err != nil {
 			return err
 		}
+		// An invoice the vendor uploaded on the portal under this number is now used.
+		if _, err := tx.Exec(r.Context(), `UPDATE vendor_invoice SET goods_receipt_id=$1 WHERE document_id=$2 AND norm_key(invoice_number)=norm_key($3) AND goods_receipt_id IS NULL`,
+			grnID, id, in.InvoiceNumber); err != nil {
+			return err
+		}
 		note := ""
 		status := documents.POIssued
 		switch {
@@ -182,6 +190,10 @@ func (s *Service) receive(w http.ResponseWriter, r *http.Request) error {
 			if _, err := tx.Exec(r.Context(), `UPDATE document SET po_closed_short=TRUE WHERE id=$1`, id); err != nil {
 				return err
 			}
+			// The Zoho purchase order is lowered to what was received.
+			if err := documents.QueueZohoPO(r.Context(), tx, id, "update"); err != nil {
+				return err
+			}
 		default:
 			note = fmt.Sprintf("Part delivery. Balance stays open on %s for the next delivery", d.PONumber)
 		}
@@ -189,8 +201,13 @@ func (s *Service) receive(w http.ResponseWriter, r *http.Request) error {
 			return err
 		}
 		msg = grn + " saved, invoice " + in.InvoiceNumber + " entered as voucher " + voucher
-		if status == documents.POIssued {
+		switch {
+		case status == documents.POIssued:
 			msg += ". Balance stays open on " + d.PONumber
+		case balance > 0:
+			closed = d.PONumber + " is closed short: no more items are needed from the vendor, and the rest will not come."
+		default:
+			closed = d.PONumber + " is closed: everything ordered has arrived."
 		}
 		// An advance on this PO that Finance has not settled stays with Finance: the invoice's payment approval waits for it.
 		wait, err := advances.Waiting(r.Context(), tx, []int64{id})
@@ -205,5 +222,6 @@ func (s *Service) receive(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
-	return httpjson.OK(w, map[string]string{"message": msg})
+	// closed tells the form to show that the PO is now closed.
+	return httpjson.OK(w, map[string]string{"message": msg, "closed": closed})
 }

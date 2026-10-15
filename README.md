@@ -27,31 +27,6 @@ On first start the API creates the database tables and the first System Admin fr
 
 To start again from an empty database: `docker compose down -v && docker compose up -d --build`.
 
-## Rollout by phase
-
-The client can test one phase at a time. `RELEASE_PHASE` in `.env` decides how much of the app is switched on. A phase switches on itself and every phase before it.
-
-| Phase | What opens |
-| ----- | ---------- |
-| 1 | Sign-in, users, roles and rights; properties, cities and clusters; vendors with bank verification; item setup and SKUs; vendor mapping and rates; purchase request, approval routing and workbench, PO, goods receipt on mobile, three-way match, payment approval; activity log; bulk uploads |
-| 2 | Zoho Books: connection, sync, mappings, push, payment read-back |
-| 3 | Utility and AMC bills, budgets and F&B sales, corporate purchases and bills |
-| 4 | Warehouse and vendor order sheets |
-| 5 | Role dashboards and the 14 reports (everything) |
-
-To move to the next phase, change the number and restart the API. Nothing is rebuilt and no data is lost:
-
-```bash
-# in .env: RELEASE_PHASE=2
-docker compose up -d api
-```
-
-- Later phases are blocked on the server too, not only hidden on screen. Their URLs answer "not found", and the server refuses their vendor types, property types and roles.
-- Before phase 2, payment ends at "payment approved". The System Admin then marks the invoice paid under Payments.
-- Before phase 3, budgets are hidden, but approved spend is still recorded, so budgets are correct from the day they open.
-- Before phase 5, the home page is "My Work": what waits for the signed-in person.
-- With `SEED_DEMO=true`, the sample data follows the phase. Raising the phase adds the next phases' samples on the next start.
-
 ### Sample company (SEED_DEMO=true)
 
 Every sample user signs in with the password `Demo@1234`. Emails end in `@demo.saltstayz.com`.
@@ -72,7 +47,7 @@ Every sample user signs in with the password `Demo@1234`. Emails end in `@demo.s
 | rakesh, vivek     | Department Head (L1)    | Admin and IT departments                    |
 | anil              | Corporate Approver (L2) | Corporate Office                            |
 
-The sample loads only the phases that are switched on. With every phase on, it has 5 live properties, the Central Warehouse, a pre-opening property, a corporate office, 16 SKUs with rates, 13 vendors (goods, utility, AMC and corporate) plus the internal warehouse vendor, budgets and F&B sales for the current month, warehouse opening stock and two delivery partners.
+The sample has 5 live properties, the Central Warehouse, a pre-opening property, a corporate office, 16 SKUs with rates, 13 vendors (goods, utility, AMC and corporate) plus the internal warehouse vendor, budgets and F&B sales for the current month, warehouse opening stock and two delivery partners.
 
 ## What is built
 
@@ -142,7 +117,6 @@ Purchase_Desk/
 │       ├── passwords         password and one-time code hashing
 │       ├── purchaseorders    issue POs and email them
 │       ├── purchaserequests  raise requests, lists, detail, resubmit, cancel, search
-│       ├── releasephase      which rollout phase is switched on and what belongs to it
 │       ├── reports           the 14 reports and the Excel pack
 │       ├── router            mounts every service under /api
 │       ├── scheduler         background jobs
@@ -180,11 +154,9 @@ Purchase_Desk/
     ├── invoices      invoice list and the match screen
     ├── items         SKUs and item setup
     ├── layout        left menu and top bar
-    ├── mywork        the home page before the dashboards open
     ├── payments      payments, push to Zoho, preview
     ├── properties    properties, cities and clusters
     ├── purchaseorders PO list and the issue PO panel
-    ├── releasephase  which phase is on, and the "not open yet" page
     ├── reports       reports screen
     ├── requests      request list and form
     ├── styles        the stylesheet
@@ -208,7 +180,6 @@ Purchase_Desk/
 | `ENCRYPTION_KEY`                                                                  | Long random key. Encrypts Zoho secrets and bank account numbers.**If lost, those values cannot be read**: keep it in a password manager.  |
 | `ADMIN_EMAIL`, `ADMIN_PASSWORD`, `ADMIN_NAME`                                 | The first System Admin, created only when the database has no users.                                                                            |
 | `SEED_DEMO`                                                                       | `true` loads the sample company into an empty database. Set `false` for real data.                                                          |
-| `RELEASE_PHASE` | Rollout phase switched on, 1 to 5. See "Rollout by phase". Change it and restart the API. |
 | `STORAGE_DRIVER`                                                                  | `local` (Docker volume `files`) or `supabase`.                                                                                            |
 | `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`, `SUPABASE_BUCKET`                     | Supabase Storage. Create a**private** bucket; the API uses the service key, and files are served only through the API with rights checks. |
 | `ZOHO_ACCOUNTS_URL`, `ZOHO_API_URL`                                             | India data centre by default.                                                                                                                   |

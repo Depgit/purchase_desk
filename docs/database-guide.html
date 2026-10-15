@@ -1,0 +1,576 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Purchase Desk Database</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: a reference document — summary and flow diagram first, then one section per business area with a card per table. */
+:root {
+  --bg: #f6f7f2; --surface: #ffffff; --ink: #1e2417; --muted: #5f6852; --line: #dfe3d4;
+  --accent: #556b2f; --accent-soft: #e8edda; --code-bg: #eef1e5;
+  --sans: "Instrument Sans", "Segoe UI", system-ui, sans-serif; --mono: "JetBrains Mono", ui-monospace, Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #14170f; --surface: #1c2016; --ink: #e6ead9; --muted: #a3ab91; --line: #30372a;
+  --accent: #a9c267; --accent-soft: #2a3320; --code-bg: #242a1d; color-scheme: dark } }
+:root[data-theme="dark"] {
+  --bg: #14170f; --surface: #1c2016; --ink: #e6ead9; --muted: #a3ab91; --line: #30372a;
+  --accent: #a9c267; --accent-soft: #2a3320; --code-bg: #242a1d; color-scheme: dark }
+* { box-sizing: border-box }
+body { background: var(--bg); color: var(--ink); font: 15px/1.55 var(--sans); padding-inline: 16px; padding-block: 0 64px }
+.wrap { max-width: 1180px; margin: 0 auto; display: flex; flex-direction: column; gap: 28px }
+h1, h2, h3 { text-wrap: balance; margin: 0 }
+code { font-family: var(--mono); font-size: .86em }
+.top { padding-block: 36px 4px; display: flex; flex-direction: column; gap: 14px }
+.eyebrow { font-size: 12px; letter-spacing: .12em; text-transform: uppercase; color: var(--accent); font-weight: 600 }
+h1 { font-size: clamp(28px, 4vw, 40px); font-weight: 700; letter-spacing: -.01em }
+.lede { max-width: 68ch; color: var(--muted); margin: 0 }
+.stats { display: flex; flex-wrap: wrap; gap: 10px 28px; font-variant-numeric: tabular-nums }
+.stats div { display: flex; align-items: baseline; gap: 8px }
+.stats b { font-size: 26px; font-weight: 700; color: var(--accent) }
+.stats span { color: var(--muted) }
+.panel { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 20px }
+.panel h2 { font-size: 18px; margin-bottom: 10px }
+.rules { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 12px 24px; margin: 0; padding: 0; list-style: none }
+.rules li { min-width: 0 } .rules b { display: block } .rules span { color: var(--muted); font-size: 14px }
+.diagram { overflow-x: auto }
+.diagram pre.mermaid { margin: 0; background: transparent }
+.hint { color: var(--muted); font-size: 13px; margin: 8px 0 0 }
+.bar { position: sticky; top: env(safe-area-inset-top, 0px); z-index: 3; background: var(--bg); padding-block: 10px; display: flex; flex-direction: column; gap: 10px; border-bottom: 1px solid var(--line) }
+.bar input { width: 100%; max-width: 420px; font: inherit; padding: 9px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--ink) }
+.bar input:focus-visible, a:focus-visible, summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px }
+.nav { display: flex; flex-wrap: wrap; gap: 6px }
+.nav a { text-decoration: none; color: var(--ink); font-size: 13px; padding: 4px 10px; border: 1px solid var(--line); border-radius: 999px; background: var(--surface) }
+.nav a span { color: var(--muted); font-variant-numeric: tabular-nums }
+.nav a:hover { border-color: var(--accent) }
+.grp { display: flex; flex-direction: column; gap: 14px; scroll-margin-top: 120px }
+.ghead { display: flex; flex-direction: column; gap: 2px; border-left: 3px solid var(--accent); padding-left: 12px }
+.ghead h2 { font-size: 22px } .ghead p { margin: 0; color: var(--muted) }
+.cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 520px), 1fr)); gap: 14px }
+.tbl { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 16px 18px; display: flex; flex-direction: column; gap: 10px; min-width: 0; scroll-margin-top: 120px }
+.tbl:target { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft) }
+.tbl header { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 4px 12px }
+.tbl h3 { font-size: 17px; font-weight: 600 }
+.tname { background: var(--code-bg); color: var(--accent); padding: 2px 8px; border-radius: 6px; font-weight: 500 }
+.purpose { margin: 0 }
+.row { margin: 0; font-size: 14px; color: var(--muted) } .row b { color: var(--ink); font-weight: 600 }
+.keys { display: flex; flex-direction: column; gap: 6px; border-top: 1px solid var(--line); padding-top: 10px }
+.kf { display: grid; grid-template-columns: minmax(0, 15em) minmax(0, 1fr); gap: 2px 14px; font-size: 14px }
+.kf code { color: var(--ink); overflow-wrap: anywhere } .kf span { color: var(--muted) }
+@media (max-width: 560px) { .kf { grid-template-columns: 1fr } }
+.links { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 13px }
+.links b { font-weight: 600; margin-right: 2px }
+.chip { font-family: var(--mono); font-size: 12px; text-decoration: none; color: var(--accent); background: var(--accent-soft); padding: 2px 8px; border-radius: 6px }
+details summary { cursor: pointer; font-size: 13px; color: var(--accent); font-weight: 600 }
+.allc { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 8px }
+.allc code { font-size: 12px; background: var(--code-bg); padding: 2px 6px; border-radius: 5px; color: var(--muted) }
+.none { color: var(--muted) }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="top">
+    <div class="eyebrow">Saltstayz · Purchase Desk</div>
+    <h1>How the Purchase Desk database is organised</h1>
+    <p class="lede">Every table in the system, grouped by business area: what it holds, what one row is, its key fields and what it links to. Open any card for the full column list.</p>
+    <div class="stats"><div><b>63</b><span>tables</span></div><div><b>11</b><span>business areas</span></div><div><b>659</b><span>columns</span></div><div><b>PostgreSQL 16</b><span>relational database</span></div></div>
+  </div>
+
+  <section class="panel">
+    <h2>Rules the whole database follows</h2>
+    <ul class="rules">
+      <li><b>Nothing is deleted</b><span>Users, properties, items and vendors are made inactive, with who, when and why. History always stays complete.</span></li>
+      <li><b>History cannot be changed</b><span>The activity log and document history are locked by the database itself: no one, not even an admin, can edit or delete them.</span></li>
+      <li><b>One table per thing</b><span>A request and the PO it becomes are one row, so its whole life is in one place. All user × property access is in <code>user_role</code>.</span></li>
+      <li><b>Linked and consistent</b><span>Every PO, delivery, invoice and advance points to real records, and each change is saved fully or not at all.</span></li>
+      <li><b>Sensitive data protected</b><span>Passwords and sign-in codes are scrambled; bank account numbers and Zoho credentials are encrypted.</span></li>
+      <li><b>Finance approves new masters</b><span>New items, categories, properties, bill types and expense heads stay pending, and unused, until Finance approves them.</span></li>
+    </ul>
+  </section>
+
+  <section class="panel">
+    <h2>How a purchase moves through the tables</h2>
+    <div class="diagram"><pre class="mermaid">
+flowchart LR
+  U[app_user + user_role<br/>who may raise and approve] --> D
+  P[property] --> D
+  S[sku + vendor_mapping + rate_card<br/>item, vendor, price] --> D
+  D[document + document_line<br/>request, approved, becomes the PO] --> G[goods_receipt + goods_receipt_line<br/>each delivery]
+  G --> I[invoice<br/>three-way match, payment approval]
+  D --> A[advance + advance_use<br/>Advance-terms POs]
+  A --> I
+  I --> Z[Zoho Books bill<br/>paid status read back]
+  D -. every step .-> L[document_log<br/>permanent history]
+  D --> B[budget_spend<br/>counted against the budget]
+</pre></div>
+    <p class="hint">Utility, AMC and corporate bills skip the PO and delivery: they go straight from <code>document</code> to <code>invoice</code>.</p>
+  </section>
+
+  <div class="bar">
+    <input id="q" type="search" placeholder="Find a table or column, e.g. invoice, employee_id, budget" aria-label="Find a table or column">
+    <nav class="nav" aria-label="Business areas"><a href="#people">People and access <span>6</span></a><a href="#places">Places <span>3</span></a><a href="#items">Items <span>5</span></a><a href="#vendors">Vendors and prices <span>8</span></a><a href="#flow">Purchase flow <span>9</span></a><a href="#budgets">Budgets <span>3</span></a><a href="#warehouse">Warehouse <span>3</span></a><a href="#corporate">Corporate office <span>2</span></a><a href="#sheets">Vendor order sheets <span>1</span></a><a href="#zoho">Zoho Books link <span>15</span></a><a href="#system">Settings, files and logs <span>8</span></a></nav>
+  </div>
+  <section class="grp" id="people"><div class="ghead"><h2>People and access</h2><p>Who can sign in, what each role may do, and at which properties.</p></div><div class="cards"><article class="tbl" id="t-app_user" data-s="app_user users everyone who signs in to purchase desk. users are never deleted, only made inactive. one person employee_id employee id, unique; can be used to sign in email / mobile sign-in names (at least one) password_hash the password, stored scrambled (never readable) department their department active inactive users cannot sign in id name email mobile password_hash department active inactive_by inactive_at inactive_reason created_by created_at employee_id">
+  <header><h3>Users</h3><code class="tname">app_user</code></header>
+  <p class="purpose">Everyone who signs in to Purchase Desk. Users are never deleted, only made inactive.</p>
+  <p class="row"><b>One row is</b> one person</p>
+  <div class="keys"><div class="kf"><code>employee_id</code><span>Employee ID, unique; can be used to sign in</span></div><div class="kf"><code>email / mobile</code><span>sign-in names (at least one)</span></div><div class="kf"><code>password_hash</code><span>the password, stored scrambled (never readable)</span></div><div class="kf"><code>department</code><span>their department</span></div><div class="kf"><code>active</code><span>inactive users cannot sign in</span></div></div>
+  <div class="links"><b>Linked to</b><a class="chip" href="#t-user_role">user_role</a></div>
+  <details><summary>All 13 columns</summary><div class="allc"><code>id</code><code>name</code><code>email</code><code>mobile</code><code>password_hash</code><code>department</code><code>active</code><code>inactive_by</code><code>inactive_at</code><code>inactive_reason</code><code>created_by</code><code>created_at</code><code>employee_id</code></div></details>
+</article><article class="tbl" id="t-role" data-s="role roles the jobs people do in the flow: property staff, property manager, cluster manager, cost controller, finance, warehouse manager, property chef and others, plus any custom role the admin creates. one role step where the role sits in the approval flow (staff, l1, l2, cc, finance, wh...) rights actions allowed: raise, approve, receive, match, pay, masters, upload screens none / view / edit per screen reports which reports the role sees (blank = all) can_users may add users, and which roles they may give (user_role_ids) id code name step rights is_custom active inactive_by inactive_at inactive_reason created_by created_at group_id screens reports can_users user_role_ids user_scope can_roles">
+  <header><h3>Roles</h3><code class="tname">role</code></header>
+  <p class="purpose">The jobs people do in the flow: Property Staff, Property Manager, Cluster Manager, Cost Controller, Finance, Warehouse Manager, Property Chef and others, plus any custom role the Admin creates.</p>
+  <p class="row"><b>One row is</b> one role</p>
+  <div class="keys"><div class="kf"><code>step</code><span>where the role sits in the approval flow (staff, l1, l2, cc, finance, wh...)</span></div><div class="kf"><code>rights</code><span>actions allowed: raise, approve, receive, match, pay, masters, upload</span></div><div class="kf"><code>screens</code><span>None / View / Edit per screen</span></div><div class="kf"><code>reports</code><span>which reports the role sees (blank = all)</span></div><div class="kf"><code>can_users</code><span>may add users, and which roles they may give (user_role_ids)</span></div></div>
+  <div class="links"><b>Linked to</b><a class="chip" href="#t-role_group">role_group</a></div>
+  <details><summary>All 19 columns</summary><div class="allc"><code>id</code><code>code</code><code>name</code><code>step</code><code>rights</code><code>is_custom</code><code>active</code><code>inactive_by</code><code>inactive_at</code><code>inactive_reason</code><code>created_by</code><code>created_at</code><code>group_id</code><code>screens</code><code>reports</code><code>can_users</code><code>user_role_ids</code><code>user_scope</code><code>can_roles</code></div></details>
+</article><article class="tbl" id="t-role_group" data-s="role_group role groups folders for roles on the roles screen: head office, property, warehouse, corporate office. one group name group name sort display order id name sort created_at">
+  <header><h3>Role groups</h3><code class="tname">role_group</code></header>
+  <p class="purpose">Folders for roles on the Roles screen: Head office, Property, Warehouse, Corporate office.</p>
+  <p class="row"><b>One row is</b> one group</p>
+  <div class="keys"><div class="kf"><code>name</code><span>group name</span></div><div class="kf"><code>sort</code><span>display order</span></div></div>
+  
+  <details><summary>All 4 columns</summary><div class="allc"><code>id</code><code>name</code><code>sort</code><code>created_at</code></div></details>
+</article><article class="tbl" id="t-user_role" data-s="user_role user × property access the user-to-property mapping: which role a person holds and where it applies. all access lives in this one table. one user holding one role user_id / role_id the person and the role scope all properties, chosen clusters, or chosen properties property_ids the properties, when scope is properties cluster_ids the clusters, when scope is clusters (covers new properties in them automatically) category_ids optional limit to item categories (e.g. a chef to f&amp;b) id user_id role_id scope cluster_ids property_ids category_ids created_by created_at">
+  <header><h3>User × property access</h3><code class="tname">user_role</code></header>
+  <p class="purpose">The user-to-property mapping: which role a person holds and where it applies. All access lives in this one table.</p>
+  <p class="row"><b>One row is</b> one user holding one role</p>
+  <div class="keys"><div class="kf"><code>user_id / role_id</code><span>the person and the role</span></div><div class="kf"><code>scope</code><span>all properties, chosen clusters, or chosen properties</span></div><div class="kf"><code>property_ids</code><span>the properties, when scope is properties</span></div><div class="kf"><code>cluster_ids</code><span>the clusters, when scope is clusters (covers new properties in them automatically)</span></div><div class="kf"><code>category_ids</code><span>optional limit to item categories (e.g. a chef to F&amp;B)</span></div></div>
+  <div class="links"><b>Linked to</b><a class="chip" href="#t-app_user">app_user</a><a class="chip" href="#t-role">role</a><a class="chip" href="#t-property">property</a><a class="chip" href="#t-cluster">cluster</a><a class="chip" href="#t-category">category</a></div>
+  <details><summary>All 9 columns</summary><div class="allc"><code>id</code><code>user_id</code><code>role_id</code><code>scope</code><code>cluster_ids</code><code>property_ids</code><code>category_ids</code><code>created_by</code><code>created_at</code></div></details>
+</article><article class="tbl" id="t-otp_code" data-s="otp_code sign-in codes one-time sign-in codes sent by sms or email, valid 10 minutes. one code sent code_hash the code, stored scrambled expires_at when it stops working attempts / used wrong tries, and whether it was used id user_id code_hash expires_at attempts used created_at">
+  <header><h3>Sign-in codes</h3><code class="tname">otp_code</code></header>
+  <p class="purpose">One-time sign-in codes sent by SMS or email, valid 10 minutes.</p>
+  <p class="row"><b>One row is</b> one code sent</p>
+  <div class="keys"><div class="kf"><code>code_hash</code><span>the code, stored scrambled</span></div><div class="kf"><code>expires_at</code><span>when it stops working</span></div><div class="kf"><code>attempts / used</code><span>wrong tries, and whether it was used</span></div></div>
+  <div class="links"><b>Linked to</b><a class="chip" href="#t-app_user">app_user</a></div>
+  <details><summary>All 7 columns</summary><div class="allc"><code>id</code><code>user_id</code><code>code_hash</code><code>expires_at</code><code>attempts</code><code>used</code><code>created_at</code></div></details>
+</article><article class="tbl" id="t-user_pref" data-s="user_pref screen preferences each person&#x27;s own screen settings, such as which list columns they chose to see. one user&#x27;s settings for one screen screen which list value the saved settings user_id screen value">
+  <header><h3>Screen preferences</h3><code class="tname">user_pref</code></header>
+  <p class="purpose">Each person&#x27;s own screen settings, such as which list columns they chose to see.</p>
+  <p class="row"><b>One row is</b> one user&#x27;s settings for one screen</p>
+  <div class="keys"><div class="kf"><code>screen</code><span>which list</span></div><div class="kf"><code>value</code><span>the saved settings</span></div></div>
+  <div class="links"><b>Linked to</b><a class="chip" href="#t-app_user">app_user</a></div>
+  <details><summary>All 3 columns</summary><div class="allc"><code>user_id</code><code>screen</code><code>value</code></div></details>
+</article></div></section><section class="grp" id="places"><div class="ghead"><h2>Places</h2><p>Where Saltstayz operates: cities, clusters and properties.</p></div><div class="cards"><article class="tbl" id="t-city" data-s="city cities cities, with their gst state code. one city name city name state_code gst state code, e.g. hr id name state_code active inactive_by inactive_at inactive_reason created_by created_at">
+  <header><h3>Cities</h3><code class="tname">city</code></header>
+  <p class="purpose">Cities, with their GST state code.</p>
+  <p class="row"><b>One row is</b> one city</p>
+  <div class="keys"><div class="kf"><code>name</code><span>city name</span></div><div class="kf"><code>state_code</code><span>GST state code, e.g. HR</span></div></div>
+  
+  <details><summary>All 9 columns</summary><div class="allc"><code>id</code><code>name</code><code>state_code</code><code>active</code><code>inactive_by</code><code>inactive_at</code><code>inactive_reason</code><code>created_by</code><code>created_at</code></div></details>
+</article><article class="tbl" id="t-cluster" data-s="cluster clusters groups of properties under one cluster manager. one cluster city_id the city manager_id the cluster manager id name city_id manager_id active inactive_by inactive_at inactive_reason created_by created_at">
+  <header><h3>Clusters</h3><code class="tname">cluster</code></header>
+  <p class="purpose">Groups of properties under one Cluster Manager.</p>
+  <p class="row"><b>One row is</b> one cluster</p>
+  <div class="keys"><div class="kf"><code>city_id</code><span>the city</span></div><div class="kf"><code>manager_id</code><span>the Cluster Manager</span></div></div>
+  <div class="links"><b>Linked to</b><a class="chip" href="#t-city">city</a><a class="chip" href="#t-app_user">app_user</a></div>
+  <details><summary>All 10 columns</summary><div class="allc"><code>id</code><code>name</code><code>city_id</code><code>manager_id</code><code>active</code><code>inactive_by</code><code>inactive_at</code><code>inactive_reason</code><code>created_by</code><code>created_at</code></div></details>
+</article><article class="tbl" id="t-property" data-s="property properties hotels, the central warehouse, pre-opening properties and the corporate office. one property code p01, p02... assigned by the app doc_code 2-letter code that starts every document number, e.g. hz in pr_hz_0001 kind live, warehouse, pre-opening or corporate ezee_code the property&#x27;s ezee code l1_user_id the property manager who approves first plan_pct / ird_pct / banquet_pct f&amp;b cost % used to turn sales into the f&amp;b budget fin_status pending until finance approves a new property id code name ezee_code cluster_id l1_user_id kind plan_pct ird_pct banquet_pct active inactive_by inactive_at inactive_reason created_by created_at doc_code doc_seq fin_status fin_by fin_at fin_note">
+  <header><h3>Properties</h3><code class="tname">property</code></header>
+  <p class="purpose">Hotels, the Central Warehouse, pre-opening properties and the corporate office.</p>
+  <p class="row"><b>One row is</b> one property</p>
+  <div class="keys"><div class="kf"><code>code</code><span>P01, P02... assigned by the app</span></div><div class="kf"><code>doc_code</code><span>2-letter code that starts every document number, e.g. HZ in PR_HZ_0001</span></div><div class="kf"><code>kind</code><span>live, warehouse, pre-opening or corporate</span></div><div class="kf"><code>ezee_code</code><span>the property&#x27;s eZee code</span></div><div class="kf"><code>l1_user_id</code><span>the Property Manager who approves first</span></div><div class="kf"><code>plan_pct / ird_pct / banquet_pct</code><span>F&amp;B cost % used to turn sales into the F&amp;B budget</span></div><div class="kf"><code>fin_status</code><span>pending until Finance approves a new property</span></div></div>
+  <div class="links"><b>Linked to</b><a class="chip" href="#t-cluster">cluster</a><a class="chip" href="#t-app_user">app_user</a></div>
+  <details><summary>All 22 columns</summary><div class="allc"><code>id</code><code>code</code><code>name</code><code>ezee_code</code><code>cluster_id</code><code>l1_user_id</code><code>kind</code><code>plan_pct</code><code>ird_pct</code><code>banquet_pct</code><code>active</code><code>inactive_by</code><code>inactive_at</code><code>inactive_reason</code><code>created_by</code><code>created_at</code><code>doc_code</code><code>doc_seq</code><code>fin_status</code><code>fin_by</code><code>fin_at</code><code>fin_note</code></div></details>
+</article></div></section><section class="grp" id="items"><div class="ghead"><h2>Items</h2><p>What can be bought: the item catalogue.</p></div><div class="cards"><article class="tbl" id="t-category" data-s="category categories top level of the catalogue, e.g. housekeeping, food &amp; beverage. one category is_fb food &amp; beverage (drives sales-based budgets) fin_status pending until finance approves id name is_fb created_by created_at fin_status fin_by fin_at fin_note">
+  <header><h3>Categories</h3><code class="tname">category</code></header>
+  <p class="purpose">Top level of the catalogue, e.g. Housekeeping, Food &amp; Beverage.</p>
+  <p class="row"><b>One row is</b> one category</p>
+  <div class="keys"><div class="kf"><code>is_fb</code><span>food &amp; beverage (drives sales-based budgets)</span></div><div class="kf"><code>fin_status</code><span>pending until Finance approves</span></div></div>
+  
+  <details><summary>All 9 columns</summary><div class="allc"><code>id</code><code>name</code><code>is_fb</code><code>created_by</code><code>created_at</code><code>fin_status</code><code>fin_by</code><code>fin_at</code><code>fin_note</code></div></details>
+</article><article class="tbl" id="t-sub_category" data-s="sub_category sub-categories second level, e.g. linen, dairy. budgets and zoho expense accounts are set per sub-category. one sub-category code 2-letter code used in item codes (ln-0001) auto_po requests of only these items get their po at approval fin_status pending until finance approves id category_id name code active inactive_by inactive_at inactive_reason created_by created_at auto_po fin_status fin_by fin_at fin_note">
+  <header><h3>Sub-categories</h3><code class="tname">sub_category</code></header>
+  <p class="purpose">Second level, e.g. Linen, Dairy. Budgets and Zoho expense accounts are set per sub-category.</p>
+  <p class="row"><b>One row is</b> one sub-category</p>
+  <div class="keys"><div class="kf"><code>code</code><span>2-letter code used in item codes (LN-0001)</span></div><div class="kf"><code>auto_po</code><span>requests of only these items get their PO at approval</span></div><div class="kf"><code>fin_status</code><span>pending until Finance approves</span></div></div>
+  <div class="links"><b>Linked to</b><a class="chip" href="#t-category">category</a></div>
+  <details><summary>All 15 columns</summary><div class="allc"><code>id</code><code>category_id</code><code>name</code><code>code</code><code>active</code><code>inactive_by</code><code>inactive_at</code><code>inactive_reason</code><code>created_by</code><code>created_at</code><code>auto_po</code><code>fin_status</code><code>fin_by</code><code>fin_at</code><code>fin_note</code></div></details>
+</article><article class="tbl" id="t-brand" data-s="brand brands item brands, plus two fixed ones: other brand and service. one brand kind other / service for the two fixed brands id name active inactive_by inactive_at inactive_reason created_by created_at kind">
+  <header><h3>Brands</h3><code class="tname">brand</code></header>
+  <p class="purpose">Item brands, plus two fixed ones: Other brand and Service.</p>
+  <p class="row"><b>One row is</b> one brand</p>
+  <div class="keys"><div class="kf"><code>kind</code><span>other / service for the two fixed brands</span></div></div>
+  
+  <details><summary>All 9 columns</summary><div class="allc"><code>id</code><code>name</code><code>active</code><code>inactive_by</code><code>inactive_at</code><code>inactive_reason</code><code>created_by</code><code>created_at</code><code>kind</code></div></details>
+</article><article class="tbl" id="t-pack_size" data-s="pack_size pack sizes units items are bought in: kg, box, piece... one pack size name pack size id name active inactive_by inactive_at inactive_reason created_by created_at">
+  <header><h3>Pack sizes</h3><code class="tname">pack_size</code></header>
+  <p class="purpose">Units items are bought in: KG, Box, piece...</p>
+  <p class="row"><b>One row is</b> one pack size</p>
+  <div class="keys"><div class="kf"><code>name</code><span>pack size</span></div></div>
+  
+  <details><summary>All 8 columns</summary><div class="allc"><code>id</code><code>name</code><code>active</code><code>inactive_by</code><code>inactive_at</code><code>inactive_reason</code><code>created_by</code><code>created_at</code></div></details>
+</article><article class="tbl" id="t-sku" data-s="sku items (skus) every item that can be ordered. one item code item code, e.g. ln-0001 item_name / brand_id / pack_size_id what it is gst_pct / hsn gst rate and hsn/sac code scope where it can be ordered: all, clusters or properties tds_section / tds_pct tds for service items daily_use no = several vendors, requester picks one wh_stocked always supplied from the central warehouse fin_status pending until finance approves id code sub_category_id brand_id item_name pack_size_id gst_pct hsn scope cluster_ids property_ids active inactive_by inactive_at inactive_reason created_by created_at tds_section tds_pct daily_use fin_status fin_by fin_at fin_note wh_stocked">
+  <header><h3>Items (SKUs)</h3><code class="tname">sku</code></header>
+  <p class="purpose">Every item that can be ordered.</p>
+  <p class="row"><b>One row is</b> one item</p>
+  <div class="keys"><div class="kf"><code>code</code><span>item code, e.g. LN-0001</span></div><div class="kf"><code>item_name / brand_id / pack_size_id</code><span>what it is</span></div><div class="kf"><code>gst_pct / hsn</code><span>GST rate and HSN/SAC code</span></div><div class="kf"><code>scope</code><span>where it can be ordered: all, clusters or properties</span></div><div class="kf"><code>tds_section / tds_pct</code><span>TDS for service items</span></div><div class="kf"><code>daily_use</code><span>No = several vendors, requester picks one</span></div><div class="kf"><code>wh_stocked</code><span>always supplied from the Central Warehouse</span></div><div class="kf"><code>fin_status</code><span>pending until Finance approves</span></div></div>
+  <div class="links"><b>Linked to</b><a class="chip" href="#t-sub_category">sub_category</a><a class="chip" href="#t-brand">brand</a><a class="chip" href="#t-pack_size">pack_size</a></div>
+  <details><summary>All 25 columns</summary><div class="allc"><code>id</code><code>code</code><code>sub_category_id</code><code>brand_id</code><code>item_name</code><code>pack_size_id</code><code>gst_pct</code><code>hsn</code><code>scope</code><code>cluster_ids</code><code>property_ids</code><code>active</code><code>inactive_by</code><code>inactive_at</code><code>inactive_reason</code><code>created_by</code><code>created_at</code><code>tds_section</code><code>tds_pct</code><code>daily_use</code><code>fin_status</code><code>fin_by</code><code>fin_at</code><code>fin_note</code><code>wh_stocked</code></div></details>
+</article></div></section><section class="grp" id="vendors"><div class="ghead"><h2>Vendors and prices</h2><p>Who supplies what, where, and at what rate.</p></div><div class="cards"><article class="tbl" id="t-vendor" data-s="vendor vendors suppliers: goods, utility, amc and other services, plus the internal warehouse vendor. one vendor code v001, v002... legal_name / gstin / pan legal and tax identity msme / udyam msme status (must be paid within 45 days) bank_account_enc bank account, encrypted; only the last 4 digits are shown bank_verified finance has checked the bank proof; until then the vendor cannot be used payment_terms net 15/30/45, 15th of next month, or advance sheet_mode / sheet_time / sheet_channel how vendor order sheets are sent id code vendor_type legal_name address city pin contact_person mobile email gst_registered gstin pan state_code msme udyam bank_holder bank_account_enc bank_account_last4 ifsc bank_proof_file_id bank_verified bank_verified_by bank_verified_at payment_terms sheet_mode sheet_time sheet_channel active inactive_by inactive_at inactive_reason created_by created_at msme_file_id">
+  <header><h3>Vendors</h3><code class="tname">vendor</code></header>
+  <p class="purpose">Suppliers: goods, utility, AMC and other services, plus the internal warehouse vendor.</p>
+  <p class="row"><b>One row is</b> one vendor</p>
+  <div class="keys"><div class="kf"><code>code</code><span>V001, V002...</span></div><div class="kf"><code>legal_name / gstin / pan</code><span>legal and tax identity</span></div><div class="kf"><code>msme / udyam</code><span>MSME status (must be paid within 45 days)</span></div><div class="kf"><code>bank_account_enc</code><span>bank account, encrypted; only the last 4 digits are shown</span></div><div class="kf"><code>bank_verified</code><span>Finance has checked the bank proof; until then the vendor cannot be used</span></div><div class="kf"><code>payment_terms</code><span>Net 15/30/45, 15th of next month, or Advance</span></div><div class="kf"><code>sheet_mode / sheet_time / sheet_channel</code><span>how vendor order sheets are sent</span></div></div>
+  <div class="links"><b>Linked to</b><a class="chip" href="#t-file_object">file_object</a></div>
+  <details><summary>All 35 columns</summary><div class="allc"><code>id</code><code>code</code><code>vendor_type</code><code>legal_name</code><code>address</code><code>city</code><code>pin</code><code>contact_person</code><code>mobile</code><code>email</code><code>gst_registered</code><code>gstin</code><code>pan</code><code>state_code</code><code>msme</code><code>udyam</code><code>bank_holder</code><code>bank_account_enc</code><code>bank_account_last4</code><code>ifsc</code><code>bank_proof_file_id</code><code>bank_verified</code><code>bank_verified_by</code><code>bank_verified_at</code><code>payment_terms</code><code>sheet_mode</code><code>sheet_time</code><code>sheet_channel</code><code>active</code><code>inactive_by</code><code>inactive_at</code><code>inactive_reason</code><code>created_by</code><code>created_at</code><code>msme_file_id</code></div></details>
+</article><article class="tbl" id="t-vendor_sub_category" data-s="vendor_sub_category vendor sub-categories which sub-categories a vendor deals in. one vendor + sub-category pair vendor_id / sub_category_id the pair vendor_id sub_category_id">
+  <header><h3>Vendor sub-categories</h3><code class="tname">vendor_sub_category</code></header>
+  <p class="purpose">Which sub-categories a vendor deals in.</p>
+  <p class="row"><b>One row is</b> one vendor + sub-category pair</p>
+  <div class="keys"><div class="kf"><code>vendor_id / sub_category_id</code><span>the pair</span></div></div>
+  <div class="links"><b>Linked to</b><a class="chip" href="#t-vendor">vendor</a><a class="chip" href="#t-sub_category">sub_category</a></div>
+  <details><summary>All 2 columns</summary><div class="allc"><code>vendor_id</code><code>sub_category_id</code></div></details>
+</article><article class="tbl" id="t-bill_type" data-s="bill_type bill types utility and amc bill types, e.g. electricity, lift amc. one bill type section utility or amc default_gst usual gst rate fin_status pending until finance approves id name section default_gst active inactive_by inactive_at inactive_reason created_by created_at fin_status fin_by fin_at fin_note">
+  <header><h3>Bill types</h3><code class="tname">bill_type</code></header>
+  <p class="purpose">Utility and AMC bill types, e.g. Electricity, Lift AMC.</p>
+  <p class="row"><b>One row is</b> one bill type</p>
+  <div class="keys"><div class="kf"><code>section</code><span>utility or AMC</span></div><div class="kf"><code>default_gst</code><span>usual GST rate</span></div><div class="kf"><code>fin_status</code><span>pending until Finance approves</span></div></div>
+  
+  <details><summary>All 14 columns</summary><div class="allc"><code>id</code><code>name</code><code>section</code><code>default_gst</code><code>active</code><code>inactive_by</code><code>inactive_at</code><code>inactive_reason</code><code>created_by</code><code>created_at</code><code>fin_status</code><code>fin_by</code><code>fin_at</code><code>fin_note</code></div></details>
+</article><article class="tbl" id="t-vendor_bill_type" data-s="vendor_bill_type vendor bill types which bill types a utility or amc vendor bills for. one vendor + bill type pair vendor_id / bill_type_id the pair vendor_id bill_type_id">
+  <header><h3>Vendor bill types</h3><code class="tname">vendor_bill_type</code></header>
+  <p class="purpose">Which bill types a utility or AMC vendor bills for.</p>
+  <p class="row"><b>One row is</b> one vendor + bill type pair</p>
+  <div class="keys"><div class="kf"><code>vendor_id / bill_type_id</code><span>the pair</span></div></div>
+  <div class="links"><b>Linked to</b><a class="chip" href="#t-vendor">vendor</a><a class="chip" href="#t-bill_type">bill_type</a></div>
+  <details><summary>All 2 columns</summary><div class="allc"><code>vendor_id</code><code>bill_type_id</code></div></details>
+</article><article class="tbl" id="t-rate_card" data-s="rate_card rate cards agreed price of an item from a vendor, with validity dates. old rates are kept, not overwritten. one rate for one period vendor_id / sku_id who and what rate / gst_pct price before gst, and gst valid_from / valid_to when the rate applies superseded replaced by a newer rate id vendor_id sku_id rate gst_pct valid_from valid_to superseded created_by created_at">
+  <header><h3>Rate cards</h3><code class="tname">rate_card</code></header>
+  <p class="purpose">Agreed price of an item from a vendor, with validity dates. Old rates are kept, not overwritten.</p>
+  <p class="row"><b>One row is</b> one rate for one period</p>
+  <div class="keys"><div class="kf"><code>vendor_id / sku_id</code><span>who and what</span></div><div class="kf"><code>rate / gst_pct</code><span>price before GST, and GST</span></div><div class="kf"><code>valid_from / valid_to</code><span>when the rate applies</span></div><div class="kf"><code>superseded</code><span>replaced by a newer rate</span></div></div>
+  <div class="links"><b>Linked to</b><a class="chip" href="#t-vendor">vendor</a><a class="chip" href="#t-sku">sku</a></div>
+  <details><summary>All 10 columns</summary><div class="allc"><code>id</code><code>vendor_id</code><code>sku_id</code><code>rate</code><code>gst_pct</code><code>valid_from</code><code>valid_to</code><code>superseded</code><code>created_by</code><code>created_at</code></div></details>
+</article><article class="tbl" id="t-vendor_mapping" data-s="vendor_mapping vendor mapping which vendor supplies an item (or a whole sub-category) at which properties. an item-level mapping beats a sub-category one. one supply rule level sku or sub-category sku_id / sub_category_id what is covered all_properties every property, or only those listed in vendor_mapping_property estimate_allowed requests may go ahead with an estimated rate id vendor_id level sku_id sub_category_id all_properties estimate_allowed active inactive_by inactive_at inactive_reason created_by created_at">
+  <header><h3>Vendor mapping</h3><code class="tname">vendor_mapping</code></header>
+  <p class="purpose">Which vendor supplies an item (or a whole sub-category) at which properties. An item-level mapping beats a sub-category one.</p>
+  <p class="row"><b>One row is</b> one supply rule</p>
+  <div class="keys"><div class="kf"><code>level</code><span>sku or sub-category</span></div><div class="kf"><code>sku_id / sub_category_id</code><span>what is covered</span></div><div class="kf"><code>all_properties</code><span>every property, or only those listed in vendor_mapping_property</span></div><div class="kf"><code>estimate_allowed</code><span>requests may go ahead with an estimated rate</span></div></div>
+  <div class="links"><b>Linked to</b><a class="chip" href="#t-vendor">vendor</a><a class="chip" href="#t-sku">sku</a><a class="chip" href="#t-sub_category">sub_category</a></div>
+  <details><summary>All 13 columns</summary><div class="allc"><code>id</code><code>vendor_id</code><code>level</code><code>sku_id</code><code>sub_category_id</code><code>all_properties</code><code>estimate_allowed</code><code>active</code><code>inactive_by</code><code>inactive_at</code><code>inactive_reason</code><code>created_by</code><code>created_at</code></div></details>
+</article><article class="tbl" id="t-vendor_mapping_property" data-s="vendor_mapping_property mapping properties the properties a vendor mapping covers, when it is not all properties. one mapping + property pair mapping_id / property_id the pair mapping_id property_id">
+  <header><h3>Mapping properties</h3><code class="tname">vendor_mapping_property</code></header>
+  <p class="purpose">The properties a vendor mapping covers, when it is not all properties.</p>
+  <p class="row"><b>One row is</b> one mapping + property pair</p>
+  <div class="keys"><div class="kf"><code>mapping_id / property_id</code><span>the pair</span></div></div>
+  <div class="links"><b>Linked to</b><a class="chip" href="#t-vendor_mapping">vendor_mapping</a><a class="chip" href="#t-property">property</a></div>
+  <details><summary>All 2 columns</summary><div class="allc"><code>mapping_id</code><code>property_id</code></div></details>
+</article><article class="tbl" id="t-vendor_login" data-s="vendor_login vendor portal sign-ins the vendor&#x27;s own sign-in to the vendor portal, kept apart from staff users. one vendor&#x27;s sign-in email / password_hash sign-in details must_change must set a new password at first sign-in last_login_at last time they signed in vendor_id email password_hash must_change active last_login_at created_by created_at updated_at">
+  <header><h3>Vendor portal sign-ins</h3><code class="tname">vendor_login</code></header>
+  <p class="purpose">The vendor&#x27;s own sign-in to the vendor portal, kept apart from staff users.</p>
+  <p class="row"><b>One row is</b> one vendor&#x27;s sign-in</p>
+  <div class="keys"><div class="kf"><code>email / password_hash</code><span>sign-in details</span></div><div class="kf"><code>must_change</code><span>must set a new password at first sign-in</span></div><div class="kf"><code>last_login_at</code><span>last time they signed in</span></div></div>
+  <div class="links"><b>Linked to</b><a class="chip" href="#t-vendor">vendor</a></div>
+  <details><summary>All 9 columns</summary><div class="allc"><code>vendor_id</code><code>email</code><code>password_hash</code><code>must_change</code><code>active</code><code>last_login_at</code><code>created_by</code><code>created_at</code><code>updated_at</code></div></details>
+</article></div></section><section class="grp" id="flow"><div class="ghead"><h2>Purchase flow</h2><p>Requests, POs, deliveries, invoices and advances: the heart of the system.</p></div><div class="cards"><article class="tbl" id="t-document" data-s="document requests, pos and bills one table for every purchase request and its po, every utility/amc bill, and every corporate purchase or bill. a request becomes a po in the same row, so its whole life is in one place. one request (and the po it becomes) or one bill number pr_hz_0001, or br-, cr-, cb- numbers kind purchase, bill, corp_purchase or corp_bill status pending, returned, approved, po_issued, received, closed, rejected, cancelled (and wh_ statuses for transfers) route_steps / step_idx the approvers this request needs, and where it is now po_number / po_date / deliver_by / payment_terms the po, once raised is_transfer supplied by the central warehouse instead of a vendor sent_to_vendor_at / vendor_status po pushed to the vendor; vendor accepted or declined zoho_po_id the matching purchase order in zoho books id number kind property_id vendor_id requester_id requester_step status route_steps step_idx event_reason event_note routed_reason routed_note cm_approved_at preop_user_id return_reason return_note modified_note modified_by modified_at approved_at po_number po_date deliver_by payment_terms po_closed_short is_transfer dispatched_at wait_until wait_note bill_type_id period_start months remark created_by created_at updated_at transfer_received_at parent_id department_id corp_l1_user_id corp_l2_user_id corp_backup_user_id expense_head_id quote_file_id advance_hold_po zoho_po_id zoho_po_sync zoho_po_error zoho_po_at vendor_status vendor_note dispatch_date vendor_acted_at sent_to_vendor_at">
+  <header><h3>Requests, POs and bills</h3><code class="tname">document</code></header>
+  <p class="purpose">One table for every purchase request and its PO, every utility/AMC bill, and every corporate purchase or bill. A request becomes a PO in the same row, so its whole life is in one place.</p>
+  <p class="row"><b>One row is</b> one request (and the PO it becomes) or one bill</p>
+  <div class="keys"><div class="kf"><code>number</code><span>PR_HZ_0001, or BR-, CR-, CB- numbers</span></div><div class="kf"><code>kind</code><span>purchase, bill, corp_purchase or corp_bill</span></div><div class="kf"><code>status</code><span>PENDING, RETURNED, APPROVED, PO_ISSUED, RECEIVED, CLOSED, REJECTED, CANCELLED (and WH_ statuses for transfers)</span></div><div class="kf"><code>route_steps / step_idx</code><span>the approvers this request needs, and where it is now</span></div><div class="kf"><code>po_number / po_date / deliver_by / payment_terms</code><span>the PO, once raised</span></div><div class="kf"><code>is_transfer</code><span>supplied by the Central Warehouse instead of a vendor</span></div><div class="kf"><code>sent_to_vendor_at / vendor_status</code><span>PO pushed to the vendor; vendor accepted or declined</span></div><div class="kf"><code>zoho_po_id</code><span>the matching purchase order in Zoho Books</span></div></div>
+  <div class="links"><b>Linked to</b><a class="chip" href="#t-property">property</a><a class="chip" href="#t-vendor">vendor</a><a class="chip" href="#t-app_user">app_user</a><a class="chip" href="#t-bill_type">bill_type</a><a class="chip" href="#t-corp_department">corp_department</a><a class="chip" href="#t-expense_head">expense_head</a></div>
+  <details><summary>All 56 columns</summary><div class="allc"><code>id</code><code>number</code><code>kind</code><code>property_id</code><code>vendor_id</code><code>requester_id</code><code>requester_step</code><code>status</code><code>route_steps</code><code>step_idx</code><code>event_reason</code><code>event_note</code><code>routed_reason</code><code>routed_note</code><code>cm_approved_at</code><code>preop_user_id</code><code>return_reason</code><code>return_note</code><code>modified_note</code><code>modified_by</code><code>modified_at</code><code>approved_at</code><code>po_number</code><code>po_date</code><code>deliver_by</code><code>payment_terms</code><code>po_closed_short</code><code>is_transfer</code><code>dispatched_at</code><code>wait_until</code><code>wait_note</code><code>bill_type_id</code><code>period_start</code><code>months</code><code>remark</code><code>created_by</code><code>created_at</code><code>updated_at</code><code>transfer_received_at</code><code>parent_id</code><code>department_id</code><code>corp_l1_user_id</code><code>corp_l2_user_id</code><code>corp_backup_user_id</code><code>expense_head_id</code><code>quote_file_id</code><code>advance_hold_po</code><code>zoho_po_id</code><code>zoho_po_sync</code><code>zoho_po_error</code><code>zoho_po_at</code><code>vendor_status</code><code>vendor_note</code><code>dispatch_date</code><code>vendor_acted_at</code><code>sent_to_vendor_at</code></div></details>
+</article><article class="tbl" id="t-document_line" data-s="document_line request lines the items on a request or po, with quantities as they change. one item on one request sku_id / qty / rate / gst_pct item, quantity, price, gst original_qty what was first asked (approvers may change it) received_qty delivered so far rejected_qty balance the vendor will not deliver dispatched_qty sent by the warehouse (transfers) tds_section / tds_pct copied from the item when raised description / unit / expense_head_id corporate lines, which have no item code id document_id sku_id qty original_qty rate gst_pct estimated dispatched_qty received_qty created_at description unit expense_head_id tds_section tds_pct rejected_qty zoho_po_line_id">
+  <header><h3>Request lines</h3><code class="tname">document_line</code></header>
+  <p class="purpose">The items on a request or PO, with quantities as they change.</p>
+  <p class="row"><b>One row is</b> one item on one request</p>
+  <div class="keys"><div class="kf"><code>sku_id / qty / rate / gst_pct</code><span>item, quantity, price, GST</span></div><div class="kf"><code>original_qty</code><span>what was first asked (approvers may change it)</span></div><div class="kf"><code>received_qty</code><span>delivered so far</span></div><div class="kf"><code>rejected_qty</code><span>balance the vendor will not deliver</span></div><div class="kf"><code>dispatched_qty</code><span>sent by the warehouse (transfers)</span></div><div class="kf"><code>tds_section / tds_pct</code><span>copied from the item when raised</span></div><div class="kf"><code>description / unit / expense_head_id</code><span>corporate lines, which have no item code</span></div></div>
+  <div class="links"><b>Linked to</b><a class="chip" href="#t-document">document</a><a class="chip" href="#t-sku">sku</a><a class="chip" href="#t-expense_head">expense_head</a></div>
+  <details><summary>All 18 columns</summary><div class="allc"><code>id</code><code>document_id</code><code>sku_id</code><code>qty</code><code>original_qty</code><code>rate</code><code>gst_pct</code><code>estimated</code><code>dispatched_qty</code><code>received_qty</code><code>created_at</code><code>description</code><code>unit</code><code>expense_head_id</code><code>tds_section</code><code>tds_pct</code><code>rejected_qty</code><code>zoho_po_line_id</code></div></details>
+</article><article class="tbl" id="t-goods_receipt" data-s="goods_receipt goods receipts (grn) each delivery received against a po. one po can have several part deliveries. one delivery number grn_hz_0001, or _01, _02 for part deliveries delivery_no 1st, 2nd... delivery on the po received_by / received_at who received it and when photo_file_ids delivery photos voided / void_reason cancelled when accounts sends it back id number document_id delivery_no received_by received_at photo_file_ids note voided void_reason">
+  <header><h3>Goods receipts (GRN)</h3><code class="tname">goods_receipt</code></header>
+  <p class="purpose">Each delivery received against a PO. One PO can have several part deliveries.</p>
+  <p class="row"><b>One row is</b> one delivery</p>
+  <div class="keys"><div class="kf"><code>number</code><span>GRN_HZ_0001, or _01, _02 for part deliveries</span></div><div class="kf"><code>delivery_no</code><span>1st, 2nd... delivery on the PO</span></div><div class="kf"><code>received_by / received_at</code><span>who received it and when</span></div><div class="kf"><code>photo_file_ids</code><span>delivery photos</span></div><div class="kf"><code>voided / void_reason</code><span>cancelled when Accounts sends it back</span></div></div>
+  <div class="links"><b>Linked to</b><a class="chip" href="#t-document">document</a><a class="chip" href="#t-app_user">app_user</a><a class="chip" href="#t-file_object">file_object</a></div>
+  <details><summary>All 10 columns</summary><div class="allc"><code>id</code><code>number</code><code>document_id</code><code>delivery_no</code><code>received_by</code><code>received_at</code><code>photo_file_ids</code><code>note</code><code>voided</code><code>void_reason</code></div></details>
+</article><article class="tbl" id="t-goods_receipt_line" data-s="goods_receipt_line receipt lines how much of each po line arrived in a delivery. one item in one delivery line_id / qty the po line and the quantity received goods_receipt_id line_id qty">
+  <header><h3>Receipt lines</h3><code class="tname">goods_receipt_line</code></header>
+  <p class="purpose">How much of each PO line arrived in a delivery.</p>
+  <p class="row"><b>One row is</b> one item in one delivery</p>
+  <div class="keys"><div class="kf"><code>line_id / qty</code><span>the PO line and the quantity received</span></div></div>
+  <div class="links"><b>Linked to</b><a class="chip" href="#t-goods_receipt">goods_receipt</a><a class="chip" href="#t-document_line">document_line</a></div>
+  <details><summary>All 3 columns</summary><div class="allc"><code>goods_receipt_id</code><code>line_id</code><code>qty</code></div></details>
+</article><article class="tbl" id="t-invoice" data-s="invoice invoices and payables each vendor invoice entered at goods receipt, and each utility, amc or corporate bill. one row becomes one bill in zoho books. one payable voucher_number pv_0001: one series for every bill entered invoice_number / invoice_date / amount as on the vendor&#x27;s invoice status awaiting, received, matched, pay_approved, pushed, paid, void match_remark accounts&#x27; note at the three-way match pay_approved_by / due_date payment approval and when it is due zoho_bill_id / zoho_status the bill in zoho books paid_at / payment_ref read back from zoho once paid (date and utr) id document_id goods_receipt_id vendor_id property_id invoice_number invoice_date amount gst_pct file_id status match_remark matched_by matched_at pay_approved_by pay_approved_at due_date zoho_bill_id zoho_step zoho_voids zoho_status zoho_balance zoho_paid zoho_error zoho_pushed_at paid_at payment_ref created_by created_at voucher_number zoho_tried_at">
+  <header><h3>Invoices and payables</h3><code class="tname">invoice</code></header>
+  <p class="purpose">Each vendor invoice entered at goods receipt, and each utility, AMC or corporate bill. One row becomes one bill in Zoho Books.</p>
+  <p class="row"><b>One row is</b> one payable</p>
+  <div class="keys"><div class="kf"><code>voucher_number</code><span>PV_0001: one series for every bill entered</span></div><div class="kf"><code>invoice_number / invoice_date / amount</code><span>as on the vendor&#x27;s invoice</span></div><div class="kf"><code>status</code><span>AWAITING, RECEIVED, MATCHED, PAY_APPROVED, PUSHED, PAID, VOID</span></div><div class="kf"><code>match_remark</code><span>Accounts&#x27; note at the three-way match</span></div><div class="kf"><code>pay_approved_by / due_date</code><span>payment approval and when it is due</span></div><div class="kf"><code>zoho_bill_id / zoho_status</code><span>the bill in Zoho Books</span></div><div class="kf"><code>paid_at / payment_ref</code><span>read back from Zoho once paid (date and UTR)</span></div></div>
+  <div class="links"><b>Linked to</b><a class="chip" href="#t-document">document</a><a class="chip" href="#t-goods_receipt">goods_receipt</a><a class="chip" href="#t-vendor">vendor</a><a class="chip" href="#t-property">property</a><a class="chip" href="#t-file_object">file_object</a></div>
+  <details><summary>All 31 columns</summary><div class="allc"><code>id</code><code>document_id</code><code>goods_receipt_id</code><code>vendor_id</code><code>property_id</code><code>invoice_number</code><code>invoice_date</code><code>amount</code><code>gst_pct</code><code>file_id</code><code>status</code><code>match_remark</code><code>matched_by</code><code>matched_at</code><code>pay_approved_by</code><code>pay_approved_at</code><code>due_date</code><code>zoho_bill_id</code><code>zoho_step</code><code>zoho_voids</code><code>zoho_status</code><code>zoho_balance</code><code>zoho_paid</code><code>zoho_error</code><code>zoho_pushed_at</code><code>paid_at</code><code>payment_ref</code><code>created_by</code><code>created_at</code><code>voucher_number</code><code>zoho_tried_at</code></div></details>
+</article><article class="tbl" id="t-vendor_invoice" data-s="vendor_invoice invoices from the vendor portal invoices a vendor uploads on the portal before delivery; the receiver picks one up at goods receipt. one uploaded invoice invoice_number / amount / file_id the vendor&#x27;s invoice goods_receipt_id filled once used at a goods receipt id document_id vendor_id invoice_number invoice_date amount file_id note goods_receipt_id created_at">
+  <header><h3>Invoices from the vendor portal</h3><code class="tname">vendor_invoice</code></header>
+  <p class="purpose">Invoices a vendor uploads on the portal before delivery; the receiver picks one up at goods receipt.</p>
+  <p class="row"><b>One row is</b> one uploaded invoice</p>
+  <div class="keys"><div class="kf"><code>invoice_number / amount / file_id</code><span>the vendor&#x27;s invoice</span></div><div class="kf"><code>goods_receipt_id</code><span>filled once used at a goods receipt</span></div></div>
+  <div class="links"><b>Linked to</b><a class="chip" href="#t-document">document</a><a class="chip" href="#t-vendor">vendor</a><a class="chip" href="#t-goods_receipt">goods_receipt</a></div>
+  <details><summary>All 10 columns</summary><div class="allc"><code>id</code><code>document_id</code><code>vendor_id</code><code>invoice_number</code><code>invoice_date</code><code>amount</code><code>file_id</code><code>note</code><code>goods_receipt_id</code><code>created_at</code></div></details>
+</article><article class="tbl" id="t-advance" data-s="advance vendor advances advance payments on advance-terms pos: asked at approval, approved and recorded as paid by finance, then set off against invoices. one advance number adv_hz_0001_01 amount / pct the advance, as an amount or % of the po tds_amount tds held on it status pending, approved, paid, rejected, cancelled paid_on / payment_ref when finance paid it, and the utr carry_forward what is left moves to the vendor&#x27;s next invoices zoho_payment_id the vendor payment in zoho books id number document_id vendor_id property_id amount pct tds_amount reason note proforma_file_id status requested_by requested_at decided_by decided_at decision_note paid_by paid_on payment_ref carry_forward zoho_payment_id zoho_error zoho_at">
+  <header><h3>Vendor advances</h3><code class="tname">advance</code></header>
+  <p class="purpose">Advance payments on Advance-terms POs: asked at approval, approved and recorded as paid by Finance, then set off against invoices.</p>
+  <p class="row"><b>One row is</b> one advance</p>
+  <div class="keys"><div class="kf"><code>number</code><span>ADV_HZ_0001_01</span></div><div class="kf"><code>amount / pct</code><span>the advance, as an amount or % of the PO</span></div><div class="kf"><code>tds_amount</code><span>TDS held on it</span></div><div class="kf"><code>status</code><span>PENDING, APPROVED, PAID, REJECTED, CANCELLED</span></div><div class="kf"><code>paid_on / payment_ref</code><span>when Finance paid it, and the UTR</span></div><div class="kf"><code>carry_forward</code><span>what is left moves to the vendor&#x27;s next invoices</span></div><div class="kf"><code>zoho_payment_id</code><span>the vendor payment in Zoho Books</span></div></div>
+  <div class="links"><b>Linked to</b><a class="chip" href="#t-document">document</a><a class="chip" href="#t-vendor">vendor</a><a class="chip" href="#t-property">property</a></div>
+  <details><summary>All 24 columns</summary><div class="allc"><code>id</code><code>number</code><code>document_id</code><code>vendor_id</code><code>property_id</code><code>amount</code><code>pct</code><code>tds_amount</code><code>reason</code><code>note</code><code>proforma_file_id</code><code>status</code><code>requested_by</code><code>requested_at</code><code>decided_by</code><code>decided_at</code><code>decision_note</code><code>paid_by</code><code>paid_on</code><code>payment_ref</code><code>carry_forward</code><code>zoho_payment_id</code><code>zoho_error</code><code>zoho_at</code></div></details>
+</article><article class="tbl" id="t-advance_use" data-s="advance_use advance set-offs where each advance went: set off against an invoice, or returned by the vendor. one set-off or refund kind invoice or refund amount / tds_amount part of the advance used, and its tds share zoho_applied applied to the bill in zoho id advance_id kind invoice_id amount tds_amount reference used_on created_by created_at zoho_applied">
+  <header><h3>Advance set-offs</h3><code class="tname">advance_use</code></header>
+  <p class="purpose">Where each advance went: set off against an invoice, or returned by the vendor.</p>
+  <p class="row"><b>One row is</b> one set-off or refund</p>
+  <div class="keys"><div class="kf"><code>kind</code><span>invoice or refund</span></div><div class="kf"><code>amount / tds_amount</code><span>part of the advance used, and its TDS share</span></div><div class="kf"><code>zoho_applied</code><span>applied to the bill in Zoho</span></div></div>
+  <div class="links"><b>Linked to</b><a class="chip" href="#t-advance">advance</a><a class="chip" href="#t-invoice">invoice</a></div>
+  <details><summary>All 11 columns</summary><div class="allc"><code>id</code><code>advance_id</code><code>kind</code><code>invoice_id</code><code>amount</code><code>tds_amount</code><code>reference</code><code>used_on</code><code>created_by</code><code>created_at</code><code>zoho_applied</code></div></details>
+</article><article class="tbl" id="t-form_draft" data-s="form_draft saved drafts forms saved as drafts (request, goods receipt, bill, corporate), private to the person who saved them. one draft form / ref_id which form, and for which po fields / files what was filled in so far id user_id form ref_id title fields files created_at updated_at">
+  <header><h3>Saved drafts</h3><code class="tname">form_draft</code></header>
+  <p class="purpose">Forms saved as drafts (request, goods receipt, bill, corporate), private to the person who saved them.</p>
+  <p class="row"><b>One row is</b> one draft</p>
+  <div class="keys"><div class="kf"><code>form / ref_id</code><span>which form, and for which PO</span></div><div class="kf"><code>fields / files</code><span>what was filled in so far</span></div></div>
+  <div class="links"><b>Linked to</b><a class="chip" href="#t-app_user">app_user</a></div>
+  <details><summary>All 9 columns</summary><div class="allc"><code>id</code><code>user_id</code><code>form</code><code>ref_id</code><code>title</code><code>fields</code><code>files</code><code>created_at</code><code>updated_at</code></div></details>
+</article></div></section><section class="grp" id="budgets"><div class="ghead"><h2>Budgets</h2><p>Monthly budgets and what has been spent against them.</p></div><div class="cards"><article class="tbl" id="t-budget" data-s="budget budgets monthly budget per property and sub-category, including gst. one property + sub-category + month amount the month&#x27;s budget property_id sub_category_id month amount created_by created_at">
+  <header><h3>Budgets</h3><code class="tname">budget</code></header>
+  <p class="purpose">Monthly budget per property and sub-category, including GST.</p>
+  <p class="row"><b>One row is</b> one property + sub-category + month</p>
+  <div class="keys"><div class="kf"><code>amount</code><span>the month&#x27;s budget</span></div></div>
+  <div class="links"><b>Linked to</b><a class="chip" href="#t-property">property</a><a class="chip" href="#t-sub_category">sub_category</a></div>
+  <details><summary>All 6 columns</summary><div class="allc"><code>property_id</code><code>sub_category_id</code><code>month</code><code>amount</code><code>created_by</code><code>created_at</code></div></details>
+</article><article class="tbl" id="t-budget_spend" data-s="budget_spend budget spend spend recorded when a request is finally approved, so budgets stay correct. one approved amount spend_date / amount when and how much document_id the request it came from id property_id sub_category_id spend_date amount document_id created_at">
+  <header><h3>Budget spend</h3><code class="tname">budget_spend</code></header>
+  <p class="purpose">Spend recorded when a request is finally approved, so budgets stay correct.</p>
+  <p class="row"><b>One row is</b> one approved amount</p>
+  <div class="keys"><div class="kf"><code>spend_date / amount</code><span>when and how much</span></div><div class="kf"><code>document_id</code><span>the request it came from</span></div></div>
+  <div class="links"><b>Linked to</b><a class="chip" href="#t-property">property</a><a class="chip" href="#t-sub_category">sub_category</a><a class="chip" href="#t-document">document</a></div>
+  <details><summary>All 7 columns</summary><div class="allc"><code>id</code><code>property_id</code><code>sub_category_id</code><code>spend_date</code><code>amount</code><code>document_id</code><code>created_at</code></div></details>
+</article><article class="tbl" id="t-fb_sale" data-s="fb_sale f&amp;b sales daily food &amp; beverage sales per property; with the cost % they set the f&amp;b day budget. one property + day plan_sale / ird_sale / banquet_sale the day&#x27;s sales by type property_id sale_date plan_sale ird_sale banquet_sale created_by created_at">
+  <header><h3>F&amp;B sales</h3><code class="tname">fb_sale</code></header>
+  <p class="purpose">Daily food &amp; beverage sales per property; with the cost % they set the F&amp;B day budget.</p>
+  <p class="row"><b>One row is</b> one property + day</p>
+  <div class="keys"><div class="kf"><code>plan_sale / ird_sale / banquet_sale</code><span>the day&#x27;s sales by type</span></div></div>
+  <div class="links"><b>Linked to</b><a class="chip" href="#t-property">property</a></div>
+  <details><summary>All 7 columns</summary><div class="allc"><code>property_id</code><code>sale_date</code><code>plan_sale</code><code>ird_sale</code><code>banquet_sale</code><code>created_by</code><code>created_at</code></div></details>
+</article></div></section><section class="grp" id="warehouse"><div class="ghead"><h2>Warehouse</h2><p>The Central Warehouse: stock and deliveries to properties.</p></div><div class="cards"><article class="tbl" id="t-warehouse_stock" data-s="warehouse_stock warehouse stock opening stock and reorder level per item. the live balance is worked out from movements (opening + purchased − sent − losses). one item opening_qty opening stock min_level reorder level sku_id opening_qty min_level updated_by updated_at">
+  <header><h3>Warehouse stock</h3><code class="tname">warehouse_stock</code></header>
+  <p class="purpose">Opening stock and reorder level per item. The live balance is worked out from movements (opening + purchased − sent − losses).</p>
+  <p class="row"><b>One row is</b> one item</p>
+  <div class="keys"><div class="kf"><code>opening_qty</code><span>opening stock</span></div><div class="kf"><code>min_level</code><span>reorder level</span></div></div>
+  <div class="links"><b>Linked to</b><a class="chip" href="#t-sku">sku</a></div>
+  <details><summary>All 5 columns</summary><div class="allc"><code>sku_id</code><code>opening_qty</code><code>min_level</code><code>updated_by</code><code>updated_at</code></div></details>
+</article><article class="tbl" id="t-delivery_partner" data-s="delivery_partner delivery partners who carries goods from the warehouse to properties. one partner kind / driver / phone vehicle owner and contact id name kind driver phone active inactive_by inactive_at inactive_reason created_by created_at">
+  <header><h3>Delivery partners</h3><code class="tname">delivery_partner</code></header>
+  <p class="purpose">Who carries goods from the warehouse to properties.</p>
+  <p class="row"><b>One row is</b> one partner</p>
+  <div class="keys"><div class="kf"><code>kind / driver / phone</code><span>vehicle owner and contact</span></div></div>
+  
+  <details><summary>All 11 columns</summary><div class="allc"><code>id</code><code>name</code><code>kind</code><code>driver</code><code>phone</code><code>active</code><code>inactive_by</code><code>inactive_at</code><code>inactive_reason</code><code>created_by</code><code>created_at</code></div></details>
+</article><article class="tbl" id="t-delivery" data-s="delivery scheduled deliveries the delivery booked for a warehouse transfer. one transfer&#x27;s delivery partner_id / delivery_date / slot / vehicle who, when and how document_id partner_id delivery_date slot vehicle note version scheduled_by scheduled_at">
+  <header><h3>Scheduled deliveries</h3><code class="tname">delivery</code></header>
+  <p class="purpose">The delivery booked for a warehouse transfer.</p>
+  <p class="row"><b>One row is</b> one transfer&#x27;s delivery</p>
+  <div class="keys"><div class="kf"><code>partner_id / delivery_date / slot / vehicle</code><span>who, when and how</span></div></div>
+  <div class="links"><b>Linked to</b><a class="chip" href="#t-document">document</a><a class="chip" href="#t-delivery_partner">delivery_partner</a></div>
+  <details><summary>All 9 columns</summary><div class="allc"><code>document_id</code><code>partner_id</code><code>delivery_date</code><code>slot</code><code>vehicle</code><code>note</code><code>version</code><code>scheduled_by</code><code>scheduled_at</code></div></details>
+</article></div></section><section class="grp" id="corporate"><div class="ghead"><h2>Corporate office</h2><p>Purchases and bills raised by the corporate office.</p></div><div class="cards"><article class="tbl" id="t-corp_department" data-s="corp_department departments corporate departments and their approvers. one department l1_user_id / l2_user_id / backup_user_id first and second approver, and the backup id name l1_user_id l2_user_id backup_user_id active inactive_by inactive_at inactive_reason created_by created_at">
+  <header><h3>Departments</h3><code class="tname">corp_department</code></header>
+  <p class="purpose">Corporate departments and their approvers.</p>
+  <p class="row"><b>One row is</b> one department</p>
+  <div class="keys"><div class="kf"><code>l1_user_id / l2_user_id / backup_user_id</code><span>first and second approver, and the backup</span></div></div>
+  <div class="links"><b>Linked to</b><a class="chip" href="#t-app_user">app_user</a></div>
+  <details><summary>All 11 columns</summary><div class="allc"><code>id</code><code>name</code><code>l1_user_id</code><code>l2_user_id</code><code>backup_user_id</code><code>active</code><code>inactive_by</code><code>inactive_at</code><code>inactive_reason</code><code>created_by</code><code>created_at</code></div></details>
+</article><article class="tbl" id="t-expense_head" data-s="expense_head expense heads what a corporate line is booked to (e.g. travel, software). one expense head fin_status pending until finance approves id name active inactive_by inactive_at inactive_reason created_by created_at fin_status fin_by fin_at fin_note">
+  <header><h3>Expense heads</h3><code class="tname">expense_head</code></header>
+  <p class="purpose">What a corporate line is booked to (e.g. Travel, Software).</p>
+  <p class="row"><b>One row is</b> one expense head</p>
+  <div class="keys"><div class="kf"><code>fin_status</code><span>pending until Finance approves</span></div></div>
+  
+  <details><summary>All 12 columns</summary><div class="allc"><code>id</code><code>name</code><code>active</code><code>inactive_by</code><code>inactive_at</code><code>inactive_reason</code><code>created_by</code><code>created_at</code><code>fin_status</code><code>fin_by</code><code>fin_at</code><code>fin_note</code></div></details>
+</article></div></section><section class="grp" id="sheets"><div class="ghead"><h2>Vendor order sheets</h2><p>The daily order summary sent to each vendor.</p></div><div class="cards"><article class="tbl" id="t-vendor_sheet_log" data-s="vendor_sheet_log order sheet log every vendor order sheet sent, with the pos in it. one sheet sent version 1st, 2nd... sheet for the vendor po_numbers the pos it pushed to the vendor channel / automatic email or whatsapp; sent at the set time or by hand id vendor_id version channel po_numbers pending automatic status sent_by sent_at">
+  <header><h3>Order sheet log</h3><code class="tname">vendor_sheet_log</code></header>
+  <p class="purpose">Every vendor order sheet sent, with the POs in it.</p>
+  <p class="row"><b>One row is</b> one sheet sent</p>
+  <div class="keys"><div class="kf"><code>version</code><span>1st, 2nd... sheet for the vendor</span></div><div class="kf"><code>po_numbers</code><span>the POs it pushed to the vendor</span></div><div class="kf"><code>channel / automatic</code><span>email or WhatsApp; sent at the set time or by hand</span></div></div>
+  <div class="links"><b>Linked to</b><a class="chip" href="#t-vendor">vendor</a></div>
+  <details><summary>All 10 columns</summary><div class="allc"><code>id</code><code>vendor_id</code><code>version</code><code>channel</code><code>po_numbers</code><code>pending</code><code>automatic</code><code>status</code><code>sent_by</code><code>sent_at</code></div></details>
+</article></div></section><section class="grp" id="zoho"><div class="ghead"><h2>Zoho Books link</h2><p>The connection to Zoho Books, copies of Zoho&#x27;s lists, and how our records map to Zoho&#x27;s.</p></div><div class="cards"><article class="tbl" id="t-zoho_connection" data-s="zoho_connection zoho connection the single zoho books connection. the one connection org_id the zoho organisation client_secret_enc / refresh_token_enc credentials, encrypted auto_masters new vendors, items and properties go to zoho by themselves advance_account_id the bank account advances are paid from last_payment_read_at last time paid status was read back id accounts_url api_url org_id org_name plan_name client_id client_secret_enc refresh_token_enc connected last_error property_tag_id bill_key_field last_sync_at last_payment_read_at tested_at updated_by updated_at advance_account_id auto_masters">
+  <header><h3>Zoho connection</h3><code class="tname">zoho_connection</code></header>
+  <p class="purpose">The single Zoho Books connection.</p>
+  <p class="row"><b>One row is</b> the one connection</p>
+  <div class="keys"><div class="kf"><code>org_id</code><span>the Zoho organisation</span></div><div class="kf"><code>client_secret_enc / refresh_token_enc</code><span>credentials, encrypted</span></div><div class="kf"><code>auto_masters</code><span>new vendors, items and properties go to Zoho by themselves</span></div><div class="kf"><code>advance_account_id</code><span>the bank account advances are paid from</span></div><div class="kf"><code>last_payment_read_at</code><span>last time paid status was read back</span></div></div>
+  
+  <details><summary>All 20 columns</summary><div class="allc"><code>id</code><code>accounts_url</code><code>api_url</code><code>org_id</code><code>org_name</code><code>plan_name</code><code>client_id</code><code>client_secret_enc</code><code>refresh_token_enc</code><code>connected</code><code>last_error</code><code>property_tag_id</code><code>bill_key_field</code><code>last_sync_at</code><code>last_payment_read_at</code><code>tested_at</code><code>updated_by</code><code>updated_at</code><code>advance_account_id</code><code>auto_masters</code></div></details>
+</article><article class="tbl" id="t-zoho_account" data-s="zoho_account zoho accounts read-only copy of zoho&#x27;s chart of accounts. one zoho account account_id / name / account_type as in zoho account_id name code account_type active synced_at">
+  <header><h3>Zoho accounts</h3><code class="tname">zoho_account</code></header>
+  <p class="purpose">Read-only copy of Zoho&#x27;s chart of accounts.</p>
+  <p class="row"><b>One row is</b> one Zoho account</p>
+  <div class="keys"><div class="kf"><code>account_id / name / account_type</code><span>as in Zoho</span></div></div>
+  
+  <details><summary>All 6 columns</summary><div class="allc"><code>account_id</code><code>name</code><code>code</code><code>account_type</code><code>active</code><code>synced_at</code></div></details>
+</article><article class="tbl" id="t-zoho_tax" data-s="zoho_tax zoho taxes read-only copy of zoho&#x27;s gst taxes. one zoho tax pct / tax_type rate, and intra-state group or igst tax_id name pct tax_type specification active synced_at">
+  <header><h3>Zoho taxes</h3><code class="tname">zoho_tax</code></header>
+  <p class="purpose">Read-only copy of Zoho&#x27;s GST taxes.</p>
+  <p class="row"><b>One row is</b> one Zoho tax</p>
+  <div class="keys"><div class="kf"><code>pct / tax_type</code><span>rate, and intra-state group or IGST</span></div></div>
+  
+  <details><summary>All 7 columns</summary><div class="allc"><code>tax_id</code><code>name</code><code>pct</code><code>tax_type</code><code>specification</code><code>active</code><code>synced_at</code></div></details>
+</article><article class="tbl" id="t-zoho_tag" data-s="zoho_tag zoho reporting tags read-only copy of zoho&#x27;s reporting tags (one per region at saltstayz). one tag name tag name tag_id name active synced_at">
+  <header><h3>Zoho reporting tags</h3><code class="tname">zoho_tag</code></header>
+  <p class="purpose">Read-only copy of Zoho&#x27;s reporting tags (one per region at Saltstayz).</p>
+  <p class="row"><b>One row is</b> one tag</p>
+  <div class="keys"><div class="kf"><code>name</code><span>tag name</span></div></div>
+  
+  <details><summary>All 4 columns</summary><div class="allc"><code>tag_id</code><code>name</code><code>active</code><code>synced_at</code></div></details>
+</article><article class="tbl" id="t-zoho_tag_option" data-s="zoho_tag_option zoho tag options the options under each reporting tag (the hotels). one option tag_id / name its tag and name option_id tag_id name active synced_at">
+  <header><h3>Zoho tag options</h3><code class="tname">zoho_tag_option</code></header>
+  <p class="purpose">The options under each reporting tag (the hotels).</p>
+  <p class="row"><b>One row is</b> one option</p>
+  <div class="keys"><div class="kf"><code>tag_id / name</code><span>its tag and name</span></div></div>
+  <div class="links"><b>Linked to</b><a class="chip" href="#t-zoho_tag">zoho_tag</a></div>
+  <details><summary>All 5 columns</summary><div class="allc"><code>option_id</code><code>tag_id</code><code>name</code><code>active</code><code>synced_at</code></div></details>
+</article><article class="tbl" id="t-zoho_location" data-s="zoho_location zoho locations read-only copy of zoho&#x27;s business locations. one location gstin / state_code gst identity of the location location_id name gstin state_code active synced_at">
+  <header><h3>Zoho locations</h3><code class="tname">zoho_location</code></header>
+  <p class="purpose">Read-only copy of Zoho&#x27;s business locations.</p>
+  <p class="row"><b>One row is</b> one location</p>
+  <div class="keys"><div class="kf"><code>gstin / state_code</code><span>GST identity of the location</span></div></div>
+  
+  <details><summary>All 6 columns</summary><div class="allc"><code>location_id</code><code>name</code><code>gstin</code><code>state_code</code><code>active</code><code>synced_at</code></div></details>
+</article><article class="tbl" id="t-zoho_contact" data-s="zoho_contact zoho vendors read-only copy of the vendor contacts in zoho. one zoho vendor gst_no / gst_treatment used to match our vendors by gstin contact_id name company gst_no gst_treatment state_code active synced_at">
+  <header><h3>Zoho vendors</h3><code class="tname">zoho_contact</code></header>
+  <p class="purpose">Read-only copy of the vendor contacts in Zoho.</p>
+  <p class="row"><b>One row is</b> one Zoho vendor</p>
+  <div class="keys"><div class="kf"><code>gst_no / gst_treatment</code><span>used to match our vendors by GSTIN</span></div></div>
+  
+  <details><summary>All 8 columns</summary><div class="allc"><code>contact_id</code><code>name</code><code>company</code><code>gst_no</code><code>gst_treatment</code><code>state_code</code><code>active</code><code>synced_at</code></div></details>
+</article><article class="tbl" id="t-zoho_item" data-s="zoho_item zoho items read-only copy of zoho&#x27;s items. one zoho item sku / hsn_or_sac / purchase_account_id as in zoho item_id name sku hsn_or_sac unit product_type item_type brand purchase_rate tax_pct purchase_account_id active synced_at">
+  <header><h3>Zoho items</h3><code class="tname">zoho_item</code></header>
+  <p class="purpose">Read-only copy of Zoho&#x27;s items.</p>
+  <p class="row"><b>One row is</b> one Zoho item</p>
+  <div class="keys"><div class="kf"><code>sku / hsn_or_sac / purchase_account_id</code><span>as in Zoho</span></div></div>
+  
+  <details><summary>All 13 columns</summary><div class="allc"><code>item_id</code><code>name</code><code>sku</code><code>hsn_or_sac</code><code>unit</code><code>product_type</code><code>item_type</code><code>brand</code><code>purchase_rate</code><code>tax_pct</code><code>purchase_account_id</code><code>active</code><code>synced_at</code></div></details>
+</article><article class="tbl" id="t-zoho_map_property" data-s="zoho_map_property property → zoho which zoho tag option and location each property posts to. one property tag_option_id / location_id zoho tag option and location property_id tag_option_id location_id updated_by updated_at">
+  <header><h3>Property → Zoho</h3><code class="tname">zoho_map_property</code></header>
+  <p class="purpose">Which Zoho tag option and location each property posts to.</p>
+  <p class="row"><b>One row is</b> one property</p>
+  <div class="keys"><div class="kf"><code>tag_option_id / location_id</code><span>Zoho tag option and location</span></div></div>
+  <div class="links"><b>Linked to</b><a class="chip" href="#t-property">property</a></div>
+  <details><summary>All 5 columns</summary><div class="allc"><code>property_id</code><code>tag_option_id</code><code>location_id</code><code>updated_by</code><code>updated_at</code></div></details>
+</article><article class="tbl" id="t-zoho_map_account" data-s="zoho_map_account account mapping which zoho expense account each sub-category, bill type and expense head posts to. one mapping kind / ref what is mapped account_id the zoho account kind ref account_id updated_by updated_at">
+  <header><h3>Account mapping</h3><code class="tname">zoho_map_account</code></header>
+  <p class="purpose">Which Zoho expense account each sub-category, bill type and expense head posts to.</p>
+  <p class="row"><b>One row is</b> one mapping</p>
+  <div class="keys"><div class="kf"><code>kind / ref</code><span>what is mapped</span></div><div class="kf"><code>account_id</code><span>the Zoho account</span></div></div>
+  
+  <details><summary>All 5 columns</summary><div class="allc"><code>kind</code><code>ref</code><code>account_id</code><code>updated_by</code><code>updated_at</code></div></details>
+</article><article class="tbl" id="t-zoho_map_tax" data-s="zoho_map_tax tax mapping which zoho tax to use for each gst rate, within the state or between states. one gst rate + supply type gst_pct / supply / tax_id rate, intra/inter, zoho tax gst_pct supply tax_id updated_by updated_at">
+  <header><h3>Tax mapping</h3><code class="tname">zoho_map_tax</code></header>
+  <p class="purpose">Which Zoho tax to use for each GST rate, within the state or between states.</p>
+  <p class="row"><b>One row is</b> one GST rate + supply type</p>
+  <div class="keys"><div class="kf"><code>gst_pct / supply / tax_id</code><span>rate, intra/inter, Zoho tax</span></div></div>
+  
+  <details><summary>All 5 columns</summary><div class="allc"><code>gst_pct</code><code>supply</code><code>tax_id</code><code>updated_by</code><code>updated_at</code></div></details>
+</article><article class="tbl" id="t-zoho_map_vendor" data-s="zoho_map_vendor vendor → zoho which zoho contact each vendor is, and how it was linked. one vendor contact_id the zoho contact how matched by gstin, by name, by hand, or created vendor_id contact_id how updated_by updated_at">
+  <header><h3>Vendor → Zoho</h3><code class="tname">zoho_map_vendor</code></header>
+  <p class="purpose">Which Zoho contact each vendor is, and how it was linked.</p>
+  <p class="row"><b>One row is</b> one vendor</p>
+  <div class="keys"><div class="kf"><code>contact_id</code><span>the Zoho contact</span></div><div class="kf"><code>how</code><span>matched by GSTIN, by name, by hand, or created</span></div></div>
+  <div class="links"><b>Linked to</b><a class="chip" href="#t-vendor">vendor</a></div>
+  <details><summary>All 5 columns</summary><div class="allc"><code>vendor_id</code><code>contact_id</code><code>how</code><code>updated_by</code><code>updated_at</code></div></details>
+</article><article class="tbl" id="t-zoho_map_item" data-s="zoho_map_item item → zoho which zoho item each of our items is. one item item_id / how the zoho item, and how it was linked sku_id item_id how updated_by updated_at">
+  <header><h3>Item → Zoho</h3><code class="tname">zoho_map_item</code></header>
+  <p class="purpose">Which Zoho item each of our items is.</p>
+  <p class="row"><b>One row is</b> one item</p>
+  <div class="keys"><div class="kf"><code>item_id / how</code><span>the Zoho item, and how it was linked</span></div></div>
+  <div class="links"><b>Linked to</b><a class="chip" href="#t-sku">sku</a></div>
+  <details><summary>All 5 columns</summary><div class="allc"><code>sku_id</code><code>item_id</code><code>how</code><code>updated_by</code><code>updated_at</code></div></details>
+</article><article class="tbl" id="t-zoho_journal" data-s="zoho_journal warehouse journals journals posted to zoho for goods the warehouse sent to each property. one journal for one property and period period_start / period_end the period covered amount / journal_id value before gst, and the zoho journal property_id month journal_id number amount posted_by posted_at id period_start period_end automatic">
+  <header><h3>Warehouse journals</h3><code class="tname">zoho_journal</code></header>
+  <p class="purpose">Journals posted to Zoho for goods the warehouse sent to each property.</p>
+  <p class="row"><b>One row is</b> one journal for one property and period</p>
+  <div class="keys"><div class="kf"><code>period_start / period_end</code><span>the period covered</span></div><div class="kf"><code>amount / journal_id</code><span>value before GST, and the Zoho journal</span></div></div>
+  <div class="links"><b>Linked to</b><a class="chip" href="#t-property">property</a></div>
+  <details><summary>All 11 columns</summary><div class="allc"><code>property_id</code><code>month</code><code>journal_id</code><code>number</code><code>amount</code><code>posted_by</code><code>posted_at</code><code>id</code><code>period_start</code><code>period_end</code><code>automatic</code></div></details>
+</article><article class="tbl" id="t-zoho_master_sync" data-s="zoho_master_sync zoho sync problems the last problem sending a vendor, item, property or account to zoho, so it can be fixed and retried. one master with a problem kind / ref_id which record error / tried_at what went wrong, and when kind ref_id error tried_at">
+  <header><h3>Zoho sync problems</h3><code class="tname">zoho_master_sync</code></header>
+  <p class="purpose">The last problem sending a vendor, item, property or account to Zoho, so it can be fixed and retried.</p>
+  <p class="row"><b>One row is</b> one master with a problem</p>
+  <div class="keys"><div class="kf"><code>kind / ref_id</code><span>which record</span></div><div class="kf"><code>error / tried_at</code><span>what went wrong, and when</span></div></div>
+  
+  <details><summary>All 4 columns</summary><div class="allc"><code>kind</code><code>ref_id</code><code>error</code><code>tried_at</code></div></details>
+</article></div></section><section class="grp" id="system"><div class="ghead"><h2>Settings, files and logs</h2><p>How the system is configured, the files people upload, and the permanent history.</p></div><div class="cards"><article class="tbl" id="t-setting" data-s="setting flow settings rules the admin can change: approval thresholds, tolerances, toggles. one setting key / value setting name and its value key value updated_by updated_at">
+  <header><h3>Flow settings</h3><code class="tname">setting</code></header>
+  <p class="purpose">Rules the Admin can change: approval thresholds, tolerances, toggles.</p>
+  <p class="row"><b>One row is</b> one setting</p>
+  <div class="keys"><div class="kf"><code>key / value</code><span>setting name and its value</span></div></div>
+  
+  <details><summary>All 4 columns</summary><div class="allc"><code>key</code><code>value</code><code>updated_by</code><code>updated_at</code></div></details>
+</article><article class="tbl" id="t-pick_list" data-s="pick_list reason lists lists people choose from: reasons to return, reject, raise an advance, delivery slots... one list name / entries the list and its choices name entries updated_by updated_at">
+  <header><h3>Reason lists</h3><code class="tname">pick_list</code></header>
+  <p class="purpose">Lists people choose from: reasons to return, reject, raise an advance, delivery slots...</p>
+  <p class="row"><b>One row is</b> one list</p>
+  <div class="keys"><div class="kf"><code>name / entries</code><span>the list and its choices</span></div></div>
+  
+  <details><summary>All 4 columns</summary><div class="allc"><code>name</code><code>entries</code><code>updated_by</code><code>updated_at</code></div></details>
+</article><article class="tbl" id="t-message_template" data-s="message_template message templates text of the whatsapp and email messages the system sends. one message code / channel / body which message, how it is sent, its text code name channel body updated_by updated_at">
+  <header><h3>Message templates</h3><code class="tname">message_template</code></header>
+  <p class="purpose">Text of the WhatsApp and email messages the system sends.</p>
+  <p class="row"><b>One row is</b> one message</p>
+  <div class="keys"><div class="kf"><code>code / channel / body</code><span>which message, how it is sent, its text</span></div></div>
+  
+  <details><summary>All 6 columns</summary><div class="allc"><code>code</code><code>name</code><code>channel</code><code>body</code><code>updated_by</code><code>updated_at</code></div></details>
+</article><article class="tbl" id="t-file_object" data-s="file_object files every uploaded file: invoices, delivery photos, bank proofs, proformas. the file itself is in storage; this row describes it. one file storage_key / file_name / content_type where and what it is restricted bank proofs: finance and admin only id storage_key file_name content_type size_bytes restricted created_by created_at">
+  <header><h3>Files</h3><code class="tname">file_object</code></header>
+  <p class="purpose">Every uploaded file: invoices, delivery photos, bank proofs, proformas. The file itself is in storage; this row describes it.</p>
+  <p class="row"><b>One row is</b> one file</p>
+  <div class="keys"><div class="kf"><code>storage_key / file_name / content_type</code><span>where and what it is</span></div><div class="kf"><code>restricted</code><span>bank proofs: Finance and Admin only</span></div></div>
+  
+  <details><summary>All 8 columns</summary><div class="allc"><code>id</code><code>storage_key</code><code>file_name</code><code>content_type</code><code>size_bytes</code><code>restricted</code><code>created_by</code><code>created_at</code></div></details>
+</article><article class="tbl" id="t-activity_log" data-s="activity_log activity log permanent record of every change in the system. cannot be edited or deleted (enforced by the database). one action by one person user_name / role_name who module / action / record / details what they did id user_id user_name role_name module action record details at">
+  <header><h3>Activity log</h3><code class="tname">activity_log</code></header>
+  <p class="purpose">Permanent record of every change in the system. Cannot be edited or deleted (enforced by the database).</p>
+  <p class="row"><b>One row is</b> one action by one person</p>
+  <div class="keys"><div class="kf"><code>user_name / role_name</code><span>who</span></div><div class="kf"><code>module / action / record / details</code><span>what they did</span></div></div>
+  
+  <details><summary>All 9 columns</summary><div class="allc"><code>id</code><code>user_id</code><code>user_name</code><code>role_name</code><code>module</code><code>action</code><code>record</code><code>details</code><code>at</code></div></details>
+</article><article class="tbl" id="t-document_log" data-s="document_log document history permanent history of each request, po and bill: raised, approved, received, paid. cannot be edited or deleted. one step on one document action / note / at what happened and when id document_id user_id user_name role_name action note at">
+  <header><h3>Document history</h3><code class="tname">document_log</code></header>
+  <p class="purpose">Permanent history of each request, PO and bill: raised, approved, received, paid. Cannot be edited or deleted.</p>
+  <p class="row"><b>One row is</b> one step on one document</p>
+  <div class="keys"><div class="kf"><code>action / note / at</code><span>what happened and when</span></div></div>
+  <div class="links"><b>Linked to</b><a class="chip" href="#t-document">document</a></div>
+  <details><summary>All 8 columns</summary><div class="allc"><code>id</code><code>document_id</code><code>user_id</code><code>user_name</code><code>role_name</code><code>action</code><code>note</code><code>at</code></div></details>
+</article><article class="tbl" id="t-message_log" data-s="message_log message log every email, whatsapp and sms sent, with its delivery status. one message sent channel / recipient / status how, to whom, sent or failed id channel recipient subject body status error ref created_by created_at">
+  <header><h3>Message log</h3><code class="tname">message_log</code></header>
+  <p class="purpose">Every email, WhatsApp and SMS sent, with its delivery status.</p>
+  <p class="row"><b>One row is</b> one message sent</p>
+  <div class="keys"><div class="kf"><code>channel / recipient / status</code><span>how, to whom, sent or failed</span></div></div>
+  
+  <details><summary>All 10 columns</summary><div class="allc"><code>id</code><code>channel</code><code>recipient</code><code>subject</code><code>body</code><code>status</code><code>error</code><code>ref</code><code>created_by</code><code>created_at</code></div></details>
+</article><article class="tbl" id="t-schema_migrations" data-s="schema_migrations database version which database updates have been applied, so each runs exactly once. one update file name / applied_at update and when it ran name applied_at">
+  <header><h3>Database version</h3><code class="tname">schema_migrations</code></header>
+  <p class="purpose">Which database updates have been applied, so each runs exactly once.</p>
+  <p class="row"><b>One row is</b> one update file</p>
+  <div class="keys"><div class="kf"><code>name / applied_at</code><span>update and when it ran</span></div></div>
+  
+  <details><summary>All 2 columns</summary><div class="allc"><code>name</code><code>applied_at</code></div></details>
+</article></div></section>
+  <p class="none" id="none" hidden>No table or column matches that search.</p>
+</div>
+<script>
+const q = document.getElementById('q');
+q.addEventListener('input', () => {
+  const n = q.value.trim().toLowerCase(); let any = false;
+  document.querySelectorAll('.grp').forEach((g) => {
+    let shown = 0;
+    g.querySelectorAll('.tbl').forEach((t) => { const ok = !n || t.dataset.s.includes(n); t.hidden = !ok; if (ok) shown++ });
+    g.hidden = shown === 0; if (shown) any = true;
+  });
+  document.getElementById('none').hidden = any;
+});
+</script>
+
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10.9.1/dist/mermaid.min.js"></script>
+<script>mermaid.initialize({ startOnLoad: true, theme: matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "neutral" })</script>
+</body>
+</html>

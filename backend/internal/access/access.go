@@ -10,7 +10,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"purchasedesk/internal/httpjson"
-	"purchasedesk/internal/releasephase"
 	"purchasedesk/internal/screens"
 	"purchasedesk/internal/sessiontoken"
 	"purchasedesk/internal/textclean"
@@ -31,7 +30,7 @@ const (
 var AllRights = []string{Raise, Approve, IssuePO, Receive, Match, Pay, Masters, Upload}
 
 // Steps where a role can sit in the flow.
-var Steps = []string{"staff", "l1", "l2", "cc", "purchase", "store", "ap", "finance", "wh", "preop", "creq", "dh", "capp", "admin", ""}
+var Steps = []string{"staff", "l1", "l2", "cc", "purchase", "store", "ap", "finance", "wh", "whs", "preop", "chef", "hchef", "creq", "dh", "capp", "admin", ""}
 
 type Grant struct {
 	RoleID      int64    `json:"role_id"`
@@ -67,7 +66,6 @@ type User struct {
 	ManagesRolesOn bool              `json:"manages_roles"`
 	ScreenLevels   map[string]string `json:"screens"` // highest level on each screen across the user's roles
 	ReportKeys     []string          `json:"reports"` // reports the user sees; null for every report
-	Phase          int               `json:"phase"`   // release phase switched on (RELEASE_PHASE), so screens show only what is open
 
 	visLoaded bool
 	visAll    bool
@@ -217,7 +215,7 @@ type Guard struct {
 }
 
 func (g *Guard) Load(ctx context.Context, userID int64) (*User, error) {
-	u := &User{Phase: releasephase.Current()}
+	u := &User{}
 	var active bool
 	err := g.DB.QueryRow(ctx, `SELECT u.id, u.name, coalesce(u.email::text,''), coalesce(u.mobile,''), u.department, u.active
 		FROM app_user u WHERE u.id=$1`, userID).

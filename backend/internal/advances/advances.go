@@ -29,6 +29,7 @@ import (
 	"purchasedesk/internal/screens"
 	"purchasedesk/internal/textclean"
 	"purchasedesk/internal/uploadedfiles"
+	"purchasedesk/internal/zohowake"
 )
 
 type Service struct {
@@ -100,6 +101,8 @@ type Advance struct {
 	Open         float64    `json:"open"` // paid and not yet adjusted or refunded
 	Actions      []string   `json:"actions"`
 	Uses         []Use      `json:"uses,omitempty"`
+	ZohoPayment  string     `json:"zoho_payment_id"` // the Zoho vendor payment a paid advance became
+	ZohoError    string     `json:"zoho_error"`
 }
 
 const selectAdvance = `SELECT a.id, a.number, a.document_id, d.number, coalesce(d.po_number, d.advance_hold_po, ''), d.kind,
@@ -108,7 +111,7 @@ const selectAdvance = `SELECT a.id, a.number, a.document_id, d.number, coalesce(
 	a.reason, a.note, a.proforma_file_id, a.status, a.requested_by, ru.name, a.requested_at, coalesce(du.name,''), a.decided_at, a.decision_note,
 	coalesce(a.paid_on::text,''), a.payment_ref, a.carry_forward,
 	coalesce((SELECT sum(x.amount) FROM advance_use x WHERE x.advance_id=a.id AND x.kind='invoice'),0)::float8,
-	coalesce((SELECT sum(x.amount) FROM advance_use x WHERE x.advance_id=a.id AND x.kind='refund'),0)::float8
+	coalesce((SELECT sum(x.amount) FROM advance_use x WHERE x.advance_id=a.id AND x.kind='refund'),0)::float8, a.zoho_payment_id, a.zoho_error
 	FROM advance a JOIN document d ON d.id=a.document_id JOIN vendor v ON v.id=a.vendor_id JOIN property p ON p.id=a.property_id
 	JOIN app_user ru ON ru.id=a.requested_by LEFT JOIN app_user du ON du.id=a.decided_by `
 
@@ -116,7 +119,7 @@ func scan(row pgx.CollectableRow) (Advance, error) {
 	var x Advance
 	err := row.Scan(&x.ID, &x.Number, &x.DocumentID, &x.DocNumber, &x.PONumber, &x.Kind, &x.POOpen, &x.POHeld, &x.VendorID, &x.Vendor, &x.VendorEmail,
 		&x.PropertyID, &x.Property, &x.ClusterID, &x.Amount, &x.Pct, &x.TDS, &x.Reason, &x.Note, &x.ProformaID, &x.Status, &x.RequestedBy, &x.Requester,
-		&x.RequestedAt, &x.DecidedBy, &x.DecidedAt, &x.DecisionNote, &x.PaidOn, &x.PaymentRef, &x.CarryForward, &x.Adjusted, &x.Refunded)
+		&x.RequestedAt, &x.DecidedBy, &x.DecidedAt, &x.DecisionNote, &x.PaidOn, &x.PaymentRef, &x.CarryForward, &x.Adjusted, &x.Refunded, &x.ZohoPayment, &x.ZohoError)
 	x.PayVendor = money.Round2(x.Amount - x.TDS)
 	if x.Status == Paid {
 		x.Open = money.Round2(x.Amount - x.Adjusted - x.Refunded)
@@ -355,6 +358,20 @@ func Create(ctx context.Context, tx pgx.Tx, u *access.User, files *uploadedfiles
 	if err := requestable(u, d); err != nil {
 		return "", err
 	}
+	g := documents.CanAct(u, d, "purchase", access.IssuePO)
+	return create(ctx, tx, u, g.Name, files, d, in, proforma)
+}
+
+// CreateAtApproval asks the first advance of an Advance-terms PO from the request's final approval (no Purchase Team
+// step): the approver is checked by the approval itself, and the PO is already held for Finance under its number.
+func CreateAtApproval(ctx context.Context, tx pgx.Tx, u *access.User, role string, d *documents.Doc, in Ask) (string, error) {
+	if d.PaymentTerms != money.Advance || d.AdvanceHold == "" {
+		return "", httpjson.Conflict("%s is not prepared on Advance terms.", d.Number)
+	}
+	return create(ctx, tx, u, role, nil, d, in, nil)
+}
+
+func create(ctx context.Context, tx pgx.Tx, u *access.User, role string, files *uploadedfiles.Service, d *documents.Doc, in Ask, proforma *uploadedfiles.File) (string, error) {
 	po := d.PONumber
 	if d.AdvanceHold != "" {
 		po = d.AdvanceHold // the PO is raised under this number once Finance approves the advance
@@ -387,12 +404,12 @@ func Create(ctx context.Context, tx pgx.Tx, u *access.User, files *uploadedfiles
 		tds = math.Round(amount * poTDS / value)
 	}
 	number := documents.AdvanceNumber(po, n+1)
-	fileID, err := files.Save(ctx, tx, u, proforma, "proformas", false)
-	if err != nil {
-		return "", err
-	}
 	var fid *int64
-	if fileID != 0 {
+	if proforma != nil && files != nil {
+		fileID, err := files.Save(ctx, tx, u, proforma, "proformas", false)
+		if err != nil {
+			return "", err
+		}
 		fid = &fileID
 	}
 	if _, err := tx.Exec(ctx, `INSERT INTO advance(number,document_id,vendor_id,property_id,amount,pct,tds_amount,reason,note,proforma_file_id,status,requested_by)
@@ -406,9 +423,8 @@ func Create(ctx context.Context, tx pgx.Tx, u *access.User, files *uploadedfiles
 	if tds > 0 {
 		detail += " · TDS " + money.INR(tds)
 	}
-	g := documents.CanAct(u, d, "purchase", access.IssuePO)
 	msg := fmt.Sprintf("%s for %s sent to Finance for approval", number, money.INR(amount))
-	return msg, auditlog.Doc(ctx, tx, u, g.Name, d.ID, d.Number, module(d.Kind), fmt.Sprintf("Advance %s requested · %s", number, money.INR(amount)), detail)
+	return msg, auditlog.Doc(ctx, tx, u, role, d.ID, d.Number, module(d.Kind), fmt.Sprintf("Advance %s requested · %s", number, money.INR(amount)), detail)
 }
 
 // request asks for a further advance on an issued Advance-terms PO (multipart: a data JSON field and an optional
@@ -567,6 +583,7 @@ func dateOr(v string) (time.Time, error) {
 
 // paid records that Finance has paid an approved advance (bank reference and date), and tells the vendor.
 func (s *Service) paid(w http.ResponseWriter, r *http.Request) error {
+	zohowake.Now() // something may now go to Zoho
 	u := access.From(r)
 	id, err := httpjson.ID(r, "id")
 	if err != nil {

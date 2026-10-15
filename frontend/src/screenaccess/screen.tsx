@@ -7,6 +7,7 @@ import type { Level } from '../api/types'
 export type ScreenKey = 'approvals' | 'requests' | 'purchase_orders' | 'vendor_sheets' | 'goods_receipts' | 'invoices' | 'payments'
   | 'bills_utility' | 'bills_amc' | 'corporate' | 'warehouse' | 'vendors' | 'items' | 'vendor_mapping' | 'reports'
   | 'properties' | 'cities' | 'budgets' | 'corporate_setup' | 'bill_types' | 'item_setup' | 'users' | 'flow' | 'zoho' | 'templates' | 'activity'
+  | 'master_approvals'
 
 const RANK: Record<Level, number> = { none: 0, view: 1, edit: 2 }
 

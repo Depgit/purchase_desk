@@ -17,15 +17,12 @@ export interface Lookups {
 }
 
 let cache: Lookups | null = null
-// Bill types open with bills in release phase 3; before that they are not asked for. Set from the signed-in user.
-let billsOpen = true
-export function setBillsOpen(open: boolean) { billsOpen = open }
 let pending: Promise<Lookups> | null = null
 const listeners = new Set<(l: Lookups) => void>()
 
 async function load(): Promise<Lookups> {
   const [cities, clusters, properties, categories, subCategories, brands, packSizes, billTypes, people, roles] = await Promise.all([
-    get('/cities'), get('/clusters'), get('/properties'), get('/categories'), get('/sub-categories'), get('/brands'), get('/pack-sizes'), billsOpen ? get('/bill-types').catch(() => []) : Promise.resolve([]), get('/people'), get('/roles'),
+    get('/cities'), get('/clusters'), get('/properties'), get('/categories'), get('/sub-categories'), get('/brands'), get('/pack-sizes'), get('/bill-types').catch(() => []), get('/people'), get('/roles'),
   ])
   return { cities, clusters, properties, categories, subCategories, brands, packSizes, billTypes, people, roles }
 }

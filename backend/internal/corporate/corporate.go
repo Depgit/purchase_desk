@@ -18,6 +18,7 @@ import (
 	"purchasedesk/internal/approvals"
 	"purchasedesk/internal/auditlog"
 	"purchasedesk/internal/clock"
+	"purchasedesk/internal/database"
 	"purchasedesk/internal/documents"
 	"purchasedesk/internal/flowsettings"
 	"purchasedesk/internal/httpjson"
@@ -76,28 +77,17 @@ func (s *Service) listDepartments(w http.ResponseWriter, r *http.Request) error 
 	return httpjson.OK(w, out)
 }
 
-func (s *Service) saveDepartment(w http.ResponseWriter, r *http.Request) error {
-	u := access.From(r)
-	if err := access.NeedRight(u, access.Masters, "edit masters"); err != nil {
-		return err
-	}
-	var in struct {
-		Name     string `json:"name"`
-		L1ID     int64  `json:"l1_user_id"`
-		L2ID     int64  `json:"l2_user_id"`
-		BackupID int64  `json:"backup_user_id"`
-	}
-	if err := httpjson.Decode(r, &in); err != nil {
-		return err
-	}
+// DeptInput is a department and its approvers, from the screen or an upload row.
+type DeptInput struct {
+	Name     string `json:"name"`
+	L1ID     int64  `json:"l1_user_id"`
+	L2ID     int64  `json:"l2_user_id"`
+	BackupID int64  `json:"backup_user_id"`
+}
+
+// ValidateDepartment tidies the input and returns every problem. id is the department being edited, or 0.
+func ValidateDepartment(ctx context.Context, q database.Q, in *DeptInput, id int64) []string {
 	in.Name = textclean.Clean(in.Name)
-	id := int64(0)
-	if chi.URLParam(r, "id") != "" {
-		var err error
-		if id, err = httpjson.ID(r, "id"); err != nil {
-			return err
-		}
-	}
 	errs := []string{}
 	if len(in.Name) < 2 {
 		errs = append(errs, "Enter the department name.")
@@ -111,49 +101,76 @@ func (s *Service) saveDepartment(w http.ResponseWriter, r *http.Request) error {
 		errs = append(errs, "The backup must be a third person.")
 	}
 	var dup bool
-	_ = s.DB.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM corp_department WHERE norm_key(name)=norm_key($1) AND id<>$2)`, in.Name, id).Scan(&dup)
+	_ = q.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM corp_department WHERE norm_key(name)=norm_key($1) AND id<>$2)`, in.Name, id).Scan(&dup)
 	if dup {
 		errs = append(errs, "This department already exists.")
 	}
-	if len(errs) > 0 {
-		return httpjson.Invalid(errs)
-	}
+	return errs
+}
+
+// SaveDepartment adds (id 0) or updates a validated department. Open requests keep the approvers they were raised with.
+func SaveDepartment(ctx context.Context, q database.Q, u *access.User, id int64, in DeptInput) (int64, error) {
 	var backup any
 	if in.BackupID != 0 {
 		backup = in.BackupID
 	}
 	if id == 0 {
-		if err := s.DB.QueryRow(r.Context(), `INSERT INTO corp_department(name,l1_user_id,l2_user_id,backup_user_id,created_by) VALUES ($1,$2,$3,$4,$5) RETURNING id`,
+		if err := q.QueryRow(ctx, `INSERT INTO corp_department(name,l1_user_id,l2_user_id,backup_user_id,created_by) VALUES ($1,$2,$3,$4,$5) RETURNING id`,
 			in.Name, in.L1ID, in.L2ID, backup, u.ID).Scan(&id); err != nil {
+			return 0, err
+		}
+		return id, auditlog.Write(ctx, q, u, "Corporate", "Department added", in.Name, "")
+	}
+	if _, err := q.Exec(ctx, `UPDATE corp_department SET name=$2, l1_user_id=$3, l2_user_id=$4, backup_user_id=$5 WHERE id=$1`, id, in.Name, in.L1ID, in.L2ID, backup); err != nil {
+		return 0, err
+	}
+	return id, auditlog.Write(ctx, q, u, "Corporate", "Approval matrix changed", in.Name, "Open requests keep their approvers; new requests use this")
+}
+
+func (s *Service) saveDepartment(w http.ResponseWriter, r *http.Request) error {
+	u := access.From(r)
+	if err := access.NeedRight(u, access.Masters, "edit masters"); err != nil {
+		return err
+	}
+	var in DeptInput
+	if err := httpjson.Decode(r, &in); err != nil {
+		return err
+	}
+	id := int64(0)
+	if chi.URLParam(r, "id") != "" {
+		var err error
+		if id, err = httpjson.ID(r, "id"); err != nil {
 			return err
 		}
-		_ = auditlog.Write(r.Context(), s.DB, u, "Corporate", "Department added", in.Name, "")
-	} else {
-		if _, err := s.DB.Exec(r.Context(), `UPDATE corp_department SET name=$2, l1_user_id=$3, l2_user_id=$4, backup_user_id=$5 WHERE id=$1`, id, in.Name, in.L1ID, in.L2ID, backup); err != nil {
-			return err
-		}
-		_ = auditlog.Write(r.Context(), s.DB, u, "Corporate", "Approval matrix changed", in.Name, "Open requests keep their approvers; new requests use this")
+	}
+	if errs := ValidateDepartment(r.Context(), s.DB, &in, id); len(errs) > 0 {
+		return httpjson.Invalid(errs)
+	}
+	id, err := SaveDepartment(r.Context(), s.DB, u, id, in)
+	if err != nil {
+		return err
 	}
 	return httpjson.OK(w, map[string]int64{"id": id})
 }
 
 type Head struct {
-	ID     int64  `json:"id"`
-	Name   string `json:"name"`
-	Active bool   `json:"active"`
-	Used   int    `json:"used"`
+	ID        int64  `json:"id"`
+	Name      string `json:"name"`
+	Active    bool   `json:"active"`
+	Used      int    `json:"used"`
+	FinStatus string `json:"fin_status"` // pending until Finance approves a new head
 }
 
 func (s *Service) heads(ctx context.Context) ([]Head, error) {
 	rows, err := s.DB.Query(ctx, `SELECT h.id, h.name, h.active,
 		(SELECT count(*) FROM document_line l WHERE l.expense_head_id=h.id) + (SELECT count(*) FROM document d WHERE d.expense_head_id=h.id)
-		FROM expense_head h ORDER BY h.name`)
+		, h.fin_status FROM expense_head h ORDER BY h.name`)
 	if err != nil {
 		return nil, err
 	}
 	return pgx.CollectRows(rows, func(row pgx.CollectableRow) (Head, error) {
 		var x Head
-		return x, row.Scan(&x.ID, &x.Name, &x.Active, &x.Used)
+		return x, row.Scan(&x.ID, &x.Name, &x.Active, &x.Used, &x.FinStatus)
 	})
 }
 
@@ -163,6 +180,29 @@ func (s *Service) listHeads(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 	return httpjson.OK(w, out)
+}
+
+// ValidateHead tidies a new expense head's name and returns every problem.
+func ValidateHead(ctx context.Context, q database.Q, name *string) []string {
+	*name = textclean.Clean(*name)
+	if len(*name) < 3 {
+		return []string{"Enter the expense head name."}
+	}
+	var dup bool
+	_ = q.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM expense_head WHERE norm_key(name)=norm_key($1))`, *name).Scan(&dup)
+	if dup {
+		return []string{"This expense head already exists."}
+	}
+	return nil
+}
+
+// SaveHead adds a validated expense head. It waits for Finance's approval before it can be used.
+func SaveHead(ctx context.Context, q database.Q, u *access.User, name string) (int64, error) {
+	var id int64
+	if err := q.QueryRow(ctx, `INSERT INTO expense_head(name,created_by) VALUES ($1,$2) RETURNING id`, name, u.ID).Scan(&id); err != nil {
+		return 0, err
+	}
+	return id, auditlog.Write(ctx, q, u, "Corporate", "Expense head added", name, "Map it to a Zoho account under Settings, Zoho Books")
 }
 
 func (s *Service) createHead(w http.ResponseWriter, r *http.Request) error {
@@ -176,20 +216,13 @@ func (s *Service) createHead(w http.ResponseWriter, r *http.Request) error {
 	if err := httpjson.Decode(r, &in); err != nil {
 		return err
 	}
-	in.Name = textclean.Clean(in.Name)
-	if len(in.Name) < 3 {
-		return httpjson.Bad("Enter the expense head name.")
+	if errs := ValidateHead(r.Context(), s.DB, &in.Name); len(errs) > 0 {
+		return httpjson.Bad("%s", errs[0])
 	}
-	var dup bool
-	_ = s.DB.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM expense_head WHERE norm_key(name)=norm_key($1))`, in.Name).Scan(&dup)
-	if dup {
-		return httpjson.Bad("This expense head already exists.")
-	}
-	var id int64
-	if err := s.DB.QueryRow(r.Context(), `INSERT INTO expense_head(name,created_by) VALUES ($1,$2) RETURNING id`, in.Name, u.ID).Scan(&id); err != nil {
+	id, err := SaveHead(r.Context(), s.DB, u, in.Name)
+	if err != nil {
 		return err
 	}
-	_ = auditlog.Write(r.Context(), s.DB, u, "Corporate", "Expense head added", in.Name, "Map it to a Zoho account under Settings, Zoho Books")
 	return httpjson.OK(w, map[string]int64{"id": id})
 }
 
@@ -300,7 +333,7 @@ func (s *Service) create(w http.ResponseWriter, r *http.Request) error {
 	}
 	headOK := func(id int64) bool {
 		var ok bool
-		_ = s.DB.QueryRow(ctx, `SELECT active FROM expense_head WHERE id=$1`, id).Scan(&ok)
+		_ = s.DB.QueryRow(ctx, `SELECT active AND fin_status='approved' FROM expense_head WHERE id=$1`, id).Scan(&ok)
 		return ok
 	}
 	amount := 0.0

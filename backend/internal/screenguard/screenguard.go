@@ -98,7 +98,8 @@ var activeScreen = map[string]string{"city": "cities", "cluster": "cities", "pro
 var uploadScreens = map[string][]string{"items": {"items"}, "rates": {"vendor_mapping"}, "mappings": {"vendor_mapping"}, "budgets": {"budgets"},
 	"fb_sales": {"budgets"}, "property_pct": {"properties", "budgets"}, "properties": {"properties"}, "users": {"users"}, "vendors": {"vendors"},
 	"request_lines": {"requests"}, "zoho_tags": {"zoho"}, "warehouse_stock": {"warehouse"},
-	"cities": {"cities"}, "clusters": {"cities"}, "categories": {"item_setup"}, "sub_categories": {"item_setup"}, "pack_sizes": {"item_setup"}}
+	"cities": {"cities"}, "clusters": {"cities"}, "categories": {"item_setup"}, "sub_categories": {"item_setup"}, "pack_sizes": {"item_setup"},
+	"expense_heads": {"corporate_setup"}, "corp_departments": {"corporate_setup"}, "corp_lines": {"corporate"}}
 
 func seg(r *http.Request, i int) string {
 	p := strings.Split(strings.Trim(strings.TrimPrefix(r.URL.Path, "/api"), "/"), "/")
@@ -130,6 +131,7 @@ var rules = func() []rule {
 		R("W", d+`/(dispatch|wait|cannot-supply)`, E, doc, fixed("warehouse")),
 		R("W", d+`/receive-transfer`, E, doc, fixed("goods_receipts")),
 		R("W", d+`/advances`, E, doc, byKind("purchase_orders", "purchase_orders", "purchase_orders")),
+		R("W", d+`/vendor-confirm`, E, doc, fixed("purchase_orders", "approvals", "corporate")), // Purchase, or the approvers who raised it
 		R("W", `/requests/\d+`, E, doc, fixed("requests")),
 		R("W", `/requests`, E, none, fixed("requests")),
 		R("GET", `/requests`, V, none, listScreen),
@@ -161,6 +163,8 @@ var rules = func() []rule {
 		R("GET", `/delivery-partners`, V, none, fixed("warehouse")),
 		R("W", `/delivery-partners.*`, E, none, fixed("warehouse")),
 		// Masters: lists stay readable as references; changes need edit.
+		R("GET", `/master-approvals`, V, none, fixed("master_approvals")),
+		R("W", `/master-approvals.*`, E, none, fixed("master_approvals")),
 		R("W", `/vendors.*`, E, none, fixed("vendors")),
 		R("W", `/skus.*`, E, none, fixed("items")),
 		R("W", `/(categories|sub-categories|brands|pack-sizes).*`, E, none, fixed("item_setup")),
@@ -180,7 +184,9 @@ var rules = func() []rule {
 		R("W", `/templates/.*`, E, none, fixed("templates")),
 		R("W", `/zoho/(push|read-payments)`, E, none, fixed("payments", "zoho")),
 		R("W", `/zoho/mappings`, E, none, fixed("zoho", "corporate_setup")),
+		R("GET", `/zoho/masters/(vendor|item|property)/\d+`, V, none, fixed("vendors", "items", "properties", "zoho")), // the Zoho card on a master's page
 		R("GET", `/zoho/.*`, V, none, fixed("zoho", "corporate_setup")),
+		R("W", `/zoho/purchase-orders/\d+/sync`, E, none, fixed("purchase_orders", "zoho")), // Purchase may send its PO to Zoho at once
 		R("W", `/zoho/.*`, E, none, fixed("zoho")),
 		R("GET", `/activity`, V, none, fixed("activity")),
 		R("GET", `/reports.*`, V, none, fixed("reports")),

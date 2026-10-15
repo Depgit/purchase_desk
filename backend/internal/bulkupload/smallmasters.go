@@ -190,18 +190,26 @@ func (s *Service) smallMasterKinds() map[string]*kind {
 		"sub_categories": {
 			title: "Sub-categories", module: "Items", allowed: masters,
 			required: []string{"code", "sub_category", "category"},
-			sample:   "code,sub_category,category\nLN,Linen,Housekeeping\nGA,Guest Amenities,Housekeeping\n",
+			sample:   "code,sub_category,category,auto_po\nLN,Linen,Housekeeping,no\nGA,Guest Amenities,Housekeeping,yes\n",
 			keyOf:    key("code"),
 			onSame: func(ctx context.Context, x *run, row csvfile.Row) {
 				x.dup("code" + textclean.Upper(row.Get("code")))
 				x.dup(textclean.Key(row.Get("sub_category")))
 			},
 			export: func(ctx context.Context, q database.Q, r *http.Request) ([]string, [][]string, error) {
-				rows, err := rowsOf(ctx, q, `SELECT sc.code, sc.name, c.name FROM sub_category sc JOIN category c ON c.id=sc.category_id WHERE sc.active ORDER BY c.name, sc.name`)
-				return []string{"code", "sub_category", "category"}, rows, err
+				rows, err := rowsOf(ctx, q, `SELECT sc.code, sc.name, c.name, CASE WHEN sc.auto_po THEN 'yes' ELSE 'no' END FROM sub_category sc JOIN category c ON c.id=sc.category_id WHERE sc.active ORDER BY c.name, sc.name`)
+				return []string{"code", "sub_category", "category", "auto_po"}, rows, err
 			},
 			check: func(ctx context.Context, x *run, row csvfile.Row) result {
 				in := items.SubCategoryInput{Name: row.Get("sub_category"), Code: row.Get("code")}
+				// auto_po is optional: a file without the column, or a blank cell, keeps what is on file.
+				if v := row.Get("auto_po"); strings.TrimSpace(v) != "" {
+					auto, ok := yesNo(v)
+					if !ok {
+						return bad("auto_po must be yes or no")
+					}
+					in.AutoPO = &auto
+				}
 				if err := x.q.QueryRow(ctx, `SELECT id FROM category WHERE norm_key(name)=norm_key($1)`, row.Get("category")).Scan(&in.CategoryID); err != nil {
 					return bad("Unknown category %q. Add it on the Categories sheet (or under Item Setup) first", row.Get("category"))
 				}
