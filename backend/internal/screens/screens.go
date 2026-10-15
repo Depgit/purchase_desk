@@ -150,10 +150,10 @@ func Defaults(rights []string, step string) map[string]int {
 		"templates":        View,
 		"activity":         None,
 	}
-	if at("l2", "cc", "preop", "wh") { // the Warehouse Manager approves warehouse requests
+	if at("l2", "cc", "preop", "wh", "whl1", "whl2") { // the warehouse approvers (and the Warehouse Manager) approve warehouse requests
 		m["approvals"] = lv(has("approve"))
 	}
-	if at("cc", "l2", "preop", "wh", "purchase") { // the approvers send the vendor order sheets
+	if at("cc", "l2", "preop", "wh", "whl2", "purchase") { // the final approvers send the vendor order sheets
 		m["vendor_sheets"] = Edit
 	}
 	if has("masters") {

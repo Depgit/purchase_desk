@@ -30,7 +30,7 @@ const (
 var AllRights = []string{Raise, Approve, IssuePO, Receive, Match, Pay, Masters, Upload}
 
 // Steps where a role can sit in the flow.
-var Steps = []string{"staff", "l1", "l2", "cc", "purchase", "store", "ap", "finance", "wh", "whs", "preop", "chef", "hchef", "creq", "dh", "capp", "admin", ""}
+var Steps = []string{"staff", "l1", "l2", "cc", "purchase", "store", "ap", "finance", "wh", "whs", "whl1", "whl2", "preop", "chef", "hchef", "creq", "dh", "capp", "admin", ""}
 
 type Grant struct {
 	RoleID      int64    `json:"role_id"`
@@ -42,6 +42,8 @@ type Grant struct {
 	ClusterIDs  []int64  `json:"cluster_ids"`
 	PropertyIDs []int64  `json:"property_ids"`
 	CategoryIDs []int64  `json:"category_ids"`
+	// SubCategoryIDs limits a Warehouse Approver L1 to these sub-categories (none = every sub-category).
+	SubCategoryIDs []int64 `json:"sub_category_ids"`
 	// Screens is the role's level on every screen (screens.None, View or Edit), set on the role or its starting level.
 	Screens   map[string]int `json:"screens"`
 	Reports   []string       `json:"-"` // nil: every report
@@ -188,6 +190,27 @@ func (u *User) Can(step, right string, propID, clusterID int64, cats []int64) *G
 	return nil
 }
 
+// CanSub is Can for a step whose roles may also be limited to sub-categories (Warehouse Approver L1): each of subs
+// must be ticked on the grant, or the grant ticks none.
+func (u *User) CanSub(step, right string, propID, clusterID int64, cats, subs []int64) *Grant {
+	if u.IsAdmin {
+		return &Grant{Name: "System Admin", Step: "admin"}
+	}
+	for i, g := range u.Grants {
+		if g.Step != step || (right != "" && !textclean.Contains(g.Rights, right)) || !covers(g, propID, clusterID, cats) {
+			continue
+		}
+		ok := true
+		for _, s := range subs {
+			ok = ok && (len(g.SubCategoryIDs) == 0 || textclean.Contains(g.SubCategoryIDs, s))
+		}
+		if ok {
+			return &u.Grants[i]
+		}
+	}
+	return nil
+}
+
 func NeedRight(u *User, right, what string) error {
 	if !u.HasRight(right) {
 		return httpjson.Forbidden("You do not have the right to %s.", what)
@@ -223,7 +246,7 @@ func (g *Guard) Load(ctx context.Context, userID int64) (*User, error) {
 	if err != nil || !active {
 		return nil, httpjson.Unauthorized("Your session has ended. Please sign in again.")
 	}
-	rows, err := g.DB.Query(ctx, `SELECT r.id, r.code, r.name, r.step, r.rights, ur.scope, ur.cluster_ids, ur.property_ids, ur.category_ids,
+	rows, err := g.DB.Query(ctx, `SELECT r.id, r.code, r.name, r.step, r.rights, ur.scope, ur.cluster_ids, ur.property_ids, ur.category_ids, ur.sub_category_ids,
 		r.screens, r.reports, r.can_users, r.user_role_ids, r.user_scope, r.can_roles
 		FROM user_role ur JOIN role r ON r.id=ur.role_id WHERE ur.user_id=$1 AND r.active ORDER BY r.id`, userID)
 	if err != nil {
@@ -233,7 +256,7 @@ func (g *Guard) Load(ctx context.Context, userID int64) (*User, error) {
 	for rows.Next() {
 		var gr Grant
 		var set map[string]string
-		if err := rows.Scan(&gr.RoleID, &gr.Code, &gr.Name, &gr.Step, &gr.Rights, &gr.Scope, &gr.ClusterIDs, &gr.PropertyIDs, &gr.CategoryIDs,
+		if err := rows.Scan(&gr.RoleID, &gr.Code, &gr.Name, &gr.Step, &gr.Rights, &gr.Scope, &gr.ClusterIDs, &gr.PropertyIDs, &gr.CategoryIDs, &gr.SubCategoryIDs,
 			&set, &gr.Reports, &gr.CanUsers, &gr.UserRoles, &gr.UserScope, &gr.CanRoles); err != nil {
 			return nil, err
 		}

@@ -6,6 +6,7 @@ package corporate
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -26,6 +27,7 @@ import (
 	"purchasedesk/internal/money"
 	"purchasedesk/internal/textclean"
 	"purchasedesk/internal/uploadedfiles"
+	"purchasedesk/internal/vendormapping"
 )
 
 type Service struct {
@@ -237,6 +239,58 @@ func (s *Service) office(ctx context.Context) (int64, string, error) {
 	return id, name, nil
 }
 
+// Item is an item (SKU) a corporate purchase may order: active, approved by Finance, and available at the corporate
+// office (its Available at is all properties, the office's cluster, or the office). Corporate lines never create items.
+type Item struct {
+	ID       int64   `json:"id"`
+	Code     string  `json:"code"`
+	Name     string  `json:"name"`
+	Pack     string  `json:"pack_size"`
+	GST      float64 `json:"gst_pct"`
+	SubCat   string  `json:"sub_category"`
+	Category string  `json:"category"`
+}
+
+// Rate is a vendor's current rate card for an item.
+type Rate struct {
+	VendorID int64   `json:"vendor_id"`
+	SKUID    int64   `json:"sku_id"`
+	Rate     float64 `json:"rate"`
+	GST      float64 `json:"gst_pct"`
+}
+
+const officeItemsSQL = `SELECT k.id, k.code, concat_ws(' ', b.name, k.item_name), ps.name, k.gst_pct::float8, sc.name, c.name
+	FROM sku k JOIN sub_category sc ON sc.id=k.sub_category_id JOIN category c ON c.id=sc.category_id JOIN pack_size ps ON ps.id=k.pack_size_id
+	LEFT JOIN brand b ON b.id=k.brand_id
+	WHERE k.active AND sc.active AND k.fin_status='approved' AND sc.fin_status='approved' AND c.fin_status='approved'
+	AND (k.scope='all' OR $2::bigint=ANY(k.cluster_ids) OR $1::bigint=ANY(k.property_ids))`
+
+// officeItems lists the items a corporate purchase may order; one item when id is given.
+func officeItems(ctx context.Context, q database.Q, officeID, clusterID, id int64) ([]Item, error) {
+	rows, err := q.Query(ctx, officeItemsSQL+` AND ($3=0 OR k.id=$3) ORDER BY c.name, sc.name, 3`, officeID, clusterID, id)
+	if err != nil {
+		return nil, err
+	}
+	return pgx.CollectRows(rows, pgx.RowToStructByPos[Item])
+}
+
+// OfficeItem finds an item a corporate purchase may order by its SKU code, or says why it cannot.
+func OfficeItem(ctx context.Context, q database.Q, code string) (Item, string) {
+	var officeID, clusterID int64
+	if err := q.QueryRow(ctx, `SELECT id, cluster_id FROM property WHERE kind='corporate' AND active ORDER BY id LIMIT 1`).Scan(&officeID, &clusterID); err != nil {
+		return Item{}, "There is no corporate office property"
+	}
+	var id int64
+	if err := q.QueryRow(ctx, `SELECT id FROM sku WHERE upper(code)=upper(trim($1))`, code).Scan(&id); err != nil {
+		return Item{}, fmt.Sprintf("Unknown SKU code %q. Corporate lines use items already in the item master", code)
+	}
+	found, err := officeItems(ctx, q, officeID, clusterID, id)
+	if err != nil || len(found) == 0 {
+		return Item{}, fmt.Sprintf("%s is not available at the corporate office (inactive, waiting for Finance, or its Available at leaves the office out)", strings.ToUpper(strings.TrimSpace(code)))
+	}
+	return found[0], ""
+}
+
 type vendorOpt struct {
 	ID   int64  `json:"id"`
 	Name string `json:"name"`
@@ -271,10 +325,30 @@ func (s *Service) form(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
-	return httpjson.OK(w, map[string]any{"office": office, "departments": deps, "expense_heads": heads, "vendors": vs, "l1_only_below": st.CorpL1OnlyBelow})
+	officeID, _, _ := s.office(r.Context())
+	var clusterID int64
+	_ = s.DB.QueryRow(r.Context(), `SELECT cluster_id FROM property WHERE id=$1`, officeID).Scan(&clusterID)
+	items, err := officeItems(r.Context(), s.DB, officeID, clusterID, 0)
+	if err != nil {
+		return err
+	}
+	// Every vendor's current rate for those items: the form fills the rate in from the chosen vendor's rate card.
+	rows, err = s.DB.Query(r.Context(), `SELECT DISTINCT ON (vendor_id, sku_id) vendor_id, sku_id, rate::float8, gst_pct::float8 FROM rate_card
+		WHERE NOT superseded AND current_date BETWEEN valid_from AND valid_to ORDER BY vendor_id, sku_id, valid_from DESC, id DESC`)
+	if err != nil {
+		return err
+	}
+	rates, err := pgx.CollectRows(rows, pgx.RowToStructByPos[Rate])
+	if err != nil {
+		return err
+	}
+	return httpjson.OK(w, map[string]any{"office": office, "departments": deps, "expense_heads": heads, "vendors": vs, "l1_only_below": st.CorpL1OnlyBelow, "items": items, "rates": rates})
 }
 
+// lineIn is one corporate purchase line: an existing item, its expense head, quantity and (when the vendor has no rate
+// card for it) the rate. Description, unit and GST come from the item; the rate from the vendor's rate card if it has one.
 type lineIn struct {
+	SKUID       int64   `json:"sku_id"`
 	Description string  `json:"description"`
 	HeadID      int64   `json:"expense_head_id"`
 	Qty         float64 `json:"qty"`
@@ -341,21 +415,30 @@ func (s *Service) create(w http.ResponseWriter, r *http.Request) error {
 	switch in.Kind {
 	case "purchase":
 		if len(in.Lines) == 0 {
-			errs = append(errs, "Add at least one line.")
+			errs = append(errs, "Add at least one item.")
 		}
-		for i, l := range in.Lines {
-			n := i + 1
-			if len(strings.TrimSpace(l.Description)) < 3 {
-				errs = append(errs, "Line "+strconv.Itoa(n)+": describe the item.")
+		for i := range in.Lines {
+			l := &in.Lines[i]
+			n := "Line " + strconv.Itoa(i+1) + ": "
+			// Only items already in the item master: a corporate line never adds one.
+			found, err := officeItems(ctx, s.DB, officeID, clusterID, l.SKUID)
+			if err != nil {
+				return err
+			}
+			if l.SKUID == 0 || len(found) == 0 {
+				errs = append(errs, n+"pick an item from the list (an active, approved item available at the corporate office). A new item is added under Items first.")
+				continue
+			}
+			it := found[0]
+			l.Description, l.Unit, l.GST = it.Name, it.Pack, it.GST
+			if rate, gst, ok := vendormapping.CurrentRate(ctx, s.DB, in.VendorID, l.SKUID); ok {
+				l.Rate, l.GST = rate, gst // the vendor's rate card decides the rate
 			}
 			if !headOK(l.HeadID) {
-				errs = append(errs, "Line "+strconv.Itoa(n)+": choose an active expense head.")
+				errs = append(errs, n+"choose an active expense head.")
 			}
 			if l.Qty <= 0 || l.Rate <= 0 {
-				errs = append(errs, "Line "+strconv.Itoa(n)+": quantity and rate must be above 0.")
-			}
-			if !indiantax.ValidRate(l.GST) {
-				errs = append(errs, "Line "+strconv.Itoa(n)+": GST % must be 0, 5, 12, 18, 28 or 40.")
+				errs = append(errs, n+"quantity and rate must be above 0 ("+it.Name+" has no rate card with this vendor, so enter the rate).")
 			}
 			amount += money.LineValue(l.Qty, l.Rate, l.GST)
 		}
@@ -437,8 +520,9 @@ func (s *Service) create(w http.ResponseWriter, r *http.Request) error {
 			if in.Kind != "purchase" {
 				break
 			}
-			if _, err := tx.Exec(ctx, `INSERT INTO document_line(document_id,description,expense_head_id,qty,unit,rate,gst_pct) VALUES ($1,$2,$3,$4,$5,$6,$7)`,
-				id, textclean.Clean(l.Description), l.HeadID, l.Qty, textclean.Default(textclean.Clean(l.Unit), "piece"), money.Round2(l.Rate), l.GST); err != nil {
+			if _, err := tx.Exec(ctx, `INSERT INTO document_line(document_id,sku_id,description,expense_head_id,qty,unit,rate,gst_pct,tds_section,tds_pct)
+				SELECT $1,$2,$3,$4,$5,$6,$7,$8,k.tds_section,k.tds_pct FROM sku k WHERE k.id=$2`,
+				id, l.SKUID, l.Description, l.HeadID, l.Qty, l.Unit, money.Round2(l.Rate), l.GST); err != nil {
 				return err
 			}
 		}

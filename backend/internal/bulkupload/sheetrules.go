@@ -157,6 +157,7 @@ func rulesFor(kind string) sheetRules {
 			{Column: "role", Source: "{Ref - Roles.role}", ErrorTitle: "Unknown role", Error: "Pick a role from the list (see Ref - Roles)."},
 			{Column: "access", PromptTitle: "Property access", Prompt: "all, or property codes separated by ; (P01;P02), or cluster:Name;Name (see Ref - Properties and Ref - Clusters)."},
 			{Column: "categories", PromptTitle: "Category limits", Prompt: "Blank for every category, or names from Ref - Categories separated by ;"},
+			{Column: "sub_categories", PromptTitle: "Warehouse Approver L1 only", Prompt: "The sub-categories this L1 approves at the warehouse: names or 2-letter codes separated by ; (blank = all). Other roles leave it blank."},
 			{Column: "password", PromptTitle: "Password", Prompt: "Leave blank to keep the current password. A new user without one signs in with a one-time code."},
 		}}
 	case "cities":

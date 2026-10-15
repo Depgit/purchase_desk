@@ -136,10 +136,10 @@ func load(ctx context.Context, q database.Q, invoiceID int64) (*bill, error) {
 	if b.Kind == "purchase" || b.Kind == "corp_purchase" {
 		// Purchases for warehouse stock post to the stock account, and for pre-opening properties to the pre-opening account.
 		special := map[string]string{"warehouse": "warehouse", "preopening": "preopening"}[b.PropertyKind]
-		// Corporate lines have no SKU and post to the account of their expense head.
-		rows, err := q.Query(ctx, `SELECT coalesce(k.code,''), coalesce(concat_ws(' ', b.name, k.item_name), l.description), coalesce(ps.name, l.unit), coalesce(k.hsn,''), coalesce(sc.name, eh.name, ''), coalesce(sc.id,0), gl.qty, l.rate, l.gst_pct,
-			coalesce(CASE WHEN l.sku_id IS NULL THEN mh.account_id WHEN $2<>'' THEN ms.account_id ELSE ma.account_id END,''),
-			coalesce(CASE WHEN l.sku_id IS NULL THEN zh.active WHEN $2<>'' THEN zs.active ELSE za.active END,false),
+		// Corporate lines post to the account of their expense head, with or without an item (SKU) on them.
+		rows, err := q.Query(ctx, `SELECT coalesce(k.code,''), coalesce(concat_ws(' ', b.name, k.item_name), l.description), coalesce(ps.name, l.unit), coalesce(k.hsn,''), CASE WHEN l.expense_head_id IS NOT NULL THEN eh.name ELSE coalesce(sc.name,'') END, coalesce(sc.id,0), gl.qty, l.rate, l.gst_pct,
+			coalesce(CASE WHEN l.expense_head_id IS NOT NULL THEN mh.account_id WHEN $2<>'' THEN ms.account_id ELSE ma.account_id END,''),
+			coalesce(CASE WHEN l.expense_head_id IS NOT NULL THEN zh.active WHEN $2<>'' THEN zs.active ELSE za.active END,false),
 			coalesce(zi.item_id,''), coalesce(l.zoho_po_line_id,'')
 			FROM invoice i JOIN goods_receipt_line gl ON gl.goods_receipt_id=i.goods_receipt_id JOIN document_line l ON l.id=gl.line_id
 			LEFT JOIN sku k ON k.id=l.sku_id LEFT JOIN brand b ON b.id=k.brand_id LEFT JOIN pack_size ps ON ps.id=k.pack_size_id LEFT JOIN sub_category sc ON sc.id=k.sub_category_id
@@ -245,7 +245,7 @@ func problems(b *bill, taxes map[float64]string) []string {
 			}
 			seen[key] = true
 			if l.Account == "" {
-				if l.SKUCode == "" {
+				if b.Kind == "corp_purchase" {
 					o = append(o, "Expense head "+l.SubCat+" has no Zoho account")
 				} else if b.PropertyKind == "warehouse" {
 					o = append(o, "No warehouse stock account is set")
@@ -340,8 +340,8 @@ func payload(b *bill, taxes map[float64]string) (map[string]any, []string) {
 		missingHSN := 0
 		for _, l := range b.Lines {
 			desc := l.SKUCode + " · " + l.Pack + " · " + b.PONumber
-			if l.SKUCode == "" {
-				desc = "Department " + b.Department + " · " + l.SubCat + " · " + b.PONumber
+			if b.Kind == "corp_purchase" {
+				desc = strings.TrimPrefix(l.SKUCode+" · ", " · ") + "Department " + b.Department + " · " + l.SubCat + " · " + b.PONumber
 			}
 			it := map[string]any{"account_id": l.Account, "name": l.Item, "description": desc,
 				"quantity": l.Qty, "rate": l.Rate, "tags": tags}

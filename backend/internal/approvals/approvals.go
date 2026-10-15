@@ -50,12 +50,11 @@ func (s *Service) Routes(r chi.Router) {
 }
 
 // Chain returns the approval steps for a new purchase request.
-func Chain(st flowsettings.Settings, propertyKind string, vendorIsWarehouse, event bool, amount float64, requesterStep string) []string {
+func Chain(st flowsettings.Settings, propertyKind string, vendorIsWarehouse, event bool, amount float64) []string {
 	if propertyKind == "warehouse" {
-		if requesterStep == "wh" {
-			return []string{"cc"} // the Warehouse Manager's own purchase (a shortfall) goes to the Cost Controller
-		}
-		return []string{"wh"} // raised by Warehouse Staff, approved by the Warehouse Manager
+		// The warehouse's own purchases: the Warehouse Approver L1 of the items' sub-categories, then Warehouse Approver
+		// L2 (or the Warehouse Manager). purchaserequests drops L1 when the requester is the only L1 for the items.
+		return []string{"whl1", "whl2"}
 	}
 	if propertyKind == "preopening" {
 		return []string{"preop"}
@@ -71,6 +70,20 @@ func Chain(st flowsettings.Settings, propertyKind string, vendorIsWarehouse, eve
 		steps = append(steps, "cc")
 	}
 	return steps
+}
+
+// WarehouseL1s lists the active Warehouse Approver L1 users who approve a sub-category at a warehouse: the role
+// covers the property and ticks that sub-category (or none) and its category (or none).
+func WarehouseL1s(ctx context.Context, q database.Q, propertyID, clusterID, categoryID, subCategoryID int64) ([]int64, error) {
+	rows, err := q.Query(ctx, `SELECT DISTINCT u.id FROM app_user u JOIN user_role ur ON ur.user_id=u.id JOIN role r ON r.id=ur.role_id
+		WHERE u.active AND r.active AND r.step='whl1' AND 'approve'=ANY(r.rights)
+		AND (ur.scope='all' OR (ur.scope='clusters' AND $2::bigint=ANY(ur.cluster_ids)) OR (ur.scope='properties' AND $1::bigint=ANY(ur.property_ids)))
+		AND (cardinality(ur.category_ids)=0 OR $3::bigint=ANY(ur.category_ids))
+		AND (cardinality(ur.sub_category_ids)=0 OR $4::bigint=ANY(ur.sub_category_ids)) ORDER BY u.id`, propertyID, clusterID, categoryID, subCategoryID)
+	if err != nil {
+		return nil, err
+	}
+	return pgx.CollectRows(rows, pgx.RowTo[int64])
 }
 
 func moduleOf(d *documents.Doc) string {

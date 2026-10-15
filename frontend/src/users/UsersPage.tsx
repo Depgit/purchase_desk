@@ -19,7 +19,7 @@ import { useAction } from '../ui/useAction'
 import { AccessGrid } from './AccessGrid'
 import { RolesTab } from './RolesTab'
 
-interface RoleGrant { role_id: number; role_name?: string; step?: string; scope: string; cluster_ids: number[]; property_ids: number[]; category_ids: number[] }
+interface RoleGrant { role_id: number; role_name?: string; step?: string; scope: string; cluster_ids: number[]; property_ids: number[]; category_ids: number[]; sub_category_ids?: number[] }
 interface User { id: number; name: string; employee_id: string; email: string; mobile: string; department: string; has_password: boolean; active: boolean; roles: RoleGrant[]
   created_by: number; can_edit: boolean }
 
@@ -59,7 +59,7 @@ function People() {
           { key: 'emp', label: 'Employee ID', render: (u) => u.employee_id || '—', sort: (u) => u.employee_id, csv: (u) => u.employee_id },
           { key: 'login', label: 'Signs in with', render: (u) => [u.email, u.mobile].filter(Boolean).join(' · '), csv: (u) => u.email || u.mobile },
           { key: 'dep', label: 'Department', render: (u) => u.department, csv: (u) => u.department },
-          { key: 'roles', label: 'Roles and access', render: (u) => u.roles.map((g) => <div key={g.role_id}>{g.role_name} <span className="hint">· {scopeText(g)}{g.category_ids.length ? ' · ' + g.category_ids.map((c) => l?.categories.find((x) => x.id === c)?.name).join(', ') : ''}</span></div>),
+          { key: 'roles', label: 'Roles and access', render: (u) => u.roles.map((g) => <div key={g.role_id}>{g.role_name} <span className="hint">· {scopeText(g)}{g.sub_category_ids?.length ? ' · ' + g.sub_category_ids.map((c) => l?.subCategories.find((x) => x.id === c)?.name).join(', ') : ''}{g.category_ids.length ? ' · ' + g.category_ids.map((c) => l?.categories.find((x) => x.id === c)?.name).join(', ') : ''}</span></div>),
             csv: (u) => u.roles.map((g) => g.role_name).join(' + ') },
           { key: 'pwd', label: 'Password', render: (u) => u.has_password ? 'Set' : <Pill tone="warn">Code only</Pill> },
           { key: 'status', label: 'Status', render: (u) => <ActiveToggle kind="user" id={u.id} name={u.name} active={u.active} onDone={reload} canEdit={u.can_edit && u.id !== me?.id} />, csv: (u) => u.active ? 'Active' : 'Inactive' },
@@ -118,6 +118,10 @@ function UserModal({ u, onClose, onDone }: { u: User | null; onClose: () => void
           {g.scope === 'properties' && <Checks label="Properties" placeholder="Choose properties" value={g.property_ids} onChange={(v) => setRole(i, { property_ids: v })} options={propOpts.map((p) => [p.id, p.name])} />}
           <div className="field"><span>Category limits (leave all unticked for every category)</span>
             <Checks label="Categories" placeholder="Every category (no limit)" value={g.category_ids} onChange={(v) => setRole(i, { category_ids: v })} options={(l?.categories || []).map((c) => [c.id, c.name])} /></div>
+          {(l?.roles || []).find((r) => r.id === g.role_id)?.step === 'whl1' && <div className="field"><span>Sub-categories this L1 approves at the warehouse (leave all unticked for every sub-category)</span>
+            <Checks label="Sub-categories" placeholder="Every sub-category" value={g.sub_category_ids || []} onChange={(v) => setRole(i, { sub_category_ids: v })}
+              options={(l?.subCategories || []).filter((s) => s.active && (!g.category_ids.length || g.category_ids.includes(s.category_id))).map((s) => [s.id, `${s.name} (${s.category})`])} />
+            <span className="hint">A warehouse request goes to the L1 of its items' sub-categories, then to Warehouse Approver L2. Items for different L1s become separate requests.</span></div>}
           {f.roles.length > 1 && <div><button className="link" onClick={() => setF({ ...f, roles: f.roles.filter((_, j) => j !== i) })}>Remove this role</button></div>}
         </div>))}
       <div><button className="btn ghost" onClick={() => setF({ ...f, roles: [...f.roles, { role_id: roleOpts[0]?.id || 0, scope: myAll ? 'all' : 'properties', cluster_ids: [], property_ids: [], category_ids: [] }] })}>+ Add another role</button></div>

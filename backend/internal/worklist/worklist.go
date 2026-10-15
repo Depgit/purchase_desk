@@ -37,7 +37,7 @@ func (s *Service) counts(w http.ResponseWriter, r *http.Request) error {
 	c := map[string]int{}
 	// Vendors with POs raised but not yet pushed in an order sheet, for whoever sends the sheets.
 	toPush := map[int64]bool{}
-	sendsSheets := (u.IsAdmin || u.HasStep("cc") || u.HasStep("l2") || u.HasStep("preop") || u.HasStep("wh") || u.HasStep("purchase"))
+	sendsSheets := (u.IsAdmin || u.HasStep("cc") || u.HasStep("l2") || u.HasStep("preop") || u.HasStep("wh") || u.HasStep("whl2") || u.HasStep("purchase"))
 	for _, d := range docs {
 		owner := d.Owner()
 		switch d.Status {

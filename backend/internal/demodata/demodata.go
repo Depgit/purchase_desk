@@ -312,6 +312,9 @@ func (d *loader) warehouse() {
 	gs := id(`SELECT id FROM cluster WHERE name='Gurugram South'`)
 	id(`INSERT INTO property(code,doc_code,name,ezee_code,cluster_id,kind) VALUES ('WH','WH','Central Warehouse, Gurugram','WH-001',$1,'warehouse') RETURNING id`, gs)
 	d.user("Vikas Tomar", "vikas@demo.saltstayz.com", "", "Warehouse", "wh", "all", nil, nil, nil)
+	// Warehouse purchases go to a Warehouse Approver L1 (every sub-category here), then L2 (the Warehouse Manager may act).
+	d.user("Manoj Rawat", "manoj@demo.saltstayz.com", "", "Warehouse", "whl1", "all", nil, nil, nil)
+	d.user("Seema Kaur", "seema@demo.saltstayz.com", "", "Warehouse", "whl2", "all", nil, nil, nil)
 	wh := id(`SELECT id FROM vendor WHERE vendor_type='warehouse' LIMIT 1`)
 	ex(`UPDATE vendor SET city='Gurugram', state_code='HR' WHERE id=$1`, wh)
 	for _, sc := range []string{"GA", "LN", "EL", "ST"} {

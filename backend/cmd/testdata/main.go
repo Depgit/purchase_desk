@@ -220,6 +220,9 @@ var users = []user{
 	{"Rohan Mehra", "rohan.mehra@test.saltstayz.com", "", "Finance", "finance", "all", ""},
 	{"Vikram Singh", "vikram.singh@test.saltstayz.com", "", "Warehouse", "wh", "all", ""},
 	{"Ajay Thakur", "ajay.thakur@test.saltstayz.com", "", "Warehouse", "whs", "P08", ""},
+	{"Divya Menon", "divya.menon@test.saltstayz.com", "", "Warehouse", "whl1", "P08", ""},
+	{"Harish Bhat", "harish.bhat@test.saltstayz.com", "", "Warehouse", "whl1", "P08", ""},
+	{"Tarun Khanna", "tarun.khanna@test.saltstayz.com", "", "Warehouse", "whl2", "P08", ""},
 	{"Karan Kapoor", "karan.kapoor@test.saltstayz.com", "", "Kitchen", "chef", "P01", "Food & Beverage"},
 	{"Nisha Pillai", "nisha.pillai@test.saltstayz.com", "", "Kitchen", "hchef", "cluster:Gurugram North;Gurugram South", ""},
 	{"Anjali Rao", "anjali.rao@test.saltstayz.com", "", "Projects", "preop", "all", ""},
@@ -230,6 +233,9 @@ var users = []user{
 	{"Sana Qureshi", "sana.qureshi@test.saltstayz.com", "", "Operations", "l2", "cluster:Delhi Central", ""},
 	{"Gaurav Tiwari", "gaurav.tiwari@test.saltstayz.com", "", "Purchase", "purchase", "cluster:Bengaluru East", ""},
 }
+
+// whl1Subs are the sub-categories each Warehouse Approver L1 approves (blank = every sub-category).
+var whl1Subs = map[string]string{"divya.menon@test.saltstayz.com": "Linen"}
 
 const password = "Test@1234"
 
@@ -335,9 +341,9 @@ func files(today time.Time) []file {
 		if empID[login] == "" {
 			empID[login] = fmt.Sprintf("SS%04d", 1001+len(empID))
 		}
-		uRows = append(uRows, []string{u.name, empID[login], u.email, u.mobile, u.dept, u.role, u.access, u.categories, password})
+		uRows = append(uRows, []string{u.name, empID[login], u.email, u.mobile, u.dept, u.role, u.access, u.categories, whl1Subs[u.email], password})
 	}
-	f05 := file{"05-users.xlsx", []spreadsheet.Sheet{sheet("Users", []string{"name", "employee_id", "email", "mobile", "department", "role", "access", "categories", "password"}, uRows)}}
+	f05 := file{"05-users.xlsx", []spreadsheet.Sheet{sheet("Users", []string{"name", "employee_id", "email", "mobile", "department", "role", "access", "categories", "sub_categories", "password"}, uRows)}}
 
 	// 06 cluster managers, 07 property managers (updates, now that the users exist)
 	mgr := map[string]string{"Gurugram North": "neeraj.gupta@test.saltstayz.com", "Gurugram South": "neeraj.gupta@test.saltstayz.com", "Delhi Central": "farah.ali@test.saltstayz.com", "Bengaluru East": "deepa.iyer@test.saltstayz.com"}

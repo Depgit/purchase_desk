@@ -8,6 +8,7 @@ package bulkupload
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"strings"
 
@@ -17,8 +18,8 @@ import (
 	"purchasedesk/internal/corporate"
 	"purchasedesk/internal/csvfile"
 	"purchasedesk/internal/database"
-	"purchasedesk/internal/indiantax"
 	"purchasedesk/internal/textclean"
+	"purchasedesk/internal/vendormapping"
 )
 
 var refCorpPeople = refSheet{"Ref - Users", []string{"name", "login", "employee_id"},
@@ -121,18 +122,19 @@ func (s *Service) corporateKinds() map[string]*kind {
 				return nil
 			},
 		},
-		// The lines of a new corporate purchase: checked here, then the form adds them (nothing is saved).
+		// The lines of a new corporate purchase: existing items only (by SKU code), checked here, then the form adds them
+		// (nothing is saved). The rate comes from the chosen vendor's rate card when it has one, else from the file.
 		"corp_lines": {
 			title: "Corporate purchase lines", module: "Corporate", allowed: func(u *access.User) bool { return u.HasRight(access.Raise) },
-			required: []string{"description", "expense_head", "quantity", "rate", "gst_pct"},
-			sample:   "description,expense_head,quantity,unit,rate,gst_pct\nLaptop bag,Office supplies,4,piece,1450,18\nAnnual antivirus licence,Software subscriptions,12,licence,899,18\n",
+			required: []string{"sku_code", "expense_head", "quantity"},
+			sample:   "sku_code,item_name,expense_head,quantity,rate\nST-0001,A4 paper ream,Office supplies,10,\nEL-0002,LED tube 20 W,Office supplies,4,240\n",
 			check: func(ctx context.Context, x *run, row csvfile.Row) result {
-				desc := textclean.Clean(row.Get("description"))
-				if desc == "" && row.Get("quantity") == "" {
+				if strings.TrimSpace(row.Get("sku_code")) == "" && row.Get("quantity") == "" {
 					return result{skip: true, msg: "Skipped, empty row"}
 				}
-				if len(desc) < 3 {
-					return bad("Describe the item")
+				it, problem := corporate.OfficeItem(ctx, x.q, row.Get("sku_code"))
+				if problem != "" {
+					return bad("%s", problem)
 				}
 				var head int64
 				var ok bool
@@ -143,19 +145,22 @@ func (s *Service) corporateKinds() map[string]*kind {
 					return bad("Expense head %q is inactive or still waits for Finance's approval", row.Get("expense_head"))
 				}
 				qty, okq := num(row.Get("quantity"))
-				rate, okr := num(row.Get("rate"))
-				if !okq || !okr || qty <= 0 || rate <= 0 {
-					return bad("Quantity and rate must be numbers above 0")
+				if !okq || qty <= 0 {
+					return bad("Quantity must be a number above 0")
 				}
-				gst, okg := num(row.Get("gst_pct"))
-				if !okg || !indiantax.ValidRate(gst) {
-					return bad("GST %% must be 0, 5, 12, 18, 28 or 40")
+				rate, gst, card := vendormapping.CurrentRate(ctx, x.q, x.vendorID, it.ID)
+				msg := "Rate from the vendor's rate card"
+				if !card {
+					var okr bool
+					if rate, okr = num(row.Get("rate")); !okr || rate <= 0 {
+						return bad("The vendor has no rate card for %s: enter the rate", it.Code)
+					}
+					gst, msg = it.GST, "Rate from the file"
 				}
-				unit := textclean.Clean(row.Get("unit"))
-				if unit == "" {
-					unit = "piece"
+				if x.dup(it.Code + "|" + fmt.Sprint(head)) {
+					return bad("Duplicate row in the file")
 				}
-				return result{ok: true, msg: "Line ready", obj: map[string]any{"description": desc, "expense_head_id": head, "qty": qty, "unit": unit, "rate": rate, "gst_pct": gst}}
+				return result{ok: true, msg: msg, obj: map[string]any{"sku_id": it.ID, "expense_head_id": head, "qty": qty, "rate": rate, "gst_pct": gst}}
 			},
 		},
 	}

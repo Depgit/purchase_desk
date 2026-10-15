@@ -69,6 +69,7 @@ type run struct {
 	seen       map[string]bool
 	memo       map[string]any // rows that build one record together (a user's roles)
 	propertyID int64
+	vendorID   int64 // the vendor a corporate purchase's lines are for (their rate card)
 }
 
 func (x *run) dup(k string) bool {
@@ -100,7 +101,7 @@ func userGrant(ctx context.Context, x *run, row csvfile.Row) (users.RoleGrant, s
 	if err := x.q.QueryRow(ctx, `SELECT id FROM role WHERE active AND (lower(code)=lower($1) OR norm_key(name)=norm_key($1))`, row.Get("role")).Scan(&roleID); err != nil {
 		return users.RoleGrant{}, fmt.Sprintf("Unknown role %q", row.Get("role"))
 	}
-	g := users.RoleGrant{RoleID: roleID, Scope: "all", ClusterIDs: []int64{}, PropertyIDs: []int64{}, CategoryIDs: []int64{}}
+	g := users.RoleGrant{RoleID: roleID, Scope: "all", ClusterIDs: []int64{}, PropertyIDs: []int64{}, CategoryIDs: []int64{}, SubCategoryIDs: []int64{}}
 	acc := strings.TrimSpace(row.Get("access"))
 	switch {
 	case acc == "" || strings.EqualFold(acc, "all"):
@@ -132,6 +133,17 @@ func userGrant(ctx context.Context, x *run, row csvfile.Row) (users.RoleGrant, s
 			return g, fmt.Sprintf("Unknown category %q", c)
 		}
 		g.CategoryIDs = append(g.CategoryIDs, id)
+	}
+	// The sub-categories a Warehouse Approver L1 approves: names or 2-letter codes (blank = all). Other roles ignore it.
+	for _, c := range strings.Split(row.Get("sub_categories"), ";") {
+		if strings.TrimSpace(c) == "" {
+			continue
+		}
+		var id int64
+		if err := x.q.QueryRow(ctx, `SELECT id FROM sub_category WHERE norm_key(name)=norm_key($1) OR upper(code)=upper(trim($1)) ORDER BY (upper(code)=upper(trim($1))) DESC LIMIT 1`, c).Scan(&id); err != nil {
+			return g, fmt.Sprintf("Unknown sub-category %q", c)
+		}
+		g.SubCategoryIDs = append(g.SubCategoryIDs, id)
 	}
 	return g, ""
 }
@@ -636,11 +648,12 @@ func (s *Service) define() map[string]*kind {
 				return nil
 			},
 			export: func(ctx context.Context, q database.Q, r *http.Request) ([]string, [][]string, error) {
-				heads := []string{"name", "employee_id", "email", "mobile", "department", "role", "access", "categories", "password"}
+				heads := []string{"name", "employee_id", "email", "mobile", "department", "role", "access", "categories", "sub_categories", "password"}
 				rows, err := rowsOf(ctx, q, `SELECT u.name, u.employee_id, coalesce(u.email::text,''), coalesce(u.mobile,''), u.department, r.name,
 					CASE ur.scope WHEN 'all' THEN 'all' WHEN 'clusters' THEN 'cluster:'||(SELECT string_agg(c.name, ';' ORDER BY c.name) FROM cluster c WHERE c.id = ANY(ur.cluster_ids))
 						ELSE (SELECT string_agg(p.code, ';' ORDER BY p.code) FROM property p WHERE p.id = ANY(ur.property_ids)) END,
-					coalesce((SELECT string_agg(c.name, ';' ORDER BY c.name) FROM category c WHERE c.id = ANY(ur.category_ids)),''), ''
+					coalesce((SELECT string_agg(c.name, ';' ORDER BY c.name) FROM category c WHERE c.id = ANY(ur.category_ids)),''),
+					coalesce((SELECT string_agg(sc.name, ';' ORDER BY sc.name) FROM sub_category sc WHERE sc.id = ANY(ur.sub_category_ids)),''), ''
 					FROM app_user u JOIN user_role ur ON ur.user_id=u.id JOIN role r ON r.id=ur.role_id WHERE u.active ORDER BY u.name, r.id`)
 				return heads, rows, err
 			},
@@ -908,7 +921,7 @@ func (s *Service) checkRows(r *http.Request, q database.Q, p part) ([]rowOut, []
 	if len(p.rows) > 20000 {
 		return nil, nil, httpjson.Bad("%sUpload at most 20,000 rows at a time.", where)
 	}
-	x := &run{s: s, u: access.From(r), q: q, seen: map[string]bool{}, memo: map[string]any{}, propertyID: int64(httpjson.QInt(r, "property_id", 0))}
+	x := &run{s: s, u: access.From(r), q: q, seen: map[string]bool{}, memo: map[string]any{}, propertyID: int64(httpjson.QInt(r, "property_id", 0)), vendorID: int64(httpjson.QInt(r, "vendor_id", 0))}
 	cur, err := s.currentRows(r, q, k)
 	if err != nil {
 		return nil, nil, err

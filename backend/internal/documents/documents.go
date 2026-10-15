@@ -347,6 +347,31 @@ func (d *Doc) Categories() []int64 {
 	return out
 }
 
+// SubCategories are the sub-categories of the request's items.
+func (d *Doc) SubCategories() []int64 {
+	seen := map[int64]bool{}
+	out := []int64{}
+	for _, l := range d.Lines {
+		if l.SubCatID != 0 && !seen[l.SubCatID] {
+			seen[l.SubCatID] = true
+			out = append(out, l.SubCatID)
+		}
+	}
+	return out
+}
+
+// SelfBarred reports whether the person who raised a request may not approve it at this step: the warehouse approvers.
+func SelfBarred(step string) bool { return step == "whl1" || step == "whl2" }
+
+// ApproverSteps are the role steps whose holders act at a flow step: the Warehouse Manager may also approve as
+// Warehouse Approver L2.
+func ApproverSteps(step string) []string {
+	if step == "whl2" {
+		return []string{"whl2", "wh"}
+	}
+	return []string{step}
+}
+
 // SubCatTotals is the value incl. GST per sub-category, used for budget spend and flags.
 func (d *Doc) SubCatTotals() map[int64]float64 {
 	t := map[int64]float64{}
@@ -400,6 +425,7 @@ var StepNames = map[string]string{
 	"store": "Receiving / Store", "ap": "Accounts Payable", "finance": "Finance", "wh": "Warehouse Manager", "preop": "Pre-opening Team",
 	"creq": "Corporate Requester", "dh": "Department Head", "capp": "Corporate Approver", "admin": "System Admin", "requester": "Requester",
 	"cl1": "Department L1", "cl2": "Department L2", "chef": "Property Chef", "hchef": "Head Chef", "whs": "Warehouse Staff",
+	"whl1": "Warehouse Approver L1", "whl2": "Warehouse Approver L2",
 }
 
 // StatusLabel is the plain-English status shown in lists.
@@ -504,7 +530,18 @@ func CanAct(u *access.User, d *Doc, step, right string) *access.Grant {
 		}
 		return nil
 	}
-	g := u.Can(step, right, d.PropertyID, d.ClusterID, d.Categories())
+	if SelfBarred(step) && d.RequesterID == u.ID && !u.IsAdmin {
+		return nil // nobody approves their own warehouse purchase, the Warehouse Manager included
+	}
+	if step == "whl1" { // Warehouse Approver L1: only for the sub-categories ticked on the role
+		return u.CanSub(step, right, d.PropertyID, d.ClusterID, d.Categories(), d.SubCategories())
+	}
+	var g *access.Grant
+	for _, st := range ApproverSteps(step) {
+		if g = u.Can(st, right, d.PropertyID, d.ClusterID, d.Categories()); g != nil {
+			break
+		}
+	}
 	if g == nil {
 		return nil
 	}

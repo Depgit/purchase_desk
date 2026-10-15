@@ -258,18 +258,23 @@ type newLine struct {
 	qty, rate, gst    float64
 	est               bool
 	categoryID        int64
+	subCatID          int64
 	vendorID          int64
 	vendorIsWarehouse bool
+	// l1 groups a warehouse purchase's lines by their Warehouse Approver L1 (the approvers' ids), or "self" when the
+	// requester is the only L1 for them (the request then starts at L2).
+	l1 string
 }
 
-// prepared is a checked request: its property, the role it is raised with, and its lines grouped by vendor.
+// prepared is a checked request: its property, the role it is raised with, and its lines in parts: one per vendor
+// and, for the warehouse's own purchases, per Warehouse Approver L1. Each part becomes one request.
 type prepared struct {
-	p        propInfo
-	g        *access.Grant
-	event    bool
-	preop    any
-	vendors  []int64 // in the order the items were added
-	byVendor map[int64][]newLine
+	p      propInfo
+	g      *access.Grant
+	event  bool
+	preop  any
+	parts  []int64 // in the order the items were added
+	byPart map[int64][]newLine
 }
 
 // prepare checks a new or edited request the same way: the property, each item's vendor and rate from the mapping,
@@ -331,7 +336,7 @@ func (s *Service) prepare(ctx context.Context, u *access.User, in createIn) (*pr
 			errs = append(errs, fmt.Sprintf("Enter a quantity for %s.", src.ItemName))
 			continue
 		}
-		nl := newLine{sku: l.SKUID, name: src.ItemName, qty: l.Qty, categoryID: src.CategoryID, vendorID: *src.VendorID, vendorIsWarehouse: src.IsWarehouse}
+		nl := newLine{sku: l.SKUID, name: src.ItemName, qty: l.Qty, categoryID: src.CategoryID, subCatID: src.SubCatID, vendorID: *src.VendorID, vendorIsWarehouse: src.IsWarehouse}
 		if src.Rate != nil {
 			nl.rate, nl.gst = *src.Rate, *src.RateGST
 		} else {
@@ -378,23 +383,61 @@ func (s *Service) prepare(ctx context.Context, u *access.User, in createIn) (*pr
 		}
 		preop = in.PreopUserID
 	}
-	out := &prepared{p: p, g: g, event: event, preop: preop, byVendor: map[int64][]newLine{}}
-	for _, l := range lines {
-		if _, ok := out.byVendor[l.vendorID]; !ok {
-			out.vendors = append(out.vendors, l.vendorID)
+	if p.Kind == "warehouse" {
+		// Every warehouse purchase goes to the Warehouse Approver L1 of its items' sub-categories, so one is needed.
+		missing := []string{}
+		for i := range lines {
+			ids, err := approvals.WarehouseL1s(ctx, s.DB, p.ID, p.ClusterID, lines[i].categoryID, lines[i].subCatID)
+			if err != nil {
+				return nil, err
+			}
+			others := []string{}
+			for _, id := range ids {
+				if id != u.ID {
+					others = append(others, fmt.Sprint(id))
+				}
+			}
+			switch {
+			case len(ids) == 0:
+				var sub string
+				_ = s.DB.QueryRow(ctx, `SELECT name FROM sub_category WHERE id=$1`, lines[i].subCatID).Scan(&sub)
+				missing = append(missing, sub)
+			case len(others) == 0:
+				lines[i].l1 = "self"
+			default:
+				lines[i].l1 = strings.Join(others, ",")
+			}
 		}
-		out.byVendor[l.vendorID] = append(out.byVendor[l.vendorID], l)
+		if missing = textclean.Uniq(missing); len(missing) > 0 {
+			return nil, httpjson.Bad("No Warehouse Approver L1 is set for %s at %s. Ask the System Admin to give someone the Warehouse Approver L1 role there with these sub-categories ticked.",
+				strings.Join(missing, ", "), p.Name)
+		}
+	}
+	out := &prepared{p: p, g: g, event: event, preop: preop, byPart: map[int64][]newLine{}}
+	key := map[string]int64{}
+	for _, l := range lines {
+		k := fmt.Sprintf("%d|%s", l.vendorID, l.l1)
+		n, ok := key[k]
+		if !ok {
+			n = int64(len(key) + 1)
+			key[k] = n
+			out.parts = append(out.parts, n)
+		}
+		out.byPart[n] = append(out.byPart[n], l)
 	}
 	return out, nil
 }
 
-// steps is the approval route for one vendor's lines.
+// steps is the approval route for one part's lines.
 func (pr *prepared) steps(st flowsettings.Settings, ls []newLine) []string {
 	amount := 0.0
 	for _, l := range ls {
 		amount += money.LineValue(l.qty, l.rate, l.gst)
 	}
-	return approvals.Chain(st, pr.p.Kind, ls[0].vendorIsWarehouse, pr.event, amount, pr.g.Step)
+	if pr.p.Kind == "warehouse" && ls[0].l1 == "self" {
+		return []string{"whl2"} // the requester is the only Warehouse Approver L1 for these items
+	}
+	return approvals.Chain(st, pr.p.Kind, ls[0].vendorIsWarehouse, pr.event, amount)
 }
 
 func insertLines(ctx context.Context, tx pgx.Tx, docID int64, ls []newLine) error {
@@ -462,12 +505,12 @@ func (s *Service) create(w http.ResponseWriter, r *http.Request) error {
 		if err := tx.QueryRow(ctx, `SELECT now()`).Scan(&now); err != nil {
 			return err
 		}
-		nums, err := documents.RequestNumbers(ctx, tx, pr.p.ID, len(pr.vendors))
+		nums, err := documents.RequestNumbers(ctx, tx, pr.p.ID, len(pr.parts))
 		if err != nil {
 			return err
 		}
-		for i, v := range pr.vendors {
-			ls := pr.byVendor[v]
+		for i, v := range pr.parts {
+			ls := pr.byPart[v]
 			id, num, err := s.insertPR(ctx, tx, u, pr, in, nums[i], pr.steps(st, ls), ls, now, "Request raised")
 			if err != nil {
 				return err
@@ -482,7 +525,11 @@ func (s *Service) create(w http.ResponseWriter, r *http.Request) error {
 	}
 	msg := created[0] + " sent for approval"
 	if len(created) > 1 {
-		msg = fmt.Sprintf("%d requests sent, one per vendor: %s", len(created), strings.Join(created, ", "))
+		per := "one per vendor"
+		if pr.p.Kind == "warehouse" {
+			per = "one per vendor and Warehouse Approver L1"
+		}
+		msg = fmt.Sprintf("%d requests sent, %s: %s", len(created), per, strings.Join(created, ", "))
 	}
 	return httpjson.OK(w, map[string]any{"numbers": created, "ids": ids, "message": msg})
 }
@@ -570,16 +617,17 @@ func (s *Service) edit(w http.ResponseWriter, r *http.Request) error {
 		if !Editable(u, d) {
 			return httpjson.Conflict("%s can no longer be edited: an approver has already acted on it.", d.Number)
 		}
-		keep := pr.vendors[0]
-		for _, v := range pr.vendors {
-			if v == d.VendorID {
-				keep = v
+		// This request keeps the first part from its own vendor; the other parts become new requests.
+		keep := pr.parts[0]
+		for i := len(pr.parts) - 1; i >= 0; i-- {
+			if pr.byPart[pr.parts[i]][0].vendorID == d.VendorID {
+				keep = pr.parts[i]
 			}
 		}
-		ls := pr.byVendor[keep]
+		ls := pr.byPart[keep]
 		steps := pr.steps(st, ls)
 		changes = describeEdit(d, pr)
-		number, splitNums, err := editNumbers(ctx, tx, d, pr.p.ID, len(pr.vendors)-1)
+		number, splitNums, err := editNumbers(ctx, tx, d, pr.p.ID, len(pr.parts)-1)
 		if err != nil {
 			return err
 		}
@@ -592,13 +640,13 @@ func (s *Service) edit(w http.ResponseWriter, r *http.Request) error {
 		if _, err := tx.Exec(ctx, `UPDATE document SET property_id=$2, vendor_id=$3, requester_step=$4, status='PENDING', route_steps=$5, step_idx=0,
 			event_reason=$6, event_note=$7, preop_user_id=$8, routed_reason='', routed_note='', cm_approved_at=NULL,
 			modified_note='', modified_by='', modified_at=NULL, number=$9, updated_at=now() WHERE id=$1`,
-			d.ID, pr.p.ID, keep, pr.g.Step, steps, textclean.Clean(in.EventReason), strings.TrimSpace(in.EventNote), pr.preop, number); err != nil {
+			d.ID, pr.p.ID, ls[0].vendorID, pr.g.Step, steps, textclean.Clean(in.EventReason), strings.TrimSpace(in.EventNote), pr.preop, number); err != nil {
 			return err
 		}
 		if number != d.Number {
 			why := "moved to " + pr.p.Name
 			if pr.p.ID == d.PropertyID {
-				why = "split into one request per vendor"
+				why = "split into one request per vendor (and Warehouse Approver L1)"
 			}
 			if err := auditlog.Doc(ctx, tx, u, "Requester", d.ID, number, "Purchases", "Renumbered from "+d.Number+" to "+number, why); err != nil {
 				return err
@@ -622,11 +670,11 @@ func (s *Service) edit(w http.ResponseWriter, r *http.Request) error {
 			notifyID = d.ID
 		}
 		split := []string{}
-		for _, v := range pr.vendors {
+		for _, v := range pr.parts {
 			if v == keep {
 				continue
 			}
-			ls := pr.byVendor[v]
+			ls := pr.byPart[v]
 			_, num, err := s.insertPR(ctx, tx, u, pr, in, splitNums[len(split)], pr.steps(st, ls), ls, d.CreatedAt, "Request raised (split from "+number+" when it was edited)")
 			if err != nil {
 				return err
@@ -691,8 +739,8 @@ func describeEdit(d *documents.Doc, pr *prepared) string {
 		}
 	}
 	after := map[int64]bool{}
-	for _, v := range pr.vendors {
-		for _, l := range pr.byVendor[v] {
+	for _, v := range pr.parts {
+		for _, l := range pr.byPart[v] {
 			after[l.sku] = true
 			old, ok := before[l.sku]
 			switch {
@@ -743,9 +791,10 @@ func (s *Service) notifyApprovers(u *access.User, docID int64, changes string) {
 			only = *d.PreopUserID
 		}
 		rows, err := s.DB.Query(ctx, `SELECT DISTINCT u.email FROM app_user u JOIN user_role ur ON ur.user_id=u.id JOIN role r ON r.id=ur.role_id
-			WHERE u.active AND r.active AND r.step=$1 AND $2=ANY(r.rights) AND coalesce(u.email,'')<>'' AND ($5=0 OR u.id=$5)
-			AND (ur.scope='all' OR (ur.scope='clusters' AND $3::bigint=ANY(ur.cluster_ids)) OR (ur.scope='properties' AND $4::bigint=ANY(ur.property_ids)))`,
-			d.Owner(), access.Approve, d.ClusterID, d.PropertyID, only)
+			WHERE u.active AND r.active AND r.step=ANY($1) AND $2=ANY(r.rights) AND coalesce(u.email,'')<>'' AND ($5=0 OR u.id=$5)
+			AND (ur.scope='all' OR (ur.scope='clusters' AND $3::bigint=ANY(ur.cluster_ids)) OR (ur.scope='properties' AND $4::bigint=ANY(ur.property_ids)))
+			AND (r.step<>'whl1' OR cardinality(ur.sub_category_ids)=0 OR ur.sub_category_ids @> $6::bigint[]) AND u.id<>$7`,
+			documents.ApproverSteps(d.Owner()), access.Approve, d.ClusterID, d.PropertyID, only, d.SubCategories(), selfBarred(d, d.Owner()))
 		if err != nil {
 			return
 		}
@@ -892,10 +941,18 @@ func (s *Service) list(w http.ResponseWriter, r *http.Request) error {
 	return httpjson.OK(w, out)
 }
 
+// selfBarred is the requester's id where they may not approve their own request at this step, else 0.
+func selfBarred(d *documents.Doc, step string) int64 {
+	if documents.SelfBarred(step) {
+		return d.RequesterID
+	}
+	return 0
+}
+
 // stepRight is the right each flow step needs to act. Steps not listed (requester, corporate approvers fixed on the
 // request) are not looked up.
 var stepRight = map[string]string{"l1": access.Approve, "l2": access.Approve, "cc": access.Approve, "preop": access.Approve,
-	"purchase": access.IssuePO, "store": access.Receive, "wh": ""}
+	"purchase": access.IssuePO, "store": access.Receive, "wh": "", "whl1": access.Approve, "whl2": access.Approve}
 
 // ownerPeople names the active users who can take the document's next step at its property. nil means the step is not
 // looked up; an empty list means nobody holds that role there, so the document is stuck until the Admin gives someone access.
@@ -909,9 +966,10 @@ func (s *Service) ownerPeople(ctx context.Context, d *documents.Doc) ([]string, 
 		return nil, nil
 	}
 	rows, err := s.DB.Query(ctx, `SELECT DISTINCT u.name FROM app_user u JOIN user_role ur ON ur.user_id=u.id JOIN role r ON r.id=ur.role_id
-		WHERE u.active AND r.active AND r.step=$1 AND ($2='' OR $2=ANY(r.rights))
+		WHERE u.active AND r.active AND r.step=ANY($1) AND ($2='' OR $2=ANY(r.rights))
 		AND (ur.scope='all' OR (ur.scope='clusters' AND $3::bigint=ANY(ur.cluster_ids)) OR (ur.scope='properties' AND $4::bigint=ANY(ur.property_ids)))
-		ORDER BY 1`, step, right, d.ClusterID, d.PropertyID)
+		AND (r.step<>'whl1' OR cardinality(ur.sub_category_ids)=0 OR ur.sub_category_ids @> $5::bigint[]) AND u.id<>$6
+		ORDER BY 1`, documents.ApproverSteps(step), right, d.ClusterID, d.PropertyID, d.SubCategories(), selfBarred(d, step))
 	if err != nil {
 		return nil, err
 	}
@@ -1166,7 +1224,10 @@ func (s *Service) resubmit(w http.ResponseWriter, r *http.Request) error {
 			if total == 0 {
 				return httpjson.Bad("Enter a quantity for at least one item, or cancel the request.")
 			}
-			steps = approvals.Chain(st, d.PropertyKind, d.VendorType == "warehouse", d.EventReason != "", amount, d.RequesterStep)
+			steps = approvals.Chain(st, d.PropertyKind, d.VendorType == "warehouse", d.EventReason != "", amount)
+			if d.PropertyKind == "warehouse" && len(d.RouteSteps) > 0 {
+				steps = d.RouteSteps // the warehouse route was settled when it was raised (L1 by sub-category, then L2)
+			}
 			if d.IsCorp() {
 				steps = approvals.CorpSteps(st, amount, d.RequesterID, deref(d.CorpL1))
 			}

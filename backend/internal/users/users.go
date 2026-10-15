@@ -47,6 +47,8 @@ type RoleGrant struct {
 	ClusterIDs  []int64 `json:"cluster_ids"`
 	PropertyIDs []int64 `json:"property_ids"`
 	CategoryIDs []int64 `json:"category_ids"`
+	// SubCategoryIDs: the sub-categories a Warehouse Approver L1 approves (none = all). Kept only on that role.
+	SubCategoryIDs []int64 `json:"sub_category_ids"`
 }
 
 type User struct {
@@ -82,7 +84,7 @@ func (s *Service) load(ctx context.Context, where string, args ...any) ([]User, 
 	for i, u := range out {
 		idx[u.ID] = i
 	}
-	gr, err := s.DB.Query(ctx, `SELECT ur.user_id, ur.role_id, r.name, r.step, ur.scope, ur.cluster_ids, ur.property_ids, ur.category_ids FROM user_role ur JOIN role r ON r.id=ur.role_id ORDER BY ur.id`)
+	gr, err := s.DB.Query(ctx, `SELECT ur.user_id, ur.role_id, r.name, r.step, ur.scope, ur.cluster_ids, ur.property_ids, ur.category_ids, ur.sub_category_ids FROM user_role ur JOIN role r ON r.id=ur.role_id ORDER BY ur.id`)
 	if err != nil {
 		return nil, err
 	}
@@ -90,7 +92,7 @@ func (s *Service) load(ctx context.Context, where string, args ...any) ([]User, 
 	for gr.Next() {
 		var uid int64
 		var g RoleGrant
-		if err := gr.Scan(&uid, &g.RoleID, &g.RoleName, &g.Step, &g.Scope, &g.ClusterIDs, &g.PropertyIDs, &g.CategoryIDs); err != nil {
+		if err := gr.Scan(&uid, &g.RoleID, &g.RoleName, &g.Step, &g.Scope, &g.ClusterIDs, &g.PropertyIDs, &g.CategoryIDs, &g.SubCategoryIDs); err != nil {
 			return nil, err
 		}
 		if i, ok := idx[uid]; ok {
@@ -247,6 +249,9 @@ func ValidateUser(ctx context.Context, q database.Q, in *UserInput, id, selfID i
 		if g.CategoryIDs == nil {
 			g.CategoryIDs = []int64{}
 		}
+		if g.SubCategoryIDs == nil || step != "whl1" {
+			g.SubCategoryIDs = []int64{}
+		}
 	}
 	var dup bool
 	_ = q.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM app_user WHERE id<>$3 AND (($1<>'' AND email=$1::citext) OR ($2<>'' AND mobile=$2)))`, in.Email, in.Mobile, id).Scan(&dup)
@@ -296,8 +301,8 @@ func SaveUser(ctx context.Context, tx pgx.Tx, u *access.User, id int64, in UserI
 	names := []string{}
 	for _, g := range in.Roles {
 		var name string
-		if err := tx.QueryRow(ctx, `INSERT INTO user_role(user_id,role_id,scope,cluster_ids,property_ids,category_ids,created_by) VALUES ($1,$2,$3,$4,$5,$6,$7)
-			RETURNING (SELECT name FROM role WHERE id=$2)`, id, g.RoleID, g.Scope, g.ClusterIDs, g.PropertyIDs, g.CategoryIDs, u.ID).Scan(&name); err != nil {
+		if err := tx.QueryRow(ctx, `INSERT INTO user_role(user_id,role_id,scope,cluster_ids,property_ids,category_ids,sub_category_ids,created_by) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+			RETURNING (SELECT name FROM role WHERE id=$2)`, id, g.RoleID, g.Scope, g.ClusterIDs, g.PropertyIDs, g.CategoryIDs, g.SubCategoryIDs, u.ID).Scan(&name); err != nil {
 			return 0, err
 		}
 		names = append(names, name+" ("+g.Scope+")")

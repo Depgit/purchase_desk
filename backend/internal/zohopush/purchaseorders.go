@@ -61,9 +61,9 @@ func loadPO(ctx context.Context, q database.Q, docID int64) (*po, error) {
 	}
 	special := map[string]string{"warehouse": "warehouse", "preopening": "preopening"}[b.PropertyKind]
 	rows, err := q.Query(ctx, `SELECT l.id, coalesce(l.zoho_po_line_id,''), coalesce(k.code,''), coalesce(concat_ws(' ', b.name, k.item_name), l.description), coalesce(ps.name, l.unit), coalesce(k.hsn,''),
-		coalesce(sc.name, eh.name, ''), coalesce(sc.id,0), CASE WHEN $3 THEN l.received_qty ELSE l.qty END, l.rate, l.gst_pct,
-		coalesce(CASE WHEN l.sku_id IS NULL THEN mh.account_id WHEN $2<>'' THEN ms.account_id ELSE ma.account_id END,''),
-		coalesce(CASE WHEN l.sku_id IS NULL THEN zh.active WHEN $2<>'' THEN zs.active ELSE za.active END,false),
+		CASE WHEN l.expense_head_id IS NOT NULL THEN eh.name ELSE coalesce(sc.name,'') END, coalesce(sc.id,0), CASE WHEN $3 THEN l.received_qty ELSE l.qty END, l.rate, l.gst_pct,
+		coalesce(CASE WHEN l.expense_head_id IS NOT NULL THEN mh.account_id WHEN $2<>'' THEN ms.account_id ELSE ma.account_id END,''),
+		coalesce(CASE WHEN l.expense_head_id IS NOT NULL THEN zh.active WHEN $2<>'' THEN zs.active ELSE za.active END,false),
 		coalesce(zi.item_id,'')
 		FROM document_line l LEFT JOIN sku k ON k.id=l.sku_id LEFT JOIN brand b ON b.id=k.brand_id LEFT JOIN pack_size ps ON ps.id=k.pack_size_id LEFT JOIN sub_category sc ON sc.id=k.sub_category_id
 		LEFT JOIN expense_head eh ON eh.id=l.expense_head_id
@@ -90,8 +90,8 @@ func poPayload(p *po, taxes map[float64]string) map[string]any {
 	items := []map[string]any{}
 	for _, l := range b.Lines {
 		desc := l.SKUCode + " · " + l.Pack
-		if l.SKUCode == "" {
-			desc = "Department " + b.Department + " · " + l.SubCat
+		if b.Kind == "corp_purchase" {
+			desc = strings.TrimPrefix(l.SKUCode+" · ", " · ") + "Department " + b.Department + " · " + l.SubCat
 		}
 		it := map[string]any{"account_id": l.Account, "name": l.Item, "description": desc, "quantity": l.Qty, "rate": l.Rate, "tags": tags}
 		if l.ItemID != "" {
