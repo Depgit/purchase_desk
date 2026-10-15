@@ -405,3 +405,7 @@ input.masked{-webkit-text-security:disc;text-security:disc}
 .door a{font-weight:600;font-size:14px;padding:8px 14px;min-height:40px;display:inline-flex;align-items:center;color:var(--muted);text-decoration:none}
 .door a:hover{background:var(--accent-soft)}
 .door a.on{background:linear-gradient(135deg,var(--accent),var(--accent2));color:var(--accent-ink);box-shadow:var(--glow)}
+
+/* Vendor portal: switch between the vendors one sign-in opens */
+.vp-switch{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.vp-switch select{font:inherit;font-size:14px;padding:4px 8px;border-radius:8px;border:1px solid var(--side-dim);background:var(--side);color:var(--side-ink);max-width:100%}

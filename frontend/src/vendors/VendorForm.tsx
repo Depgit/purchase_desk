@@ -113,7 +113,8 @@ export function VendorForm() {
               }
               return r
             }, (r: any) => {
-              if (r.portal) popup('Vendor portal sign-in', `${r.code} signs in at ${r.portal.url} with ${r.portal.email} and this one-time password: ${r.portal.password}\n\n${r.portal.emailed ? 'It was also emailed to the vendor.' : 'Email is not set up, so send it to the vendor yourself.'} It is not shown again; the vendor sets its own password at the first sign-in.`)
+              if (r.portal?.password) popup('Vendor portal sign-in', `${r.code} signs in at ${r.portal.url} with ${r.portal.email} and this one-time password: ${r.portal.password}\n\n${r.portal.emailed ? 'It was also emailed to the vendor.' : 'Email is not set up, so send it to the vendor yourself.'} It is not shown again; the vendor sets its own password at the first sign-in.`)
+              else if (r.portal) popup('Vendor portal sign-in', `${r.portal.message}\n\nSign-in page: ${r.portal.url}`)
               if (r.portalError) { nav(`/vendors/${r.id}/edit`); return `${r.code} saved, but the portal sign-in was not given: ${r.portalError} Fix it in the Vendor portal card.` }
               nav('/vendors')
               return r.sent_for_verification ? 'Saved. Waiting for Finance to verify again.' : id ? 'Vendor saved' : `${r.code} saved. Waiting for Finance to verify bank details.`
