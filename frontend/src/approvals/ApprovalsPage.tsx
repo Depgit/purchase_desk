@@ -7,7 +7,7 @@ import { useLookups } from '../api/lookups'
 import type { Doc } from '../api/types'
 import { useApi } from '../api/useApi'
 import { useSession } from '../auth/session'
-import { day, inr, month, qty } from '../format/format'
+import { addDays, day, inr, month, qty, today } from '../format/format'
 import { Pill } from '../ui/Pill'
 import { Seg } from '../ui/Tabs'
 import { useAction } from '../ui/useAction'
@@ -40,6 +40,7 @@ function withEdits(d: Doc, e?: Record<number, number>) {
 export function ApprovalsPage() {
   const { hasStep, me } = useSession()
   const sc = useScreen('approvals')
+  const [due, setDue] = useState(addDays(today(), 2)) // delivery date of the POs a bulk approval raises
   const l = useLookups()
   const { data, reload, loading } = useApi<Doc[]>('/approvals')
   const [g, setG] = useState<GroupBy>('property')
@@ -83,13 +84,15 @@ export function ApprovalsPage() {
   const ok = shown.filter((d) => !d.flagged), flagged = shown.filter((d) => d.flagged)
   const selDocs = (data || []).filter((d) => sel.has(d.id))
 
-  if (hasStep('l2', 'cc', 'preop') && !sc.edit) return <><h1>Approvals</h1><p className="note">Your role can only view Approvals, so it cannot approve here. Requests waiting for approval show under Purchase Requests.</p></>
-  if (!hasStep('l2', 'cc', 'preop')) return <><h1>Approvals</h1><p className="note">Approval rights belong to the Cluster Manager, the Cost Controller and the Pre-opening Team.</p></>
+  const approver = hasStep('l2', 'cc', 'preop', 'whl1', 'whl2', 'al1', 'al2', 'c1', 'c2')
+  if (approver && !sc.edit) return <><h1>Approvals</h1><p className="note">Your role can only view Approvals, so it cannot approve here. Requests waiting for approval show under Purchase Requests.</p></>
+  if (!approver) return <><h1>Approvals</h1><p className="note">Approval rights belong to the Approvers L1 and L2 (Users &amp; Rights › Approval matrix), the Warehouse Approvers L1 and L2, the Amount Approvers C1 and C2 and the Cluster Manager (events and bills).</p></>
 
+  // Delivery date for the POs a bulk approval raises (the last approver's); after it the undelivered balance is rejected.
   async function bulk(action: string, ids: number[], reasonText = '', note = '') {
     const quantities: Edits = {}
     ids.forEach((id) => { if (edits[id]) quantities[id] = edits[id] })
-    const r = await a.run(() => post<{ done: number; failed: number; results: { id: number; ok: boolean; message: string }[] }>('/approvals/bulk', { action, ids, quantities, reason: reasonText, note }),
+    const r = await a.run(() => post<{ done: number; failed: number; results: { id: number; ok: boolean; message: string }[] }>('/approvals/bulk', { action, ids, quantities, reason: reasonText, note, deliver_by: action === 'approve' ? due : '' }),
       (r) => r.failed ? `${r.done} done. ${r.failed} not done: ${r.results.filter((x) => !x.ok).map((x) => x.message).join('; ')}` : `${r.done} ${action === 'approve' ? 'approved' : action === 'route' ? 'sent to the Cluster Manager' : action === 'reject' ? 'rejected' : 'returned'}`)
     if (r) { setSel(new Set()); setReason(null); setEdits({}); reload() }
   }
@@ -175,6 +178,7 @@ export function ApprovalsPage() {
           <button className="btn no" onClick={() => setReason({ kind: 'reject', ids: [...sel] })}>Reject</button>
           <button className="btn amber" onClick={() => setReason({ kind: 'return', ids: [...sel] })}>Return</button>
           {hasStep('cc') && <button className="btn amber" onClick={() => setReason({ kind: 'route', ids: selDocs.filter((d) => d.owner === 'cc' && d.kind === 'purchase').map((d) => d.id) })}>Send to Cluster Manager</button>}
+          <label className="field" style={{ margin: 0 }}><span className="hint">PO deliver by</span><input type="date" min={today()} value={due} onChange={(e) => setDue(e.target.value)} aria-label="PO delivery date" /></label>
           <button className="btn" disabled={a.busy} onClick={() => bulk('approve', [...sel])}>Approve {selDocs.length}</button>
         </div>
       )}

@@ -26,7 +26,7 @@ const VIEWS: Record<string, { name: string } & Layout> = {
   fin: { name: 'Finance', k: ['pay', 'msme', 'zoho', 'bills', 'corp'], s: ['pay', 'zoho', 'bills', 'corp', 'upd'] },
   mgmt: { name: 'Management', k: ['bud', 'over', 'cc', 'pay', 'corp', 'wh'], s: ['bud', 'top', 'cc', 'pay', 'corp', 'wh'] },
 }
-const MY_START: Record<string, Layout> = { wh: { k: ['mine', 'wh', 'dlv', 'new'], s: ['mine', 'wh', 'dlv', 'upd'] }, preop: { k: ['mine', 'wh', 'new'], s: ['mine', 'wh', 'new', 'upd'] },
+const MY_START: Record<string, Layout> = { whl2: { k: ['mine', 'wh', 'dlv', 'new'], s: ['mine', 'wh', 'dlv', 'upd'] }, preop: { k: ['mine', 'wh', 'new'], s: ['mine', 'wh', 'new', 'upd'] },
   creq: { k: ['mine', 'corp', 'dlv'], s: ['mine', 'corp', 'upd'] }, dh: { k: ['mine', 'corp', 'bud'], s: ['mine', 'corp', 'upd', 'bud'] } }
 
 export function DashboardPage() {

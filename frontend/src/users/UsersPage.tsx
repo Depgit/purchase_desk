@@ -1,4 +1,4 @@
-// Users & Rights, in three tabs. People: who can sign in, with which roles, for which properties and categories.
+// Users & Rights, in four tabs (the fourth, Approval matrix, names each property's L1 and L2 per category and bill type). People: who can sign in, with which roles, for which properties and categories.
 // Roles: each role's action rights, screen levels, reports and special rights (RolesTab). Access by property: people
 // against properties, with the role each holds there (AccessGrid). A role with the create-users right adds users,
 // giving only the roles it allows, and sees and edits only the users it added; the server checks the same.
@@ -17,23 +17,25 @@ import { Pill } from '../ui/Pill'
 import { Tabs } from '../ui/Tabs'
 import { useAction } from '../ui/useAction'
 import { AccessGrid } from './AccessGrid'
+import { ApprovalMatrixTab } from '../approvalmatrix/ApprovalMatrixTab'
 import { RolesTab } from './RolesTab'
 
 interface RoleGrant { role_id: number; role_name?: string; step?: string; scope: string; cluster_ids: number[]; property_ids: number[]; category_ids: number[]; sub_category_ids?: number[] }
 interface User { id: number; name: string; employee_id: string; email: string; mobile: string; department: string; has_password: boolean; active: boolean; roles: RoleGrant[]
   created_by: number; can_edit: boolean }
 
-type Tab = 'people' | 'roles' | 'access'
+type Tab = 'people' | 'roles' | 'access' | 'matrix'
 
 export function UsersPage() {
   const [tab, setTab] = useState<Tab>('people')
   return (
     <>
       <div className="head"><div><h1>Users &amp; Rights</h1><p className="sub">People sign in with email or mobile. A role says what someone can do and see: its action rights, a level on every screen (no access, view or edit) and its reports. Access by property says where.</p></div></div>
-      <Tabs value={tab} onChange={setTab} items={[['people', 'People'], ['roles', 'Roles'], ['access', 'Access by property']]} />
+      <Tabs value={tab} onChange={setTab} items={[['people', 'People'], ['roles', 'Roles'], ['access', 'Access by property'], ['matrix', 'Approval matrix']]} />
       {tab === 'people' && <People />}
       {tab === 'roles' && <RolesTab />}
       {tab === 'access' && <AccessGrid />}
+      {tab === 'matrix' && <ApprovalMatrixTab />}
     </>
   )
 }
@@ -43,6 +45,7 @@ function People() {
   const l = useLookups()
   const { data, reload } = useApi<User[]>('/users')
   const [edit, setEdit] = useState<User | 'new' | null>(null)
+  const [cloneOf, setCloneOf] = useState<User | null>(null) // Clone: a new user starting with this user's department, roles and access
   const [upload, setUpload] = useState(false)
   const admin = !!me?.is_admin
   const adds = admin || !!me?.adds_users
@@ -63,15 +66,19 @@ function People() {
             csv: (u) => u.roles.map((g) => g.role_name).join(' + ') },
           { key: 'pwd', label: 'Password', render: (u) => u.has_password ? 'Set' : <Pill tone="warn">Code only</Pill> },
           { key: 'status', label: 'Status', render: (u) => <ActiveToggle kind="user" id={u.id} name={u.name} active={u.active} onDone={reload} canEdit={u.can_edit && u.id !== me?.id} />, csv: (u) => u.active ? 'Active' : 'Inactive' },
-          { key: 'edit', label: '', render: (u) => u.can_edit ? <button className="link" onClick={() => setEdit(u)}>Edit</button> : null },
+          { key: 'edit', label: '', render: (u) => <span className="tools">{u.can_edit && <button className="link" onClick={() => setEdit(u)}>Edit</button>}
+            {adds && <button className="link" title="Add a new user with the same department, roles and property access" onClick={() => setCloneOf(u)}>Clone</button>}</span> },
         ]} csvName="users" />
       {edit && <UserModal u={edit === 'new' ? null : edit} onClose={() => setEdit(null)} onDone={() => { setEdit(null); reload(); refreshLookups() }} />}
+      {cloneOf && <UserModal u={null} from={cloneOf} onClose={() => setCloneOf(null)} onDone={() => { setCloneOf(null); reload(); refreshLookups() }} />}
       {upload && <UploadModal kind="users" title="Bulk upload or edit users" onClose={() => setUpload(false)} onDone={() => { reload(); refreshLookups() }} />}
     </>
   )
 }
 
-function UserModal({ u, onClose, onDone }: { u: User | null; onClose: () => void; onDone: () => void }) {
+/** Adds (u null) or edits a user. from: Clone, a new user starting with that user's department, roles and access (name,
+ * Employee ID, email, mobile and password are left for the new person). */
+function UserModal({ u, from, onClose, onDone }: { u: User | null; from?: User; onClose: () => void; onDone: () => void }) {
   const l = useLookups()
   const { me } = useSession()
   const admin = !!me?.is_admin
@@ -85,12 +92,14 @@ function UserModal({ u, onClose, onDone }: { u: User | null; onClose: () => void
   const clusterOpts = (l?.clusters || []).filter((c) => myAll || myClusters.includes(c.id))
   const propOpts = (l?.properties || []).filter((p) => p.active && (myAll || myClusters.includes(p.cluster_id) || myProps.includes(p.id)))
   const firstRole = admin ? l?.roles.find((r) => r.code === 'staff')?.id : roleOpts[0]?.id
-  const [f, setF] = useState({ name: u?.name || '', employee_id: u?.employee_id || '', email: u?.email || '', mobile: u?.mobile || '', department: u?.department || '', password: '',
-    roles: u?.roles.map((g) => ({ ...g })) || [{ role_id: firstRole || 0, scope: 'properties', cluster_ids: [], property_ids: [], category_ids: [] } as RoleGrant] })
+  const copied = from?.roles.filter((g) => roleOpts.some((r) => r.id === g.role_id)).map((g) => ({ ...g })) || []
+  const [f, setF] = useState({ name: u?.name || '', employee_id: u?.employee_id || '', email: u?.email || '', mobile: u?.mobile || '', department: u?.department || from?.department || '', password: '',
+    roles: u?.roles.map((g) => ({ ...g })) || (copied.length ? copied : [{ role_id: firstRole || 0, scope: 'properties', cluster_ids: [], property_ids: [], category_ids: [] } as RoleGrant]) })
   const a = useAction()
   const setRole = (i: number, patch: Partial<RoleGrant>) => setF({ ...f, roles: f.roles.map((g, j) => j === i ? { ...g, ...patch } : g) })
   return (
-    <Modal title={u ? 'Edit ' + u.name : 'Add user'} onClose={onClose} wide>
+    <Modal title={u ? 'Edit ' + u.name : from ? 'Add user like ' + from.name : 'Add user'} onClose={onClose} wide>
+      {from && <p className="note">Department, roles and property access are copied from {from.name}. Enter the new person's name, Employee ID and sign-in, change anything that differs, then save.</p>}
       <div className="grid2">
         <Field label="Name"><input value={f.name} onChange={(e) => setF({ ...f, name: e.target.value })} /></Field>
         <Field label="Employee ID" hint={u?.employee_id ? undefined : u ? 'Not given yet. Add it now.' : 'Must be unique, for example SS1024.'}>

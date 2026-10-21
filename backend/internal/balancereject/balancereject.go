@@ -39,7 +39,7 @@ func (s *Service) Routes(r chi.Router) {
 }
 
 // Who returns the role a user rejects the balance as, or nil. Purchase and the Admin can on any open PO; the store
-// (or the Warehouse Manager, who receives for the warehouse and pre-opening properties) on the POs they receive.
+// (Warehouse Approver L2 at the warehouse, the Pre-opening Team at a pre-opening property) on the POs they receive.
 // The requester cannot, unless they also hold one of those roles.
 func Who(u *access.User, d *documents.Doc) *access.Grant {
 	if d.Status != documents.POIssued || d.IsTransfer || (d.Kind != "purchase" && d.Kind != "corp_purchase") {
@@ -51,10 +51,13 @@ func Who(u *access.User, d *documents.Doc) *access.Grant {
 	if g := documents.CanAct(u, d, "purchase", access.IssuePO); g != nil {
 		return g
 	}
-	if d.Kind == "purchase" { // the receiving store (or the Warehouse Manager there), never the requester alone
+	if d.Kind == "purchase" { // the receiving store (Warehouse Approver L2 or Pre-opening Team there), never the requester alone
 		step := "store"
-		if d.Owner() == "wh" {
-			step = "wh"
+		switch d.PropertyKind {
+		case "warehouse":
+			step = "whl2"
+		case "preopening":
+			step = "preop"
 		}
 		return documents.CanAct(u, d, step, access.Receive)
 	}
@@ -84,14 +87,17 @@ func (s *Service) reject(w http.ResponseWriter, r *http.Request) error {
 	if err := flowsettings.CheckReason(r.Context(), s.DB, "balance_reasons", in.Reason, note); err != nil {
 		return err
 	}
-	var msg, number, closed string
-	var gone []rejected
+	full := in.Reason
+	if note != "" {
+		full += " · " + note
+	}
+	var res Result
 	err = pgx.BeginFunc(r.Context(), s.DB, func(tx pgx.Tx) error {
 		d, err := documents.Load(r.Context(), tx, id, true)
 		if err != nil {
 			return err
 		}
-		number = textclean.Default(d.PONumber, d.Number)
+		number := textclean.Default(d.PONumber, d.Number)
 		if d.Status != documents.POIssued || d.IsTransfer {
 			return httpjson.Conflict("%s has no balance waiting for delivery.", number)
 		}
@@ -99,105 +105,131 @@ func (s *Service) reject(w http.ResponseWriter, r *http.Request) error {
 		if g == nil {
 			return httpjson.Forbidden("Only Purchase, the receiving store or the Admin can reject the balance of %s.", number)
 		}
-		release := map[int64]float64{}
-		left := 0.0
-		for _, l := range d.Lines {
-			open := l.Qty - l.ReceivedQty
-			q := in.Quantities[l.ID]
-			if q < 0 {
-				return httpjson.Bad("%s: the quantity to reject cannot be below 0.", l.ItemName)
-			}
-			if q > open {
-				return httpjson.Bad("%s: only %v is still due, so you cannot reject %v.", l.ItemName, open, q)
-			}
-			left += open - q
-			if q == 0 {
-				continue
-			}
-			if _, err := tx.Exec(r.Context(), `UPDATE document_line SET qty=qty-$2, rejected_qty=rejected_qty+$2 WHERE id=$1`, l.ID, q); err != nil {
-				return err
-			}
-			if l.SubCatID != 0 {
-				release[l.SubCatID] -= money.LineValue(q, l.Rate, l.GST)
-			}
-			gone = append(gone, rejected{
-				text:  fmt.Sprintf("%s %v of %v", l.ItemName, q, l.Qty+l.RejectedQty),
-				email: fmt.Sprintf("- %s %s %s (%s): %v", l.SKUCode, l.Brand, l.ItemName, l.PackSize, q),
-			})
-		}
-		if len(gone) == 0 {
-			return httpjson.Bad("Enter the quantity to reject for at least one item.")
-		}
-		if !d.NoBudget() {
-			if err := budgets.Commit(r.Context(), tx, d.PropertyID, d.ID, release); err != nil {
-				return err
-			}
-		}
-		received := false
-		for _, l := range d.Lines {
-			received = received || l.ReceivedQty > 0
-		}
-		items := texts(gone)
-		msg = fmt.Sprintf("Balance rejected on %s: %s.", number, items)
-		switch {
-		case left > 0:
-			if _, err := tx.Exec(r.Context(), `UPDATE document SET updated_at=now() WHERE id=$1`, id); err != nil {
-				return err
-			}
-			msg += " The rest stays open for delivery."
-		case received:
-			// Everything that will come has come: the PO is closed short and moves on with its invoices.
-			if _, err := tx.Exec(r.Context(), `UPDATE document SET status='RECEIVED', po_closed_short=TRUE, updated_at=now() WHERE id=$1`, id); err != nil {
-				return err
-			}
-			if err := documents.CloseIfPaid(r.Context(), tx, id); err != nil {
-				return err
-			}
-			msg += " Nothing more is due, so the PO is closed."
-			closed = number + " is closed: nothing more is due from the vendor."
-		default:
-			if _, err := tx.Exec(r.Context(), `UPDATE document SET status='CANCELLED', po_closed_short=TRUE, updated_at=now() WHERE id=$1`, id); err != nil {
-				return err
-			}
-			msg += " Nothing was delivered, so the PO is cancelled."
-			closed = number + " is cancelled: nothing was delivered."
-		}
-		// The Zoho purchase order follows: lower quantities, or cancelled when nothing was delivered.
-		zohoAction := "update"
-		if left <= 0 && !received {
-			zohoAction = "cancel"
-		}
-		if err := documents.QueueZohoPO(r.Context(), tx, id, zohoAction); err != nil {
-			return err
-		}
-		if left <= 0 {
-			// Nothing more is due. With nothing delivered the PO is cancelled, so advances not paid yet are cancelled too;
-			// after a part delivery they stay with Finance and the invoices' payment approval waits for them. A paid
-			// advance is adjusted on the invoices, refunded or carried forward.
-			if !received {
-				if err := advances.CancelUnpaid(r.Context(), tx, u, id, d.Number, "Balance rejected on "+number+", nothing delivered"); err != nil {
-					return err
-				}
-			}
-			var open float64
-			_ = tx.QueryRow(r.Context(), `SELECT coalesce(sum(a.amount - coalesce((SELECT sum(x.amount) FROM advance_use x WHERE x.advance_id=a.id),0)),0)::float8
-				FROM advance a WHERE a.document_id=$1 AND a.status='PAID'`, id).Scan(&open)
-			if open > 0.005 && !received {
-				msg += fmt.Sprintf(" An advance of %s was paid on it: record the vendor's refund or carry it forward under Payments, Advances.", money.INR(open))
-			}
-		}
-		full := in.Reason
-		if note != "" {
-			full += " · " + note
-		}
-		return auditlog.Doc(r.Context(), tx, u, g.Name, d.ID, d.Number, "Purchases", "Balance rejected: "+items, full)
+		res, err = Apply(r.Context(), tx, u, g.Name, d, in.Quantities, full, false)
+		return err
 	})
 	if err != nil {
 		return err
 	}
-	s.notify(u, id, gone, strings.TrimSpace(in.Reason+" "+note))
+	s.Notify(u, id, res, strings.TrimSpace(in.Reason+" "+note))
 	// closed tells the form to show that the PO is now closed.
-	return httpjson.OK(w, map[string]string{"message": msg, "closed": closed})
+	return httpjson.OK(w, map[string]string{"message": res.Message, "closed": res.Closed})
+}
+
+// Result is what a balance rejection did.
+type Result struct {
+	Message string // for the person (or the log)
+	Closed  string // set when nothing more is due: the PO is closed or cancelled
+	gone    []rejected
+}
+
+// Apply rejects quantities (line id → quantity) of d's undelivered balance inside tx, by u as role (u nil: the
+// system, when a PO's delivery date has passed). The rejected quantity comes off the line, the budget is released and
+// the PO closes short (or is cancelled when nothing was delivered); the Zoho PO follows. carry: a paid advance with
+// something left is carried forward to the vendor's next PO (the automatic rejection does this).
+func Apply(ctx context.Context, tx pgx.Tx, u *access.User, role string, d *documents.Doc, quantities map[int64]float64, why string, carry bool) (Result, error) {
+	var res Result
+	id := d.ID
+	number := textclean.Default(d.PONumber, d.Number)
+	release := map[int64]float64{}
+	left := 0.0
+	for _, l := range d.Lines {
+		open := l.Qty - l.ReceivedQty
+		q := quantities[l.ID]
+		if q < 0 {
+			return res, httpjson.Bad("%s: the quantity to reject cannot be below 0.", l.ItemName)
+		}
+		if q > open {
+			return res, httpjson.Bad("%s: only %v is still due, so you cannot reject %v.", l.ItemName, open, q)
+		}
+		left += open - q
+		if q == 0 {
+			continue
+		}
+		if _, err := tx.Exec(ctx, `UPDATE document_line SET qty=qty-$2, rejected_qty=rejected_qty+$2 WHERE id=$1`, l.ID, q); err != nil {
+			return res, err
+		}
+		if l.SubCatID != 0 {
+			release[l.SubCatID] -= money.LineValue(q, l.Rate, l.GST)
+		}
+		res.gone = append(res.gone, rejected{
+			text:  fmt.Sprintf("%s %v of %v", l.ItemName, q, l.Qty+l.RejectedQty),
+			email: fmt.Sprintf("- %s %s %s (%s): %v", l.SKUCode, l.Brand, l.ItemName, l.PackSize, q),
+		})
+	}
+	if len(res.gone) == 0 {
+		return res, httpjson.Bad("Enter the quantity to reject for at least one item.")
+	}
+	if !d.NoBudget() {
+		if err := budgets.Commit(ctx, tx, d.PropertyID, d.ID, release); err != nil {
+			return res, err
+		}
+	}
+	received := false
+	for _, l := range d.Lines {
+		received = received || l.ReceivedQty > 0
+	}
+	items := texts(res.gone)
+	res.Message = fmt.Sprintf("Balance rejected on %s: %s.", number, items)
+	switch {
+	case left > 0:
+		if _, err := tx.Exec(ctx, `UPDATE document SET updated_at=now() WHERE id=$1`, id); err != nil {
+			return res, err
+		}
+		res.Message += " The rest stays open for delivery."
+	case received:
+		// Everything that will come has come: the PO is closed short and moves on with its invoices.
+		if _, err := tx.Exec(ctx, `UPDATE document SET status='RECEIVED', po_closed_short=TRUE, updated_at=now() WHERE id=$1`, id); err != nil {
+			return res, err
+		}
+		if err := documents.CloseIfPaid(ctx, tx, id); err != nil {
+			return res, err
+		}
+		res.Message += " Nothing more is due, so the PO is closed."
+		res.Closed = number + " is closed: nothing more is due from the vendor."
+	default:
+		if _, err := tx.Exec(ctx, `UPDATE document SET status='CANCELLED', po_closed_short=TRUE, updated_at=now() WHERE id=$1`, id); err != nil {
+			return res, err
+		}
+		res.Message += " Nothing was delivered, so the PO is cancelled."
+		res.Closed = number + " is cancelled: nothing was delivered."
+	}
+	// The Zoho purchase order follows: lower quantities, or cancelled when nothing was delivered.
+	zohoAction := "update"
+	if left <= 0 && !received {
+		zohoAction = "cancel"
+	}
+	if err := documents.QueueZohoPO(ctx, tx, id, zohoAction); err != nil {
+		return res, err
+	}
+	if left <= 0 {
+		// Nothing more is due. With nothing delivered the PO is cancelled, so advances not paid yet are cancelled too;
+		// after a part delivery they stay with Finance and the invoices' payment approval waits for them. A paid
+		// advance is adjusted on the invoices, refunded or carried forward.
+		if !received {
+			if err := advances.CancelUnpaid(ctx, tx, u, id, d.Number, "Balance rejected on "+number+", nothing delivered"); err != nil {
+				return res, err
+			}
+		}
+		var open float64
+		_ = tx.QueryRow(ctx, `SELECT coalesce(sum(a.amount - coalesce((SELECT sum(x.amount) FROM advance_use x WHERE x.advance_id=a.id),0)),0)::float8
+			FROM advance a WHERE a.document_id=$1 AND a.status='PAID'`, id).Scan(&open)
+		switch {
+		case open > 0.005 && carry:
+			// Carried forward: the vendor's next PO shows it and its invoice takes it at payment approval (after any
+			// invoice of this PO, which comes first).
+			if _, err := tx.Exec(ctx, `UPDATE advance SET carry_forward=TRUE WHERE document_id=$1 AND status='PAID'`, id); err != nil {
+				return res, err
+			}
+			res.Message += fmt.Sprintf(" The advance of %s paid on it is carried forward to %s's next PO.", money.INR(open), d.Vendor)
+			if err := auditlog.Doc(ctx, tx, u, role, d.ID, d.Number, "Payments", "Advance carried forward to the vendor's next PO", money.INR(open)); err != nil {
+				return res, err
+			}
+		case open > 0.005 && !received:
+			res.Message += fmt.Sprintf(" An advance of %s was paid on it: record the vendor's refund or carry it forward under Payments, Advances.", money.INR(open))
+		}
+	}
+	return res, auditlog.Doc(ctx, tx, u, role, d.ID, d.Number, "Purchases", "Balance rejected: "+items, why)
 }
 
 func texts(rs []rejected) string {
@@ -208,8 +240,15 @@ func texts(rs []rejected) string {
 	return strings.Join(out, ", ")
 }
 
-// notify emails the vendor not to supply the balance and tells the requester on WhatsApp. It runs after the save.
-func (s *Service) notify(u *access.User, docID int64, gone []rejected, reason string) {
+// Notify emails the vendor not to supply the balance and tells the requester on WhatsApp. It runs after the save; u
+// is nil for the automatic rejection.
+func (s *Service) Notify(u *access.User, docID int64, res Result, reason string) {
+	gone := res.gone
+	var by *int64
+	byName := "Purchase Desk (delivery date passed)"
+	if u != nil {
+		by, byName = &u.ID, u.Name
+	}
 	if s.Messages == nil {
 		return
 	}
@@ -227,15 +266,15 @@ func (s *Service) notify(u *access.User, docID int64, gone []rejected, reason st
 					lines[i] = x.email
 				}
 				text := flowsettings.Fill(body, map[string]string{"vendor": d.Vendor, "po_number": d.PONumber, "property": d.Property, "items": strings.Join(lines, "\n"), "reason": reason})
-				if _, err := s.Messages.Email(ctx, d.VendorEmail, "Balance cancelled on "+d.PONumber+" · "+d.Property, text, nil, d.PONumber, &u.ID); err != nil {
+				if _, err := s.Messages.Email(ctx, d.VendorEmail, "Balance cancelled on "+d.PONumber+" · "+d.Property, text, nil, d.PONumber, by); err != nil {
 					log.Printf("balance email %s: %v", d.PONumber, err)
 				}
 			}
 		}
 		if d.RequesterMob != "" {
 			if body, _, err := flowsettings.Template(ctx, s.DB, "bal"); err == nil {
-				text, params := flowsettings.Render(body, map[string]string{"request": d.Number, "property": d.Property, "by": u.Name, "items": texts(gone), "reason": reason})
-				if _, err := s.Messages.WhatsApp(ctx, d.RequesterMob, "pd_bal", params, text, d.Number, &u.ID); err != nil {
+				text, params := flowsettings.Render(body, map[string]string{"request": d.Number, "property": d.Property, "by": byName, "items": texts(gone), "reason": reason})
+				if _, err := s.Messages.WhatsApp(ctx, d.RequesterMob, "pd_bal", params, text, d.Number, by); err != nil {
 					log.Printf("balance notify %s: %v", d.Number, err)
 				}
 			}

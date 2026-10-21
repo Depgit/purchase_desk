@@ -17,6 +17,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"purchasedesk/internal/access"
+	"purchasedesk/internal/approvalmatrix"
 	"purchasedesk/internal/approvals"
 	"purchasedesk/internal/auditlog"
 	"purchasedesk/internal/balancereject"
@@ -27,6 +28,7 @@ import (
 	"purchasedesk/internal/httpjson"
 	"purchasedesk/internal/messaging"
 	"purchasedesk/internal/money"
+	"purchasedesk/internal/poexpiry"
 	"purchasedesk/internal/purchaseorders"
 	"purchasedesk/internal/screens"
 	"purchasedesk/internal/textclean"
@@ -57,26 +59,21 @@ func raiseGrant(u *access.User, propKind string, propID, clusterID int64, cats [
 	if u.IsAdmin {
 		return &access.Grant{Name: "System Admin", Step: "admin"}
 	}
-	for _, step := range []string{"whs", "wh", "staff", "l1", "chef", "purchase", "creq", "dh"} {
+	for _, step := range []string{"whs", "whl2", "staff", "l1", "chef", "purchase", "creq", "dh"} {
 		g := u.Can(step, access.Raise, propID, clusterID, cats)
 		if g == nil {
 			continue
 		}
-		// The warehouse raises through its Warehouse Staff (the Warehouse Manager approves) and the Warehouse Manager, who
-		// buys what the warehouse is short of (his own goes to the Cost Controller). A pre-opening property is open to the
-		// Warehouse Manager and to anyone whose role is assigned to it. Live properties are raised for by property staff,
-		// managers, property chefs and Purchase.
+		// The warehouse raises through its Warehouse Staff and its Warehouse Approver L2, who buys what the warehouse is
+		// short of (the L1 alone approves that). A pre-opening property is open to anyone whose role is assigned to it.
+		// Live properties are raised for by property staff, managers, property chefs and Purchase.
 		switch propKind {
 		case "warehouse":
-			if step != "whs" && step != "wh" {
-				continue
-			}
-		case "preopening":
-			if step == "whs" {
+			if step != "whs" && step != "whl2" {
 				continue
 			}
 		default:
-			if step == "wh" || step == "whs" {
+			if step == "whl2" || step == "whs" {
 				continue
 			}
 		}
@@ -185,8 +182,24 @@ func (s *Service) form(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
+	// approvers: the L1 and L2 of each category here (approval matrix), for the route preview.
+	type approverRow struct {
+		Category string `json:"category"`
+		L1       string `json:"l1"`
+		L2       string `json:"l2"`
+	}
+	rs, err := s.DB.Query(r.Context(), `SELECT (SELECT name FROM category WHERE id=m.category_id), coalesce(u1.name,''), coalesce(u2.name,'') FROM approval_matrix m
+		LEFT JOIN app_user u1 ON u1.id=m.l1_user_id AND u1.active LEFT JOIN app_user u2 ON u2.id=m.l2_user_id AND u2.active
+		WHERE m.property_id=$1 AND m.category_id IS NOT NULL`, p.ID)
+	if err != nil {
+		return err
+	}
+	approvers, err := pgx.CollectRows(rs, pgx.RowToStructByPos[approverRow])
+	if err != nil {
+		return err
+	}
 	return httpjson.OK(w, map[string]any{"property_id": p.ID, "property": p.Name, "property_kind": p.Kind, "items": allowed, "budget": bud,
-		"preop_members": members, "event_reasons": lists["event_reasons"], "settings": st, "often": often, "last": last})
+		"preop_members": members, "event_reasons": lists["event_reasons"], "settings": st, "often": often, "last": last, "approvers": approvers})
 }
 
 type lastLine struct {
@@ -247,6 +260,7 @@ type lineIn struct {
 type createIn struct {
 	PropertyID  int64    `json:"property_id"`
 	Lines       []lineIn `json:"lines"`
+	Event       bool     `json:"event"` // the "Ordering extra for an event" box is ticked: a reason is then required
 	EventReason string   `json:"event_reason"`
 	EventNote   string   `json:"event_note"`
 	PreopUserID int64    `json:"preop_user_id"`
@@ -264,13 +278,17 @@ type newLine struct {
 	// l1 groups a warehouse purchase's lines by their Warehouse Approver L1 (the approvers' ids), or "self" when the
 	// requester is the only L1 for them (the request then starts at L2).
 	l1 string
+	// pair: at a live or pre-opening property, the L1 and L2 of the item's category (approval matrix).
+	pair approvalmatrix.Pair
 }
 
 // prepared is a checked request: its property, the role it is raised with, and its lines in parts: one per vendor
-// and, for the warehouse's own purchases, per Warehouse Approver L1. Each part becomes one request.
+// and per approvers (the warehouse's Warehouse Approver L1; elsewhere the L1 and L2 of the items' categories). Each
+// part becomes one request.
 type prepared struct {
 	p      propInfo
 	g      *access.Grant
+	uid    int64 // the requester
 	event  bool
 	preop  any
 	parts  []int64 // in the order the items were added
@@ -356,7 +374,11 @@ func (s *Service) prepare(ctx context.Context, u *access.User, in createIn) (*pr
 	if g == nil {
 		return nil, httpjson.Forbidden("You cannot raise requests for these items at %s.", p.Name)
 	}
-	event := textclean.Clean(in.EventReason) != ""
+	event := in.Event || textclean.Clean(in.EventReason) != ""
+	if event && textclean.Clean(in.EventReason) == "" {
+		// The box was ticked without a reason: refused, never sent on as a normal request.
+		return nil, httpjson.Bad("You ticked 'Ordering extra for an event': choose the event reason and add the details, or untick the box.")
+	}
 	if event {
 		if p.Kind != "live" {
 			return nil, httpjson.Bad("Event requests are for live properties.")
@@ -368,21 +390,7 @@ func (s *Service) prepare(ctx context.Context, u *access.User, in createIn) (*pr
 			return nil, httpjson.Bad("Add the event details so the Cluster Manager can decide.")
 		}
 	}
-	var preop any
-	if p.Kind == "preopening" { // a warehouse request goes to the Warehouse Manager instead
-		members, err := s.preopMembers(ctx)
-		if err != nil {
-			return nil, err
-		}
-		ok := false
-		for _, m := range members {
-			ok = ok || m.ID == in.PreopUserID
-		}
-		if !ok {
-			return nil, httpjson.Bad("Choose the Pre-opening Team member who approves this.")
-		}
-		preop = in.PreopUserID
-	}
+	var preop any // the single pre-opening approver is no longer chosen (19 Oct): the approval matrix names L1 and L2
 	if p.Kind == "warehouse" {
 		// Every warehouse purchase goes to the Warehouse Approver L1 of its items' sub-categories, so one is needed.
 		missing := []string{}
@@ -413,10 +421,34 @@ func (s *Service) prepare(ctx context.Context, u *access.User, in createIn) (*pr
 				strings.Join(missing, ", "), p.Name)
 		}
 	}
-	out := &prepared{p: p, g: g, event: event, preop: preop, byPart: map[int64][]newLine{}}
+	if p.Kind == "live" || p.Kind == "preopening" {
+		// Every purchase there, an order on the warehouse too, goes to the L1 and L2 set for its items' categories
+		// (Users & Rights, Approval matrix).
+		missing, self := []string{}, []string{}
+		for i := range lines {
+			pr := approvalmatrix.ForCategory(ctx, s.DB, p.ID, lines[i].categoryID)
+			var cat string
+			_ = s.DB.QueryRow(ctx, `SELECT name FROM category WHERE id=$1`, lines[i].categoryID).Scan(&cat)
+			if !pr.Set() {
+				missing = append(missing, cat)
+				continue
+			}
+			if _, problem := approvalmatrix.Steps(pr, u.ID); problem != "" {
+				self = append(self, cat)
+			}
+			lines[i].pair = pr
+		}
+		if missing = textclean.Uniq(missing); len(missing) > 0 {
+			return nil, httpjson.Bad("No L1 and L2 approver is set for %s at %s. Ask the System Admin to set them under Users & Rights, Approval matrix.", strings.Join(missing, ", "), p.Name)
+		}
+		if self = textclean.Uniq(self); len(self) > 0 {
+			return nil, httpjson.Bad("You are both the L1 and the L2 for %s at %s, and nobody approves their own request. Ask the System Admin to name another approver under Users & Rights, Approval matrix.", strings.Join(self, ", "), p.Name)
+		}
+	}
+	out := &prepared{p: p, g: g, uid: u.ID, event: event, preop: preop, byPart: map[int64][]newLine{}}
 	key := map[string]int64{}
 	for _, l := range lines {
-		k := fmt.Sprintf("%d|%s", l.vendorID, l.l1)
+		k := fmt.Sprintf("%d|%s|%d|%d", l.vendorID, l.l1, l.pair.L1, l.pair.L2)
 		n, ok := key[k]
 		if !ok {
 			n = int64(len(key) + 1)
@@ -434,10 +466,31 @@ func (pr *prepared) steps(st flowsettings.Settings, ls []newLine) []string {
 	for _, l := range ls {
 		amount += money.LineValue(l.qty, l.rate, l.gst)
 	}
-	if pr.p.Kind == "warehouse" && ls[0].l1 == "self" {
-		return []string{"whl2"} // the requester is the only Warehouse Approver L1 for these items
+	if pr.p.Kind == "warehouse" {
+		switch {
+		case ls[0].vendorIsWarehouse:
+			return []string{}
+		case ls[0].l1 == "self":
+			return approvals.WithAmount(st, "warehouse", []string{"whl2"}, amount) // the requester is the only Warehouse Approver L1 for these items
+		case pr.g != nil && pr.g.Step == "whl2":
+			return approvals.WithAmount(st, "warehouse", []string{"whl1"}, amount) // raised by the Warehouse Approver L2: the L1 approves
+		}
+		return approvals.WithAmount(st, "warehouse", approvals.Chain(st, pr.p.Kind, false, pr.event), amount)
 	}
-	return approvals.Chain(st, pr.p.Kind, ls[0].vendorIsWarehouse, pr.event, amount)
+	// Cluster Manager for an event, then the L1 and L2 of the items' category, then C1 / C2 by amount; an order on the
+	// warehouse then goes to a Warehouse Approver (L1 or L2), who approves and dispatches it.
+	steps := approvals.Chain(st, pr.p.Kind, ls[0].vendorIsWarehouse, pr.event)
+	ml, _ := approvalmatrix.Steps(ls[0].pair, pr.uid)
+	steps = append(steps, ml...)
+	kind := "property"
+	if pr.p.Kind == "preopening" {
+		kind = "preopening"
+	}
+	steps = approvals.WithAmount(st, kind, steps, amount)
+	if ls[0].vendorIsWarehouse {
+		steps = append(steps, "whx")
+	}
+	return steps
 }
 
 func insertLines(ctx context.Context, tx pgx.Tx, docID int64, ls []newLine) error {
@@ -453,9 +506,10 @@ func insertLines(ctx context.Context, tx pgx.Tx, docID int64, ls []newLine) erro
 // insertPR saves one vendor's request as num. createdAt ties requests from one submission together (see raised_with).
 func (s *Service) insertPR(ctx context.Context, tx pgx.Tx, u *access.User, pr *prepared, in createIn, num string, steps []string, ls []newLine, createdAt time.Time, action string) (int64, string, error) {
 	var id int64
-	if err := tx.QueryRow(ctx, `INSERT INTO document(number,kind,property_id,vendor_id,requester_id,requester_step,status,route_steps,step_idx,event_reason,event_note,preop_user_id,created_by,created_at)
-		VALUES ($1,'purchase',$2,$3,$4,$5,'PENDING',$6,0,$7,$8,$9,$4,$10) RETURNING id`,
-		num, pr.p.ID, ls[0].vendorID, u.ID, pr.g.Step, steps, textclean.Clean(in.EventReason), strings.TrimSpace(in.EventNote), pr.preop, createdAt).Scan(&id); err != nil {
+	l1, l2 := pairIDs(ls)
+	if err := tx.QueryRow(ctx, `INSERT INTO document(number,kind,property_id,vendor_id,requester_id,requester_step,status,route_steps,step_idx,event_reason,event_note,preop_user_id,created_by,created_at,corp_l1_user_id,corp_l2_user_id)
+		VALUES ($1,'purchase',$2,$3,$4,$5,'PENDING',$6,0,$7,$8,$9,$4,$10,$11,$12) RETURNING id`,
+		num, pr.p.ID, ls[0].vendorID, u.ID, pr.g.Step, steps, textclean.Clean(in.EventReason), strings.TrimSpace(in.EventNote), pr.preop, createdAt, l1, l2).Scan(&id); err != nil {
 		return 0, "", err
 	}
 	if err := insertLines(ctx, tx, id, ls); err != nil {
@@ -465,6 +519,14 @@ func (s *Service) insertPR(ctx context.Context, tx pgx.Tx, u *access.User, pr *p
 		return 0, "", err
 	}
 	return id, num, finalizeIfNoSteps(ctx, tx, u, id, num, steps)
+}
+
+// pairIDs are a part's L1 and L2 from the approval matrix, kept on the request (nil when it has none).
+func pairIDs(ls []newLine) (any, any) {
+	if ls[0].pair.Set() {
+		return ls[0].pair.L1, ls[0].pair.L2
+	}
+	return nil, nil
 }
 
 // finalizeIfNoSteps approves at once a request that needs no approval (an order on the warehouse, by default).
@@ -556,7 +618,7 @@ func onScreens(u *access.User, d *documents.Doc, actions []string) []string {
 		"reject": pick("approvals", "corporate", "approvals"), "route": {"approvals"}, "preop_approver": {"requests"},
 		"resubmit": pick("requests", "corporate", billScreen), "cancel": pick("requests", "corporate", billScreen),
 		"issue_po": {"purchase_orders"}, "vendor_confirm": {"purchase_orders", "approvals", "corporate"}, "dispatch": {"warehouse"}, "receive": pick("goods_receipts", "corporate", "goods_receipts"),
-		"reject_balance": {"goods_receipts", "purchase_orders"}, "receive_transfer": {"goods_receipts"}, "edit": {"requests"},
+		"reject_balance": {"goods_receipts", "purchase_orders"}, "receive_transfer": {"goods_receipts"}, "edit": {"requests"}, "extend_delivery": {"purchase_orders", "approvals", "corporate"},
 	}
 	if corp {
 		need["reject_balance"] = []string{"corporate", "purchase_orders"}
@@ -637,10 +699,11 @@ func (s *Service) edit(w http.ResponseWriter, r *http.Request) error {
 		if err := insertLines(ctx, tx, d.ID, ls); err != nil {
 			return err
 		}
+		l1, l2 := pairIDs(ls)
 		if _, err := tx.Exec(ctx, `UPDATE document SET property_id=$2, vendor_id=$3, requester_step=$4, status='PENDING', route_steps=$5, step_idx=0,
 			event_reason=$6, event_note=$7, preop_user_id=$8, routed_reason='', routed_note='', cm_approved_at=NULL,
-			modified_note='', modified_by='', modified_at=NULL, number=$9, updated_at=now() WHERE id=$1`,
-			d.ID, pr.p.ID, ls[0].vendorID, pr.g.Step, steps, textclean.Clean(in.EventReason), strings.TrimSpace(in.EventNote), pr.preop, number); err != nil {
+			modified_note='', modified_by='', modified_at=NULL, number=$9, corp_l1_user_id=$10, corp_l2_user_id=$11, updated_at=now() WHERE id=$1`,
+			d.ID, pr.p.ID, ls[0].vendorID, pr.g.Step, steps, textclean.Clean(in.EventReason), strings.TrimSpace(in.EventNote), pr.preop, number, l1, l2); err != nil {
 			return err
 		}
 		if number != d.Number {
@@ -790,11 +853,16 @@ func (s *Service) notifyApprovers(u *access.User, docID int64, changes string) {
 		if d.Owner() == "preop" && d.PreopUserID != nil {
 			only = *d.PreopUserID
 		}
+		// L1 / L2 from the approval matrix are named on the request: only that person is told.
+		assigned := map[string]*int64{"cl1": d.CorpL1, "cl2": d.CorpL2}[d.Owner()]
+		if assigned != nil {
+			only = *assigned
+		}
 		rows, err := s.DB.Query(ctx, `SELECT DISTINCT u.email FROM app_user u JOIN user_role ur ON ur.user_id=u.id JOIN role r ON r.id=ur.role_id
-			WHERE u.active AND r.active AND r.step=ANY($1) AND $2=ANY(r.rights) AND coalesce(u.email,'')<>'' AND ($5=0 OR u.id=$5)
+			WHERE u.active AND r.active AND ($8 OR r.step=ANY($1)) AND $2=ANY(r.rights) AND coalesce(u.email,'')<>'' AND ($5=0 OR u.id=$5)
 			AND (ur.scope='all' OR (ur.scope='clusters' AND $3::bigint=ANY(ur.cluster_ids)) OR (ur.scope='properties' AND $4::bigint=ANY(ur.property_ids)))
 			AND (r.step<>'whl1' OR cardinality(ur.sub_category_ids)=0 OR ur.sub_category_ids @> $6::bigint[]) AND u.id<>$7`,
-			documents.ApproverSteps(d.Owner()), access.Approve, d.ClusterID, d.PropertyID, only, d.SubCategories(), selfBarred(d, d.Owner()))
+			documents.ApproverSteps(d.Owner()), access.Approve, d.ClusterID, d.PropertyID, only, d.SubCategories(), selfBarred(d, d.Owner()), assigned != nil)
 		if err != nil {
 			return
 		}
@@ -919,14 +987,15 @@ func (s *Service) list(w http.ResponseWriter, r *http.Request) error {
 	q := r.URL.Query()
 	days := httpjson.QInt(r, "days", 90)
 	where := `WHERE ($1 OR d.property_id = ANY($2) OR d.requester_id=$6 OR $6 IN (d.corp_l1_user_id, d.corp_l2_user_id, d.corp_backup_user_id)) AND ($3='' OR d.kind=$3 OR ($3='corp' AND d.kind IN ('corp_purchase','corp_bill'))) AND ($4='' OR bt.section=$4)
-		AND (d.status NOT IN ('CLOSED','REJECTED','CANCELLED','WH_DONE','WH_BACK') OR d.updated_at > now() - make_interval(days => $5))`
+		AND (d.status NOT IN ('CLOSED','REJECTED','CANCELLED','WH_DONE','WH_BACK') OR d.updated_at > now() - make_interval(days => $5))
+		AND (NOT $7 OR p.kind='warehouse' OR v.vendor_type='warehouse' OR d.requester_id=$6)`
 	switch q.Get("view") {
 	case "po":
 		where += ` AND (d.status='APPROVED' OR d.po_number IS NOT NULL) AND d.kind IN ('purchase','corp_purchase')`
 	case "gr":
 		where += ` AND d.po_number IS NOT NULL AND d.kind IN ('purchase','corp_purchase')`
 	}
-	docs, err := documents.LoadMany(r.Context(), s.DB, where+` ORDER BY d.created_at DESC LIMIT 20000`, all, ids, q.Get("kind"), q.Get("section"), days, u.ID)
+	docs, err := documents.LoadMany(r.Context(), s.DB, where+` ORDER BY d.created_at DESC LIMIT 20000`, all, ids, q.Get("kind"), q.Get("section"), days, u.ID, u.WarehouseOnly())
 	if err != nil {
 		return err
 	}
@@ -943,7 +1012,7 @@ func (s *Service) list(w http.ResponseWriter, r *http.Request) error {
 
 // selfBarred is the requester's id where they may not approve their own request at this step, else 0.
 func selfBarred(d *documents.Doc, step string) int64 {
-	if documents.SelfBarred(step) {
+	if documents.SelfBarred(step) && d.Status == documents.Pending {
 		return d.RequesterID
 	}
 	return 0
@@ -952,7 +1021,7 @@ func selfBarred(d *documents.Doc, step string) int64 {
 // stepRight is the right each flow step needs to act. Steps not listed (requester, corporate approvers fixed on the
 // request) are not looked up.
 var stepRight = map[string]string{"l1": access.Approve, "l2": access.Approve, "cc": access.Approve, "preop": access.Approve,
-	"purchase": access.IssuePO, "store": access.Receive, "wh": "", "whl1": access.Approve, "whl2": access.Approve}
+	"purchase": access.IssuePO, "store": access.Receive, "whl1": access.Approve, "whl2": access.Approve, "whx": access.Approve, "c1": access.Approve, "c2": access.Approve}
 
 // ownerPeople names the active users who can take the document's next step at its property. nil means the step is not
 // looked up; an empty list means nobody holds that role there, so the document is stuck until the Admin gives someone access.
@@ -961,15 +1030,35 @@ func (s *Service) ownerPeople(ctx context.Context, d *documents.Doc) ([]string, 
 	if step == "requester" {
 		return []string{d.Requester}, nil // the person who raised it (receives the goods, or changes a returned request)
 	}
+	if step == "cl1" || step == "cl2" { // named on the request (approval matrix, or the corporate department)
+		name := d.CorpL1Name
+		if step == "cl2" {
+			name = d.CorpL2Name
+		}
+		if name == "" {
+			return []string{}, nil
+		}
+		return []string{name}, nil
+	}
 	right, ok := stepRight[step]
 	if !ok {
 		return nil, nil
+	}
+	steps := documents.ApproverSteps(step)
+	if d.Status != documents.Pending && (step == "whl2" || step == "whx" || step == "preop") {
+		right = access.Receive // the warehouse receives; the Pre-opening Team receives
+		if step == "whl2" && !d.IsTransfer {
+			steps = []string{"whl2", "whs"} // Warehouse Staff receive at the warehouse too
+		}
+		if step == "whx" {
+			right = "" // a transfer is dispatched by either Warehouse Approver
+		}
 	}
 	rows, err := s.DB.Query(ctx, `SELECT DISTINCT u.name FROM app_user u JOIN user_role ur ON ur.user_id=u.id JOIN role r ON r.id=ur.role_id
 		WHERE u.active AND r.active AND r.step=ANY($1) AND ($2='' OR $2=ANY(r.rights))
 		AND (ur.scope='all' OR (ur.scope='clusters' AND $3::bigint=ANY(ur.cluster_ids)) OR (ur.scope='properties' AND $4::bigint=ANY(ur.property_ids)))
 		AND (r.step<>'whl1' OR cardinality(ur.sub_category_ids)=0 OR ur.sub_category_ids @> $5::bigint[]) AND u.id<>$6
-		ORDER BY 1`, documents.ApproverSteps(step), right, d.ClusterID, d.PropertyID, d.SubCategories(), selfBarred(d, step))
+		ORDER BY 1`, steps, right, d.ClusterID, d.PropertyID, d.SubCategories(), selfBarred(d, step))
 	if err != nil {
 		return nil, err
 	}
@@ -1073,7 +1162,7 @@ func (s *Service) detail(w http.ResponseWriter, r *http.Request) error {
 				actions = append(actions, "route")
 			}
 		}
-		if d.PropertyKind == "preopening" && d.Owner() == "preop" && (u.IsAdmin || u.HasStep("wh") || u.HasStep("preop")) {
+		if d.PropertyKind == "preopening" && d.Owner() == "preop" && (u.IsAdmin || u.HasStep("preop")) {
 			actions = append(actions, "preop_approver")
 		}
 	case documents.Returned:
@@ -1086,7 +1175,7 @@ func (s *Service) detail(w http.ResponseWriter, r *http.Request) error {
 		}
 	case documents.POIssued:
 		if d.IsTransfer {
-			if documents.CanAct(u, d, "wh", access.Receive) != nil {
+			if documents.CanAct(u, d, "whx", "") != nil {
 				actions = append(actions, "dispatch")
 			}
 		} else if documents.Receiver(u, d) != nil {
@@ -1105,6 +1194,9 @@ func (s *Service) detail(w http.ResponseWriter, r *http.Request) error {
 	}
 	if Editable(u, d) {
 		actions = append(actions, "edit")
+	}
+	if poexpiry.CanExtend(u, d) {
+		actions = append(actions, "extend_delivery")
 	}
 	actions = onScreens(u, d, actions)
 	// A request is split into one PR per vendor when it is raised. The others from the same submission share its requester,
@@ -1151,8 +1243,41 @@ func (s *Service) detail(w http.ResponseWriter, r *http.Request) error {
 			raisesPO = st.POOnApproval
 		}
 	}
+	// over_budget: approving now goes over the month budget, so the Approve box asks why (approvals.OverBudget).
+	overBudget := 0.0
+	if textclean.Contains(actions, "approve") {
+		if st, err := flowsettings.Load(r.Context(), s.DB); err == nil {
+			overBudget, _ = approvals.OverBudget(r.Context(), s.DB, st, d)
+		}
+	}
+	// vendor_advances: advances already paid to this vendor and carried forward from earlier POs (for example a PO
+	// rejected when its delivery date passed); they are adjusted on this vendor's next invoice payment.
+	type carried struct {
+		Number string  `json:"number"`
+		PO     string  `json:"po_number"`
+		Open   float64 `json:"open"`
+	}
+	crs, err := s.DB.Query(r.Context(), `SELECT a.number, coalesce(x.po_number, x.number, 'the opening balance'), (a.amount - coalesce((SELECT sum(u.amount) FROM advance_use u WHERE u.advance_id=a.id),0))::float8
+		FROM advance a LEFT JOIN document x ON x.id=a.document_id
+		WHERE a.vendor_id=$1 AND a.document_id IS DISTINCT FROM $2 AND a.status='PAID' AND a.carry_forward
+		AND a.amount - coalesce((SELECT sum(u.amount) FROM advance_use u WHERE u.advance_id=a.id),0) > 0.005 ORDER BY a.id`, d.VendorID, d.ID)
+	if err != nil {
+		return err
+	}
+	vadv, err := pgx.CollectRows(crs, pgx.RowToStructByPos[carried])
+	if err != nil {
+		return err
+	}
+	// vendor_balance: the vendor's balance now, as at the end of its statement (bills less payments; negative = advances,
+	// the opening one included, not yet billed). Worked out on every open, so approvers see it as it stands.
+	var vbal *float64
+	if d.VendorType != "warehouse" && (d.Kind == "purchase" || d.Kind == "corp_purchase") {
+		if b, err := vendorportal.Balance(r.Context(), s.DB, d.VendorID); err == nil {
+			vbal = &b
+		}
+	}
 	return httpjson.OK(w, map[string]any{"document": rows[0], "log": logs, "receipts": receipts, "actions": actions, "raised_with": siblings, "owner_people": owners,
-		"vendor_invoices": vinv, "vendor_portal": vendorportal.HasLogin(r.Context(), s.DB, d.VendorID), "raises_po": raisesPO})
+		"vendor_invoices": vinv, "vendor_portal": vendorportal.HasLogin(r.Context(), s.DB, d.VendorID), "raises_po": raisesPO, "over_budget": overBudget, "vendor_advances": vadv, "vendor_balance": vbal})
 }
 
 func (s *Service) resubmit(w http.ResponseWriter, r *http.Request) error {
@@ -1200,10 +1325,11 @@ func (s *Service) resubmit(w http.ResponseWriter, r *http.Request) error {
 			if _, err := tx.Exec(r.Context(), `UPDATE invoice SET invoice_number=$2, amount=$3 WHERE document_id=$1 AND status='AWAITING'`, d.ID, no, money.Round2(in.InvoiceAmount)); err != nil {
 				return err
 			}
-			steps = []string{st.BillApprover}
+			// A utility or AMC bill keeps the route it was raised with (Cluster Manager, L1, L2); C1 / C2 follow the new amount.
 			if d.IsCorp() {
-				steps = approvals.CorpSteps(st, in.InvoiceAmount, d.RequesterID, deref(d.CorpL1))
+				steps = approvals.CorpSteps(st, in.InvoiceAmount, d.RequesterID, deref(d.CorpL1), deref(d.CorpL2))
 			}
+			steps = approvals.WithAmount(st, "bills", steps, in.InvoiceAmount)
 		} else {
 			total := 0.0
 			amount := 0.0
@@ -1224,15 +1350,20 @@ func (s *Service) resubmit(w http.ResponseWriter, r *http.Request) error {
 			if total == 0 {
 				return httpjson.Bad("Enter a quantity for at least one item, or cancel the request.")
 			}
-			steps = approvals.Chain(st, d.PropertyKind, d.VendorType == "warehouse", d.EventReason != "", amount)
-			if d.PropertyKind == "warehouse" && len(d.RouteSteps) > 0 {
-				steps = d.RouteSteps // the warehouse route was settled when it was raised (L1 by sub-category, then L2)
-			}
+			// The route was settled when it was raised (Cluster Manager for an event, L1 and L2, or the warehouse's
+			// approvers); C1 / C2 follow the new amount.
 			if d.IsCorp() {
-				steps = approvals.CorpSteps(st, amount, d.RequesterID, deref(d.CorpL1))
+				steps = approvals.CorpSteps(st, amount, d.RequesterID, deref(d.CorpL1), deref(d.CorpL2))
 			}
-			if len(steps) == 0 {
-				steps = []string{"cc"}
+			steps = approvals.WithAmount(st, approvals.AmountKind(d), steps, amount)
+			if d.VendorType == "warehouse" { // C1 / C2 come before the warehouse's own approval
+				base := []string{}
+				for _, x := range steps {
+					if x != "whx" {
+						base = append(base, x)
+					}
+				}
+				steps = append(base, "whx")
 			}
 		}
 		if _, err := tx.Exec(r.Context(), `UPDATE document SET status='PENDING', route_steps=$2, step_idx=0, routed_reason='', routed_note='', cm_approved_at=NULL, updated_at=now() WHERE id=$1`, d.ID, steps); err != nil {
@@ -1288,8 +1419,8 @@ func (s *Service) cancel(w http.ResponseWriter, r *http.Request) error {
 
 func (s *Service) setPreop(w http.ResponseWriter, r *http.Request) error {
 	u := access.From(r)
-	if !u.IsAdmin && !u.HasStep("wh") && !u.HasStep("preop") {
-		return httpjson.Forbidden("The Warehouse Manager or the Pre-opening Team chooses the approver.")
+	if !u.IsAdmin && !u.HasStep("preop") {
+		return httpjson.Forbidden("The Pre-opening Team chooses the approver.")
 	}
 	id, err := httpjson.ID(r, "id")
 	if err != nil {

@@ -71,7 +71,7 @@ func Load(ctx context.Context, q database.Q, id int64) (Vendor, error) {
 func (v Vendor) input() Input {
 	return Input{Type: v.Type, Name: v.Name, Address: v.Address, City: v.City, PIN: v.PIN, Contact: v.Contact, Mobile: v.Mobile, Email: v.Email,
 		GSTRegistered: v.GSTRegistered, GSTIN: v.GSTIN, PAN: v.PAN, StateCode: v.StateCode, MSME: v.MSME, Udyam: v.Udyam, BankHolder: v.BankHolder,
-		Terms: v.Terms, SubCategoryIDs: v.SubCategoryIDs, BillTypeIDs: v.BillTypeIDs}
+		Terms: v.Terms, SubCategoryIDs: v.SubCategoryIDs, BillTypeIDs: v.BillTypeIDs, OpeningAsOn: v.OpeningAsOn}
 }
 
 // apply puts a proposal onto the vendor's details. An unchanged IFSC is left blank, so the bank stays as it is.

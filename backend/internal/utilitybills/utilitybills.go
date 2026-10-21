@@ -14,6 +14,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"purchasedesk/internal/access"
+	"purchasedesk/internal/approvalmatrix"
+	"purchasedesk/internal/approvals"
 	"purchasedesk/internal/auditlog"
 	"purchasedesk/internal/clock"
 	"purchasedesk/internal/documents"
@@ -179,6 +181,21 @@ func (s *Service) create(w http.ResponseWriter, r *http.Request) error {
 	if g == nil {
 		return httpjson.Forbidden("You cannot raise bills for %s.", propName)
 	}
+	// The route: at a live property the Cluster Manager, then the L1 and L2 set for this bill type there (approval
+	// matrix), then C1 / C2 by amount.
+	pair := approvalmatrix.ForBillType(ctx, s.DB, in.PropertyID, in.BillTypeID)
+	if !pair.Set() {
+		return httpjson.Bad("No L1 and L2 approver is set for %s bills at %s. Ask the System Admin to set them under Users & Rights, Approval matrix.", typeName, propName)
+	}
+	ml, problem := approvalmatrix.Steps(pair, u.ID)
+	if problem != "" {
+		return httpjson.Bad("You are both the L1 and the L2 for %s bills at %s, and nobody approves their own bill. Ask the System Admin to name another approver.", typeName, propName)
+	}
+	route := []string{}
+	if propKind == "live" {
+		route = append(route, "l2")
+	}
+	route = approvals.WithAmount(st, "bills", append(route, ml...), in.InvoiceAmount)
 	var number, voucher string
 	err = pgx.BeginFunc(ctx, s.DB, func(tx pgx.Tx) error {
 		var err error
@@ -186,9 +203,9 @@ func (s *Service) create(w http.ResponseWriter, r *http.Request) error {
 			return err
 		}
 		var id int64
-		if err := tx.QueryRow(ctx, `INSERT INTO document(number,kind,property_id,vendor_id,requester_id,requester_step,status,route_steps,step_idx,bill_type_id,period_start,months,remark,payment_terms,created_by)
-			VALUES ($1,'bill',$2,$3,$4,$5,'PENDING',$6,0,$7,$8,$9,$10,(SELECT payment_terms FROM vendor WHERE id=$3),$4) RETURNING id`,
-			number, in.PropertyID, in.VendorID, u.ID, g.Step, []string{st.BillApprover}, in.BillTypeID, start, in.Months, strings.TrimSpace(in.Remark)).Scan(&id); err != nil {
+		if err := tx.QueryRow(ctx, `INSERT INTO document(number,kind,property_id,vendor_id,requester_id,requester_step,status,route_steps,step_idx,bill_type_id,period_start,months,remark,payment_terms,created_by,corp_l1_user_id,corp_l2_user_id)
+			VALUES ($1,'bill',$2,$3,$4,$5,'PENDING',$6,0,$7,$8,$9,$10,(SELECT payment_terms FROM vendor WHERE id=$3),$4,$11,$12) RETURNING id`,
+			number, in.PropertyID, in.VendorID, u.ID, g.Step, route, in.BillTypeID, start, in.Months, strings.TrimSpace(in.Remark), pair.L1, pair.L2).Scan(&id); err != nil {
 			return err
 		}
 		fid, err := s.Files.Save(ctx, tx, u, file, "invoices", false)
@@ -204,5 +221,5 @@ func (s *Service) create(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
-	return httpjson.OK(w, map[string]string{"message": number + " (voucher " + voucher + ") sent to the " + documents.StepNames[st.BillApprover], "number": number, "voucher_number": voucher})
+	return httpjson.OK(w, map[string]string{"message": number + " (voucher " + voucher + ") sent to the " + documents.StepNames[route[0]], "number": number, "voucher_number": voucher})
 }

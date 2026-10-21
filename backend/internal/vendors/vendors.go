@@ -74,7 +74,9 @@ type Vendor struct {
 	SubCategoryIDs []int64  `json:"sub_category_ids"`
 	BillTypeIDs    []int64  `json:"bill_type_ids"`
 	Supplies       []string `json:"supplies"`
-	FinChange      string   `json:"fin_change"` // an edit waiting for Finance: what changed
+	FinChange      string   `json:"fin_change"`      // an edit waiting for Finance: what changed
+	Opening        float64  `json:"opening_balance"` // before Purchase Desk: negative = advance already paid, positive = old bills owed
+	OpeningAsOn    string   `json:"opening_as_on"`
 }
 
 const selectVendor = `SELECT v.id, v.code, v.vendor_type, v.legal_name, v.address, v.city, v.pin, v.contact_person, v.mobile, v.email,
@@ -84,7 +86,7 @@ const selectVendor = `SELECT v.id, v.code, v.vendor_type, v.legal_name, v.addres
 	coalesce((SELECT array_agg(bill_type_id ORDER BY bill_type_id) FROM vendor_bill_type WHERE vendor_id=v.id),'{}'),
 	coalesce((SELECT array_agg(sc.name ORDER BY sc.name) FROM vendor_sub_category x JOIN sub_category sc ON sc.id=x.sub_category_id WHERE x.vendor_id=v.id),'{}') ||
 	coalesce((SELECT array_agg(b.name ORDER BY b.name) FROM vendor_bill_type x JOIN bill_type b ON b.id=x.bill_type_id WHERE x.vendor_id=v.id),'{}'),
-	v.fin_change
+	v.fin_change, v.opening_balance::float8, coalesce(v.opening_as_on::text,'')
 	FROM vendor v LEFT JOIN app_user bu ON bu.id=v.bank_verified_by`
 
 func scan(row pgx.CollectableRow) (Vendor, error) {
@@ -93,7 +95,7 @@ func scan(row pgx.CollectableRow) (Vendor, error) {
 	err := row.Scan(&v.ID, &v.Code, &v.Type, &v.Name, &v.Address, &v.City, &v.PIN, &v.Contact, &v.Mobile, &v.Email,
 		&v.GSTRegistered, &v.GSTIN, &v.PAN, &v.StateCode, &v.MSME, &v.Udyam, &v.BankHolder, &last4, &v.IFSC,
 		&v.BankProofID, &v.MSMEFileID, &v.BankVerified, &v.BankVerifiedBy, &v.Terms, &v.SheetMode, &v.SheetTime, &v.SheetChannel, &v.Active, &v.InactiveReason,
-		&v.SubCategoryIDs, &v.BillTypeIDs, &v.Supplies, &v.FinChange)
+		&v.SubCategoryIDs, &v.BillTypeIDs, &v.Supplies, &v.FinChange, &v.Opening, &v.OpeningAsOn)
 	if last4 != "" {
 		v.BankMasked = "••••••" + last4
 	}
@@ -151,6 +153,10 @@ type Input struct {
 	Terms          string  `json:"payment_terms"`
 	SubCategoryIDs []int64 `json:"sub_category_ids"`
 	BillTypeIDs    []int64 `json:"bill_type_ids"`
+	// Opening balance from before Purchase Desk (nil keeps it): negative = advance already paid, positive = old bills
+	// owed, as on OpeningAsOn (blank: today). A negative one is taken off the vendor's next invoices (syncOpening).
+	Opening     *float64 `json:"opening_balance"`
+	OpeningAsOn string   `json:"opening_as_on"`
 
 	msmeFile   *uploadedfiles.File // MSME (Udyam) certificate attached to this save, if any
 	msmeFileID *int64              // set once the certificate is saved
@@ -201,6 +207,7 @@ func (s *Service) Validate(ctx context.Context, in *Input, id int64, proof *uplo
 	in.GSTIN, in.PAN, in.IFSC, in.Udyam = textclean.Upper(in.GSTIN), textclean.Upper(in.PAN), textclean.Upper(in.IFSC), textclean.Upper(in.Udyam)
 	in.Mobile, in.PIN, in.Email = strings.TrimSpace(in.Mobile), strings.TrimSpace(in.PIN), strings.TrimSpace(in.Email)
 	in.BankAccount, in.BankAccount2 = strings.TrimSpace(in.BankAccount), strings.TrimSpace(in.BankAccount2)
+	errs = append(errs, checkOpening(in)...)
 	if !textclean.Contains([]string{"goods", "utility", "amc", "other"}, in.Type) {
 		errs = append(errs, "Choose the vendor type.")
 	}
@@ -388,6 +395,9 @@ func (s *Service) Update(ctx context.Context, tx pgx.Tx, u *access.User, id int6
 		in.BankHolder, in.Terms, acctEnc, last4, in.IFSC, proofID, resent, in.msmeFileID); err != nil {
 		return "", false, err
 	}
+	if err := s.syncOpening(ctx, tx, u, id, in); err != nil {
+		return "", false, err
+	}
 	act := "Vendor edited"
 	if resent {
 		act = "Vendor edited, sent for re-verification"
@@ -533,6 +543,9 @@ func (s *Service) Insert(ctx context.Context, tx pgx.Tx, u *access.User, in *Inp
 		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23) RETURNING id`,
 		code, in.Type, in.Name, in.Address, in.City, in.PIN, in.Contact, in.Mobile, in.Email, in.GSTRegistered, nullIfEmpty(in.GSTIN), nullIfEmpty(in.PAN), in.StateCode,
 		in.MSME, in.Udyam, in.BankHolder, acctEnc, last4, in.IFSC, proofID, in.Terms, u.ID, in.msmeFileID).Scan(&id); err != nil {
+		return 0, "", err
+	}
+	if err := s.syncOpening(ctx, tx, u, id, in); err != nil {
 		return 0, "", err
 	}
 	if in.Type == "goods" {

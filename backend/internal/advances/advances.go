@@ -105,14 +105,15 @@ type Advance struct {
 	ZohoError    string     `json:"zoho_error"`
 }
 
-const selectAdvance = `SELECT a.id, a.number, a.document_id, d.number, coalesce(d.po_number, d.advance_hold_po, ''), d.kind,
-	d.status='PO_ISSUED' OR (d.status='APPROVED' AND d.advance_hold_po IS NOT NULL), d.advance_hold_po IS NOT NULL,
-	a.vendor_id, v.legal_name, coalesce(v.email::text,''), a.property_id, p.name, p.cluster_id, a.amount::float8, a.pct::float8, a.tds_amount::float8,
+// An opening advance (vendor's opening balance, migration 033) has no PO or property.
+const selectAdvance = `SELECT a.id, a.number, coalesce(a.document_id,0), coalesce(d.number,''), coalesce(d.po_number, d.advance_hold_po, CASE WHEN a.opening THEN 'Opening balance' ELSE '' END), coalesce(d.kind,'purchase'),
+	coalesce(d.status='PO_ISSUED' OR (d.status='APPROVED' AND d.advance_hold_po IS NOT NULL), FALSE), d.advance_hold_po IS NOT NULL,
+	a.vendor_id, v.legal_name, coalesce(v.email::text,''), coalesce(a.property_id,0), coalesce(p.name,'All properties'), coalesce(p.cluster_id,0), a.amount::float8, a.pct::float8, a.tds_amount::float8,
 	a.reason, a.note, a.proforma_file_id, a.status, a.requested_by, ru.name, a.requested_at, coalesce(du.name,''), a.decided_at, a.decision_note,
 	coalesce(a.paid_on::text,''), a.payment_ref, a.carry_forward,
 	coalesce((SELECT sum(x.amount) FROM advance_use x WHERE x.advance_id=a.id AND x.kind='invoice'),0)::float8,
 	coalesce((SELECT sum(x.amount) FROM advance_use x WHERE x.advance_id=a.id AND x.kind='refund'),0)::float8, a.zoho_payment_id, a.zoho_error
-	FROM advance a JOIN document d ON d.id=a.document_id JOIN vendor v ON v.id=a.vendor_id JOIN property p ON p.id=a.property_id
+	FROM advance a LEFT JOIN document d ON d.id=a.document_id JOIN vendor v ON v.id=a.vendor_id LEFT JOIN property p ON p.id=a.property_id
 	JOIN app_user ru ON ru.id=a.requested_by LEFT JOIN app_user du ON du.id=a.decided_by `
 
 func scan(row pgx.CollectableRow) (Advance, error) {

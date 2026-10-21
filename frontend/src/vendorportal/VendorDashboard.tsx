@@ -9,7 +9,7 @@ import { MultiSelect } from '../ui/MultiSelect'
 import { Pill } from '../ui/Pill'
 import { vget } from './portalApi'
 
-interface Entry { date: string; kind: 'bill' | 'tds' | 'payment' | 'advance' | 'refund'; text: string; ref: string; po_number: string; property: string; bill: number; paid: number; balance: number; status: string }
+interface Entry { date: string; kind: 'opening' | 'bill' | 'tds' | 'payment' | 'advance' | 'refund'; text: string; ref: string; po_number: string; po_value: number; property: string; bill: number; paid: number; balance: number; status: string }
 interface Dash {
   new_orders: number; to_deliver: number; checking: number; checking_amount: number; approved: number; next_pay_by: string; paid_this_month: number; balance: number
   waiting: { id: number; po_number: string; po_date: string; property: string; total: number }[]
@@ -96,13 +96,6 @@ export function VendorDashboard() {
         <div className="tile"><span>{d.balance < 0 ? 'Advance not yet billed' : 'Balance due to you'}</span><b>{inr(Math.abs(d.balance))}</b></div>
       </div>
 
-      {d.waiting.length > 0 && <section className="card flush"><h2>New orders waiting for you</h2><div className="scroll"><table className="dt">
-        <thead><tr><th>PO</th><th>Date</th><th>Property</th><th className="r">Value</th><th></th></tr></thead>
-        <tbody>{d.waiting.map((o) => <tr key={o.id}>
-          <td data-label="PO" className="id">{o.po_number}</td><td data-label="Date">{day(o.po_date)}</td><td data-label="Property">{o.property}</td>
-          <td data-label="Value" className="r">{inr(o.total)}</td>
-          <td data-label=""><button className="btn small" onClick={() => nav('/vendor/orders/' + o.id)}>Open</button></td></tr>)}</tbody>
-      </table></div></section>}
 
       <h2 style={{ margin: '6px 0 0' }}>Statement</h2>
       <div className="tools">
@@ -129,7 +122,7 @@ export function VendorDashboard() {
             {view.rows.map((e, i) => <tr key={i}>
               <td data-label="Date">{day(e.date)}</td>
               <td data-label="Bill / payment"><b>{e.text}</b>
-                <br /><span className="hint">{[e.po_number, e.property, e.kind === 'payment' || e.kind === 'advance' || e.kind === 'refund' ? e.ref && 'Ref ' + e.ref : ''].filter(Boolean).join(' · ')}</span>
+                <br /><span className="hint">{[e.po_number && (e.po_value ? `${e.po_number} ${inr(e.po_value)}` : e.po_number), e.property, e.kind === 'payment' || e.kind === 'advance' || e.kind === 'refund' ? e.ref && 'Ref ' + e.ref : ''].filter(Boolean).join(' · ')}</span>
                 {e.kind === 'bill' && <> <Pill tone={e.status === 'Paid' ? 'ok' : e.status.startsWith('Approved') ? 'warn' : ''}>{e.status}</Pill></>}</td>
               <td data-label="Bill amount" className="r">{e.bill ? inr(e.bill) : '—'}</td>
               <td data-label="Payment amount" className="r">{e.paid ? inr(e.paid) : '—'}</td>

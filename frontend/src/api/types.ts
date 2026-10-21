@@ -40,6 +40,8 @@ export interface Doc {
   event_reason: string; event_note: string; routed_reason: string; routed_note: string; cm_approved_at: string | null
   preop_user_id: number | null; preop_user: string; return_reason: string; return_note: string; modified_note: string; modified_by: string; modified_at: string | null
   approved_at: string | null; po_number: string; po_date: string | null; deliver_by: string; payment_terms: string; po_closed_short: boolean
+  /** The delivery date was extended once already (it cannot move again). */
+  deliver_by_extended: boolean
   /** Set while the PO waits for Finance to approve its advance: the number the PO will be raised under. */
   advance_hold_po: string
   /** On hold, the advance is approved and only its payment is awaited. */
@@ -56,6 +58,8 @@ export interface Doc {
   parent_id: number | null; transfer_received_at: string | null; department_id: number | null; department: string
   corp_l1_user_id: number | null; corp_l1: string; corp_l2_user_id: number | null; corp_l2: string; corp_backup_user_id: number | null; corp_backup: string
   expense_head_id: number | null; expense_head: string; quote_file_id: number | null; delivery: Delivery | null
+  /** Why it was approved over the month budget (reason · remark), and by whom. */
+  over_budget_reason: string; over_budget_by: string
   // added by the approvals view
   owner: string; owner_name: string; status_label: string; amount: number; over_month: number; over_week: number; flagged: boolean
   budget: BudgetFlag[]; bill_flags: string[]; previous_bill: number | null; age_days: number

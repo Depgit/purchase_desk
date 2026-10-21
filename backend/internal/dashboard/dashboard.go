@@ -479,8 +479,8 @@ func (s *Service) get(w http.ResponseWriter, r *http.Request) error {
 	add(len(msme) > 0 && (A || u.HasStep("ap") || u.HasStep("finance")), true, plural(len(msme), "MSME invoice", "MSME invoices")+" must be paid within 7 days ("+money.INR(msmeTotal)+")", "/payments")
 	add(len(held) > 0 && (A || u.HasStep("finance")), false, plural(len(held), "approved invoice is", "approved invoices are")+" held back from Zoho by a missing mapping", "/settings/zoho")
 	add(bankPending > 0 && (A || u.HasStep("finance")), false, plural(bankPending, "vendor is", "vendors are")+" waiting for bank verification", "/vendors")
-	add(len(low) > 0 && (A || u.HasStep("wh") || u.HasStep("purchase")), true, plural(len(low), "warehouse item is", "warehouse items are")+" below the reorder level", "/warehouse")
-	add(len(unsched) > 0 && (A || u.HasStep("wh")), false, plural(len(unsched), "warehouse order", "warehouse orders")+" older than a day "+map[bool]string{true: "has", false: "have"}[len(unsched) == 1]+" no delivery scheduled", "/warehouse")
+	add(len(low) > 0 && (A || u.HasStep("whl2") || u.HasStep("purchase")), true, plural(len(low), "warehouse item is", "warehouse items are")+" below the reorder level", "/warehouse")
+	add(len(unsched) > 0 && (A || u.HasStep("whl2")), false, plural(len(unsched), "warehouse order", "warehouse orders")+" older than a day "+map[bool]string{true: "has", false: "have"}[len(unsched) == 1]+" no delivery scheduled", "/warehouse")
 	add(len(expiring) > 0 && (A || u.HasStep("purchase")), false, plural(len(expiring), "mapped vendor rate expires", "mapped vendor rates expire")+" within 15 days or "+map[bool]string{true: "has", false: "have"}[len(expiring) == 1]+" expired", "/vendor-mapping")
 	add(returned > 0, false, plural(returned, "request was", "requests were")+" returned to you for changes", "/requests")
 	corpMine := 0

@@ -49,28 +49,87 @@ func (s *Service) Routes(r chi.Router) {
 	r.Post("/documents/{id}/route", httpjson.Wrap(s.single("route")))
 }
 
-// Chain returns the approval steps for a new purchase request.
-func Chain(st flowsettings.Settings, propertyKind string, vendorIsWarehouse, event bool, amount float64) []string {
-	if propertyKind == "warehouse" {
+// Chain is the start of a purchase's route before its L1 and L2 (approval matrix) and its C1 / C2 (WithAmount):
+// the warehouse's own approvers, or the Cluster Manager for an event at a live property. Since 19 Oct the Cost
+// Controller and the single pre-opening approver no longer approve.
+func Chain(st flowsettings.Settings, propertyKind string, vendorIsWarehouse, event bool) []string {
+	switch {
+	case propertyKind == "warehouse":
 		// The warehouse's own purchases: the Warehouse Approver L1 of the items' sub-categories, then Warehouse Approver
-		// L2 (or the Warehouse Manager). purchaserequests drops L1 when the requester is the only L1 for the items.
+		// L2. purchaserequests drops L1 when the requester is the only L1 for the items, and L2 when the L2 raised it.
 		return []string{"whl1", "whl2"}
+	case vendorIsWarehouse:
+		return []string{} // an order on the warehouse: the property's L1 and L2 only when Flow Settings ask (purchaserequests)
+	case propertyKind == "live" && event && st.EvtL2:
+		return []string{"l2"} // the Cluster Manager confirms an event's extra quantity first, then L1 and L2
 	}
-	if propertyKind == "preopening" {
-		return []string{"preop"}
-	}
-	if vendorIsWarehouse && !st.WHApproval {
-		return []string{}
-	}
-	steps := []string{}
-	if (event && st.EvtL2) || (st.L2Above > 0 && amount > st.L2Above) {
-		steps = append(steps, "l2")
-	}
-	if st.CCAll || len(steps) == 0 {
-		steps = append(steps, "cc")
-	}
-	return steps
+	return []string{} // L1 and L2 from the approval matrix follow (approvalmatrix.Steps)
 }
+
+// OverBudget is how far a pending purchase at a live property goes over its month budget, when the approver acting
+// now must say why: the Cost Controller, or the last approver of a route without one. 0 = no reason needed.
+func OverBudget(ctx context.Context, q database.Q, st flowsettings.Settings, d *documents.Doc) (float64, error) {
+	if d.Kind != "purchase" || d.NoBudget() || d.Status != documents.Pending || d.StepIdx >= len(d.RouteSteps) || d.VendorType == "warehouse" {
+		return 0, nil
+	}
+	// The reason is given by the last of the L1 / L2 (or, on older routes, the Cost Controller); without either, by
+	// the last approver.
+	at := len(d.RouteSteps) - 1
+	for i, st := range d.RouteSteps {
+		if st == "cc" || st == "cl1" || st == "cl2" {
+			at = i
+		}
+	}
+	if d.StepIdx != at {
+		return 0, nil
+	}
+	m, err := budgets.NewCache(q).Get(ctx, d.PropertyID)
+	if err != nil {
+		return 0, err
+	}
+	_, over, _ := budgets.Check(m, d.SubCatTotals(), st.WeekFlag)
+	return over, nil
+}
+
+// WithAmount adds the amount approvals after a route: above its type's C1 limit (incl. GST) C1, above the C2 limit
+// C1 then C2 (Flow Settings amount_approvals; types in flowsettings.AmountTypes). A route that had them already (or the
+// retired CFO) is set again for the new amount.
+func WithAmount(st flowsettings.Settings, kind string, steps []string, amount float64) []string {
+	out := []string{}
+	for _, s := range steps {
+		if s != "c1" && s != "c2" && s != "cfo" {
+			out = append(out, s)
+		}
+	}
+	l := st.AmountApprovals[kind]
+	c2 := l.C2 > 0 && amount > l.C2
+	if (l.C1 > 0 && amount > l.C1) || (c2 && l.C1 > 0) {
+		out = append(out, "c1")
+	}
+	if c2 {
+		out = append(out, "c2")
+	}
+	return out
+}
+
+// AmountKind is the C1 / C2 limit type of a document.
+func AmountKind(d *documents.Doc) string {
+	switch {
+	case d.IsBill():
+		return "bills"
+	case d.Kind == "corp_purchase":
+		return "corporate"
+	case d.PropertyKind == "warehouse":
+		return "warehouse"
+	case d.PropertyKind == "preopening":
+		return "preopening"
+	}
+	return "property"
+}
+
+// samePerson pairs a step with the next one that is skipped when the same person approves both (L1 and L2 the same,
+// C1 and C2 the same): one approval is enough.
+var samePerson = map[string]string{"cl1": "cl2", "whl1": "whl2", "c1": "c2"}
 
 // WarehouseL1s lists the active Warehouse Approver L1 users who approve a sub-category at a warehouse: the role
 // covers the property and ticks that sub-category (or none) and its category (or none).
@@ -97,13 +156,14 @@ func moduleOf(d *documents.Doc) string {
 }
 
 // CorpSteps returns the approval steps for a corporate request: the department's L1 then its L2.
-// Below the Admin's threshold the L1 alone is enough; if the requester is the L1, it goes straight to the L2.
-func CorpSteps(st flowsettings.Settings, amount float64, requesterID, l1 int64) []string {
+// Below the Admin's threshold the L1 alone is enough; if the requester is the L1, it goes straight to the L2; when the
+// L1 and the L2 are the same person, one approval. C1 / C2 follow (WithAmount).
+func CorpSteps(st flowsettings.Settings, amount float64, requesterID, l1, l2 int64) []string {
 	steps := []string{"cl1", "cl2"}
-	if st.CorpL1OnlyBelow > 0 && amount < st.CorpL1OnlyBelow {
+	if (st.CorpL1OnlyBelow > 0 && amount < st.CorpL1OnlyBelow) || l1 == l2 {
 		steps = []string{"cl1"}
 	}
-	if requesterID == l1 {
+	if requesterID == l1 && l1 != l2 {
 		steps = []string{"cl2"}
 	}
 	return steps
@@ -114,6 +174,9 @@ type Decision struct {
 	Quantities map[int64]float64 `json:"quantities"` // line id → new quantity (approve only)
 	Reason     string            `json:"reason"`
 	Note       string            `json:"note"`
+	// Approving over the month budget (Cost Controller, or the last approver on a route without one): why.
+	BudgetReason string `json:"budget_reason"`
+	BudgetNote   string `json:"budget_note"`
 	// At the final approval, what the PO it raises needs: confirmed rates of estimated lines, and the advance when the
 	// vendor is on Advance terms.
 	purchaseorders.AtApproval
@@ -206,6 +269,25 @@ func (s *Service) Act(ctx context.Context, tx pgx.Tx, u *access.User, st flowset
 			}
 			changed = d.ModifiedNote != before
 		}
+		over, err := OverBudget(ctx, tx, st, d)
+		if err != nil {
+			return out, err
+		}
+		if over > 0 {
+			bn := strings.TrimSpace(dec.BudgetNote)
+			if strings.TrimSpace(dec.BudgetReason) == "" {
+				return out, httpjson.Bad("%s is %s over the month budget: choose why you approve it anyway.", d.Number, money.INR(over))
+			}
+			if err := flowsettings.CheckReason(ctx, tx, "over_budget_reasons", dec.BudgetReason, bn); err != nil {
+				return out, err
+			}
+			if _, err := tx.Exec(ctx, `UPDATE document SET over_budget_reason=$2, over_budget_note=$3, over_budget_by=$4 WHERE id=$1`, d.ID, dec.BudgetReason, bn, u.Name+" ("+g.Name+")"); err != nil {
+				return out, err
+			}
+			if err := logIt("Approved over budget by "+money.INR(over), strings.TrimSpace(dec.BudgetReason+" · "+bn)); err != nil {
+				return out, err
+			}
+		}
 		if err := logIt("Approved", note); err != nil {
 			return out, err
 		}
@@ -217,6 +299,18 @@ func (s *Service) Act(ctx context.Context, tx pgx.Tx, u *access.User, st flowset
 			return out, err
 		}
 		d.StepIdx++
+		// The same person at the paired next step (L1 and L2, C1 and C2): one approval is enough.
+		if d.StepIdx < len(d.RouteSteps) && samePerson[step] == d.RouteSteps[d.StepIdx] {
+			if g2 := documents.CanAct(u, d, d.RouteSteps[d.StepIdx], access.Approve); g2 != nil && !u.IsAdmin {
+				if err := auditlog.Doc(ctx, tx, u, g2.Name, d.ID, d.Number, module, "Approved", "Also the "+documents.StepNames[d.RouteSteps[d.StepIdx]]+": one approval is enough"); err != nil {
+					return out, err
+				}
+				if _, err := tx.Exec(ctx, `UPDATE document SET step_idx=step_idx+1, updated_at=now() WHERE id=$1`, d.ID); err != nil {
+					return out, err
+				}
+				d.StepIdx++
+			}
+		}
 		out.message = d.Number + " approved"
 		if d.StepIdx >= len(d.RouteSteps) {
 			res, err := Finalize(ctx, tx, u, g.Name, d, dec.AtApproval)
@@ -368,6 +462,7 @@ type bulkIn struct {
 	Quantities map[int64]map[int64]float64 `json:"quantities"`
 	Reason     string                      `json:"reason"`
 	Note       string                      `json:"note"`
+	DeliverBy  string                      `json:"deliver_by"` // for the POs the approvals raise (blank: today + Flow Settings days)
 }
 
 type bulkResult struct {
@@ -400,7 +495,8 @@ func (s *Service) bulk(w http.ResponseWriter, r *http.Request) error {
 			if in.Action == "approve" && note == "" && len(in.IDs) > 1 {
 				note = "Bulk approval"
 			}
-			out, err = s.Act(r.Context(), tx, u, st, in.Action, id, Decision{Quantities: in.Quantities[id], Reason: in.Reason, Note: note})
+			out, err = s.Act(r.Context(), tx, u, st, in.Action, id, Decision{Quantities: in.Quantities[id], Reason: in.Reason, Note: note,
+				AtApproval: purchaseorders.AtApproval{DeliverBy: in.DeliverBy}})
 			return err
 		})
 		if err != nil {

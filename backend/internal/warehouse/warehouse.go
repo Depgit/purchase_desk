@@ -55,7 +55,7 @@ func (s *Service) Routes(r chi.Router) {
 	r.Post("/documents/{id}/receive-transfer", httpjson.Wrap(s.receiveTransfer))
 }
 
-func canWH(u *access.User) bool { return u.IsAdmin || u.HasStep("wh") }
+func canWH(u *access.User) bool { return u.IsAdmin || u.HasStep("whl2") } // stock and dispatch: Warehouse Approver L2
 
 // ---------- stock ledger ----------
 
@@ -144,7 +144,7 @@ func (s *Service) stockList(w http.ResponseWriter, r *http.Request) error {
 func (s *Service) setMin(w http.ResponseWriter, r *http.Request) error {
 	u := access.From(r)
 	if !canWH(u) {
-		return httpjson.Forbidden("Only the Warehouse Manager can change reorder levels.")
+		return httpjson.Forbidden("Only the Warehouse Approver L2 can change reorder levels.")
 	}
 	sku, err := httpjson.ID(r, "sku")
 	if err != nil {
@@ -220,7 +220,7 @@ func (s *Service) transfers(w http.ResponseWriter, r *http.Request) error {
 	}
 	docs, err := documents.LoadMany(r.Context(), s.DB, `WHERE ((d.is_transfer AND (d.status IN ('PO_ISSUED','WH_SENT') OR d.updated_at > now() - interval '30 days'))
 		OR (d.status='PO_ISSUED' AND NOT d.is_transfer AND p.kind IN ('warehouse','preopening'))) AND ($1 OR d.property_id = ANY($2) OR $3)
-		ORDER BY d.created_at`, all, ids, canWH(u))
+		ORDER BY d.created_at`, all, ids, u.IsAdmin || u.HasStep("whl1") || u.HasStep("whl2"))
 	if err != nil {
 		return err
 	}
@@ -317,7 +317,7 @@ func (s *Service) partners(w http.ResponseWriter, r *http.Request) error {
 func (s *Service) savePartner(w http.ResponseWriter, r *http.Request) error {
 	u := access.From(r)
 	if !canWH(u) {
-		return httpjson.Forbidden("Only the Warehouse Manager can change delivery partners.")
+		return httpjson.Forbidden("Only the Warehouse Approver L2 can change delivery partners.")
 	}
 	var in Partner
 	if err := httpjson.Decode(r, &in); err != nil {
@@ -353,7 +353,7 @@ func (s *Service) savePartner(w http.ResponseWriter, r *http.Request) error {
 	return httpjson.OK(w, map[string]int64{"id": id})
 }
 
-// lockTransfer loads a transfer order for a change by the Warehouse Manager.
+// lockTransfer loads a transfer order for a change by the Warehouse Approver L2.
 func lockTransfer(ctx context.Context, tx pgx.Tx, u *access.User, id int64, status string) (*documents.Doc, *access.Grant, error) {
 	d, err := documents.Load(ctx, tx, id, true)
 	if err != nil {
@@ -362,9 +362,9 @@ func lockTransfer(ctx context.Context, tx pgx.Tx, u *access.User, id int64, stat
 	if !d.IsTransfer || d.Status != status {
 		return nil, nil, httpjson.Conflict("%s is not at this step any more.", d.PONumber)
 	}
-	g := documents.CanAct(u, d, "wh", access.Receive)
+	g := documents.CanAct(u, d, "whx", "")
 	if g == nil {
-		return nil, nil, httpjson.Forbidden("Only the Warehouse Manager can do this.")
+		return nil, nil, httpjson.Forbidden("Only a Warehouse Approver (L1 or L2) can do this.")
 	}
 	return d, g, nil
 }

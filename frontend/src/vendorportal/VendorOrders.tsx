@@ -48,11 +48,19 @@ export function VendorOrdersPage() {
   const [show, setShow] = useState<'open' | 'all'>('open')
   const nav = useNavigate()
   const rows = (data || []).filter((r) => show === 'all' || r.status === 'PO_ISSUED')
-  const fresh = (data || []).filter((r) => r.status === 'PO_ISSUED' && !r.vendor_status).length
+  const waiting = (data || []).filter((r) => r.status === 'PO_ISSUED' && !r.vendor_status)
+  const fresh = waiting.length
   return (
     <>
       <div className="head"><div><h1>Purchase orders</h1>
         <p className="sub">{fresh ? `${fresh} new order${fresh === 1 ? '' : 's'} to accept.` : 'Open orders first. Tap one to accept it, give the dispatch date or upload the invoice.'}</p></div></div>
+      {waiting.length > 0 && <section className="card flush"><h2>New orders waiting for you</h2><div className="scroll"><table className="dt">
+        <thead><tr><th>PO</th><th>Date</th><th>Property</th><th className="r">Value</th><th>Deliver by</th><th></th></tr></thead>
+        <tbody>{waiting.map((o) => <tr key={o.id}>
+          <td data-label="PO" className="id">{o.po_number}</td><td data-label="Date">{day(o.po_date)}</td><td data-label="Property">{o.property}</td>
+          <td data-label="Value" className="r">{inr(o.total)}</td><td data-label="Deliver by">{day(o.deliver_by)}</td>
+          <td data-label=""><button className="btn small" onClick={() => nav('/vendor/orders/' + o.id)}>Open</button></td></tr>)}</tbody>
+      </table></div></section>}
       <Seg label="Show" value={show} onChange={setShow} items={[['open', 'Open'], ['all', 'All, last 6 months']]} />
       {error && <p className="note bad">{error}</p>}
       {!data ? <p className="sub">Loading…</p> : !rows.length ? <p className="note">No {show === 'open' ? 'open ' : ''}purchase orders.</p> : (

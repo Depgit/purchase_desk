@@ -1,7 +1,7 @@
-// The Warehouse Manager's panel on a transfer order: schedule the delivery, mark it waiting for stock,
+// The Warehouse Approver L2's panel on a transfer order: schedule the delivery, mark it waiting for stock,
 // return it when the warehouse cannot supply, or dispatch what is in stock (keeping or closing any balance).
 import { useEffect, useState } from 'react'
-import { get, post } from '../api/client'
+import { get, post, put } from '../api/client'
 import type { Doc } from '../api/types'
 import { useApi } from '../api/useApi'
 import { addDays, qty, today } from '../format/format'
@@ -62,12 +62,17 @@ export function ScheduleModal({ ids, current, onClose, onDone }: { ids: number[]
   const [f, setF] = useState({ partner_id: d?.partner_id || 0, date: d?.date || addDays(today(), 1), slot: d?.slot || '', vehicle: d?.vehicle || '', note: d?.note || '' })
   useEffect(() => { if (!f.slot && slots.length) setF((x) => ({ ...x, slot: slots[1] || slots[0] })) }, [slots, f.slot])
   useEffect(() => { const p = partners.data?.find((x) => x.active); if (!f.partner_id && p) setF((x) => ({ ...x, partner_id: p.id })) }, [partners.data, f.partner_id])
+  const [adding, setAdding] = useState(false)
   const a = useAction()
+  if (adding) return <PartnerModal p={null} onClose={() => setAdding(false)} onDone={() => { setAdding(false); partners.reload() }} />
   return (
     <Modal title={ids.length > 1 ? `Schedule ${ids.length} orders on one trip` : d ? 'Reschedule delivery' : 'Schedule delivery'} onClose={onClose}>
       <p className="sub">The property sees the date, time slot and delivery partner on its request as soon as you save, and gets a WhatsApp message.</p>
+      {partners.data && !partners.data.some((p) => p.active) && <p className="note warn">No delivery partner yet. A delivery partner is whoever carries the goods from the warehouse to the property: a transporter, or your own vehicle and its driver. Add one here (or under Warehouse, Delivery partners) and choose it.</p>}
       <div className="grid2">
-        <Field label="Delivery partner"><select value={f.partner_id} onChange={(e) => setF({ ...f, partner_id: +e.target.value })}>{partners.data?.filter((p) => p.active).map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}</select></Field>
+        <Field label="Delivery partner">{partners.data && !partners.data.some((p) => p.active)
+          ? <button type="button" className="btn ghost" onClick={() => setAdding(true)}>+ Add delivery partner</button>
+          : <select value={f.partner_id} onChange={(e) => setF({ ...f, partner_id: +e.target.value })}>{partners.data?.filter((p) => p.active).map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}</select>}</Field>
         <Field label="Vehicle number (optional)"><input value={f.vehicle} onChange={(e) => setF({ ...f, vehicle: e.target.value })} placeholder="e.g. HR 55 AB 1234" /></Field>
         <Field label="Delivery date"><input type="date" min={today()} value={f.date} onChange={(e) => setF({ ...f, date: e.target.value })} /></Field>
         <Field label="Time slot"><select value={f.slot} onChange={(e) => setF({ ...f, slot: e.target.value })}>{slots.map((s) => <option key={s}>{s}</option>)}</select></Field>
@@ -110,6 +115,25 @@ function BackModal({ doc, onClose, onDone }: { doc: Doc; onClose: () => void; on
       <Errors list={a.errors} />
       <div className="btns"><button className="btn ghost" onClick={onClose}>Cancel</button>
         <button className="btn no" disabled={a.busy || !reason} onClick={() => a.run(() => post(`/documents/${doc.id}/cannot-supply`, { Reason: reason, Note: note }), (r: any) => { onDone(); return r.message })}>Return order</button></div>
+    </Modal>
+  )
+}
+
+/** A delivery partner: the transporter or own vehicle (with its driver) that carries a transfer from the warehouse to a property. */
+export function PartnerModal({ p, onClose, onDone }: { p: Partner | null; onClose: () => void; onDone: () => void }) {
+  const [f, setF] = useState({ name: p?.name || '', kind: p?.kind || 'partner', driver: p?.driver || '', phone: p?.phone || '' })
+  const a = useAction()
+  return (
+    <Modal title={p ? 'Edit delivery partner' : 'Add delivery partner'} onClose={onClose}>
+      <div className="grid2">
+        <Field label="Name"><input value={f.name} onChange={(e) => setF({ ...f, name: e.target.value })} /></Field>
+        <Field label="Type"><select value={f.kind} onChange={(e) => setF({ ...f, kind: e.target.value })}><option value="own">Own vehicle</option><option value="partner">Delivery partner</option></select></Field>
+        <Field label="Driver or contact"><input value={f.driver} onChange={(e) => setF({ ...f, driver: e.target.value })} /></Field>
+        <Field label="Phone"><input value={f.phone} onChange={(e) => setF({ ...f, phone: e.target.value })} /></Field>
+      </div>
+      <Errors list={a.errors} />
+      <div className="btns"><button className="btn ghost" onClick={onClose}>Cancel</button>
+        <button className="btn" disabled={a.busy} onClick={() => a.run(() => p ? put('/delivery-partners/' + p.id, f) : post('/delivery-partners', f), () => { onDone(); return f.name + ' saved' })}>Save</button></div>
     </Modal>
   )
 }

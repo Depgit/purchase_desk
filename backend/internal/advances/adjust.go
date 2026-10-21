@@ -46,11 +46,12 @@ func tdsShare(advAmount, advTDS, used float64) float64 {
 // Plan lists the paid advances an invoice can use, with suggested amounts: this PO's advances first, then the
 // vendor's advances carried forward from other POs, oldest first, until payable (invoice amount less TDS) is covered.
 func Plan(ctx context.Context, q database.Q, invoiceID int64, payable float64) ([]Pick, error) {
-	rows, err := q.Query(ctx, `SELECT a.id, a.number, coalesce(d.po_number, d.number), p.name, a.amount::float8, a.tds_amount::float8,
-		a.amount::float8 - coalesce((SELECT sum(x.amount) FROM advance_use x WHERE x.advance_id=a.id),0)::float8, a.document_id=i.document_id, a.carry_forward
+	// An opening advance (the vendor's opening balance) has no PO or property; it is taken like a carried-forward one.
+	rows, err := q.Query(ctx, `SELECT a.id, a.number, coalesce(d.po_number, d.number, 'Opening balance'), coalesce(p.name, 'Opening balance'), a.amount::float8, a.tds_amount::float8,
+		a.amount::float8 - coalesce((SELECT sum(x.amount) FROM advance_use x WHERE x.advance_id=a.id),0)::float8, coalesce(a.document_id=i.document_id, FALSE), a.carry_forward
 		FROM invoice i JOIN advance a ON a.status='PAID' AND (a.document_id=i.document_id OR (a.carry_forward AND a.vendor_id=i.vendor_id))
-		JOIN document d ON d.id=a.document_id JOIN property p ON p.id=a.property_id
-		WHERE i.id=$1 ORDER BY a.document_id=i.document_id DESC, a.paid_on, a.id`, invoiceID)
+		LEFT JOIN document d ON d.id=a.document_id LEFT JOIN property p ON p.id=a.property_id
+		WHERE i.id=$1 ORDER BY coalesce(a.document_id=i.document_id, FALSE) DESC, a.paid_on, a.id`, invoiceID)
 	if err != nil {
 		return nil, err
 	}
@@ -122,7 +123,7 @@ func Apply(ctx context.Context, tx pgx.Tx, u *access.User, invoiceID int64, paya
 		var advDoc, advVendor int64
 		var carry bool
 		var amount, tds, used float64
-		err := tx.QueryRow(ctx, `SELECT number, status, document_id, vendor_id, carry_forward, amount::float8, tds_amount::float8,
+		err := tx.QueryRow(ctx, `SELECT number, status, coalesce(document_id,0), vendor_id, carry_forward, amount::float8, tds_amount::float8,
 			coalesce((SELECT sum(x.amount) FROM advance_use x WHERE x.advance_id=a.id),0)::float8 FROM advance a WHERE id=$1 FOR UPDATE`, p.AdvanceID).
 			Scan(&number, &status, &advDoc, &advVendor, &carry, &amount, &tds, &used)
 		if err != nil {

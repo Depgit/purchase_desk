@@ -31,7 +31,9 @@ interface Form {
   property_id: number; property: string; property_kind: string; items: Item[]
   budget: { sub_category_id: number; sub_category: string; category: string; month_budget: number; month_spent: number; week_budget: number; week_spent: number }[]
   preop_members: { id: number; name: string }[]; event_reasons: string[]
-  settings: { evt_l2: boolean; l2_above: number; cc_all: boolean; wh_approval: boolean }
+  settings: { evt_l2: boolean; wh_approval: boolean; amount_approvals: Record<string, { c1: number; c2: number }> }
+  /** The L1 and L2 of each category at this property (approval matrix), for the route preview. */
+  approvers: { category: string; l1: string; l2: string }[]
   often: number[]; last: { numbers: string[]; date: string; lines: { sku_id: number; qty: number }[] } | null
 }
 interface Draft { sku_id: number; qty: number; est_rate: number; vendor_id?: number }
@@ -59,13 +61,13 @@ export function NewRequestPage() {
   const [skipped, setSkipped] = useState<string[]>([])
   const l = useLookups()
   const { me, hasStep } = useSession()
-  // Live properties: property staff, managers, property chefs and Purchase. Pre-opening: the Warehouse Manager or anyone
-  // assigned to it. The warehouse: its Warehouse Staff (the Warehouse Manager approves). Always limited to the user's
+  // Live properties: property staff, managers, property chefs and Purchase. Pre-opening: anyone assigned to it. The
+  // warehouse: its Warehouse Staff and Warehouse Approver L2 (L1 then L2 approve). Always limited to the user's
   // raise scope; the server checks the same.
   const props = useMemo(() => (l?.properties || []).filter((p) => {
     if (!p.active || p.kind === 'corporate' || p.fin_status === 'pending') return false // a new property waits for Finance
     if (me?.is_admin) return true
-    const kindOK = p.kind === 'warehouse' ? hasStep('whs', 'wh') : p.kind === 'preopening' ? hasStep('wh', 'staff', 'l1', 'chef', 'purchase') : hasStep('staff', 'l1', 'chef', 'purchase')
+    const kindOK = p.kind === 'warehouse' ? hasStep('whs', 'whl2') : p.kind === 'preopening' ? hasStep('staff', 'l1', 'chef', 'purchase') : hasStep('staff', 'l1', 'chef', 'purchase')
     const inScope = me?.roles.some((g) => g.rights.includes('raise') && (g.scope === 'all' || (g.scope === 'clusters' && g.cluster_ids.includes(p.cluster_id)) || (g.scope === 'properties' && g.property_ids.includes(p.id))))
     return kindOK && inScope
   }), [l, me, hasStep])
@@ -164,7 +166,7 @@ export function NewRequestPage() {
     return [...g.values()]
   }, [lines, byId]) // eslint-disable-line react-hooks/exhaustive-deps
   const total = lines.reduce((t, d) => t + (byId.get(d.sku_id) ? lineValue(d.qty, rateOf(d), gstOf(d)) : 0), 0)
-  const kindProp = form && form.property_kind === 'preopening' // asks which Pre-opening Team member approves
+  const kindProp = form && form.property_kind === 'preopening'
   const whProp = form && form.property_kind === 'warehouse'
 
   // The menu: "Often ordered" first when there is history, then all items, then one tab per category.
@@ -176,17 +178,25 @@ export function NewRequestPage() {
     : cur === 'often' ? often : cur === 'all' ? items : items.filter((i) => i.category === cur && (!sub || i.sub_category_id === sub))
   const subs = cur !== 'often' && cur !== 'all' ? [...new Map(items.filter((i) => i.category === cur).map((i) => [i.sub_category_id, i.sub_category])).entries()] : []
 
+  // The route the server will give (approvals.Chain, approvalmatrix.Steps, WithAmount): Cluster Manager for an event,
+  // the L1 and L2 of the items' categories (a vendor's items for different approvers become separate requests), then
+  // C1 / C2 by amount.
   function route(g: { wh: boolean; lines: Draft[] }) {
     if (!form) return ''
-    if (whProp) return 'Warehouse Manager'
-    if (kindProp) return (form.preop_members.find((m) => m.id === preop)?.name || 'Pre-opening Team') + ' (Pre-opening Team)'
     const s = form.settings
-    if (g.wh && !s.wh_approval) return 'No approval needed'
     const amt = g.lines.reduce((t, d) => t + lineValue(d.qty, rateOf(d), gstOf(d)), 0)
-    const steps: string[] = []
-    if ((evt && s.evt_l2) || (s.l2_above > 0 && amt > s.l2_above)) steps.push('Cluster Manager')
-    if (s.cc_all || !steps.length) steps.push('Cost Controller')
-    return steps.join(' → ')
+    const lim = s.amount_approvals?.[whProp ? 'warehouse' : kindProp ? 'preopening' : 'property'] || { c1: 0, c2: 0 }
+    const c2 = lim.c2 > 0 && amt > lim.c2
+    const amountSteps = [...((lim.c1 > 0 && amt > lim.c1) || (c2 && lim.c1 > 0) ? ['C1'] : []), ...(c2 ? ['C2'] : [])]
+    if (whProp) return ['Warehouse Approver L1', 'Warehouse Approver L2', ...amountSteps].join(' → ')
+    if (g.wh && !s.wh_approval) return 'No approval needed'
+    const pairs = [...new Set(g.lines.map((d) => byId.get(d.sku_id)?.category || ''))].map((cat) => {
+      const a = form.approvers?.find((x) => x.category === cat)
+      if (!a || !a.l1 || !a.l2) return `L1 / L2 not set for ${cat}: ask the System Admin (Users & Rights › Approval matrix)`
+      return a.l1 === a.l2 ? `${a.l1} (L1 and L2)` : `${a.l1} (L1) → ${a.l2} (L2)`
+    })
+    const steps = [...(evt && s.evt_l2 && !kindProp ? ['Cluster Manager'] : []), pairs.join('  |  '), ...(g.wh ? [] : amountSteps)]
+    return steps.join(' → ') + (pairs.length > 1 ? ' (one request per approver pair)' : '')
   }
   function repeatLast() {
     const last = form?.last
@@ -207,7 +217,10 @@ export function NewRequestPage() {
   const submit = () => {
     const noRate = lines.filter((d) => byId.get(d.sku_id) && pick(d).rate == null && !(d.est_rate > 0)).map((d) => byId.get(d.sku_id)!.item_name)
     if (noRate.length) return a.setErrors([`Enter an estimated rate for: ${noRate.join(', ')}. These vendors have no rate for them yet.`])
-    const body = { property_id: pid, lines, event_reason: evt ? evtWhy : '', event_note: evt ? evtNote : '', preop_user_id: kindProp ? preop : 0 }
+    // The event box ticked without a reason is refused here (and by the server), never sent as a normal request.
+    if (evt && !evtWhy.trim()) return a.setErrors(["You ticked 'Ordering extra for an event': choose the event reason and add the details, or untick the box."])
+    if (evt && evtNote.trim().length < 5) return a.setErrors(['Add the event details so the Cluster Manager can decide.'])
+    const body = { property_id: pid, lines, event: evt, event_reason: evt ? evtWhy : '', event_note: evt ? evtNote : '', preop_user_id: kindProp ? preop : 0 }
     a.run(() => editId ? put(`/requests/${editId}`, body) : post('/requests', body), (r: any) => { draft.clear(); nav(editId ? '/documents/' + editId : '/requests'); return r.message })
   }
 
@@ -252,8 +265,6 @@ export function NewRequestPage() {
             <label className="field"><span>Property</span>
               <SearchSelect value={String(pid)} onChange={(v) => setPid(+v)} placeholder="Search property or code" ariaLabel="Property"
                 items={props.map((p) => ({ value: String(p.id), label: p.name, hint: [p.code, KIND[p.kind]].filter(Boolean).join(' · ') }))} /></label>
-            {kindProp && <label className="field"><span>Pre-opening approver</span>
-              <select value={preop} onChange={(e) => setPreop(+e.target.value)}>{form!.preop_members.map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}</select></label>}
             <label className="field"><span>Find an item</span><input type="search" value={find} onChange={(e) => setFind(e.target.value)} placeholder="Name, brand, code or sub-category" aria-label="Find an item" /></label>
           </div>{error && <p className="note bad">{error.message}</p>}
             {props.some((p) => p.id === pid && !p.doc_code) && <p className="note warn">This property has no document code yet, so a request cannot be numbered. Ask the System Admin to set its 2-letter code under Settings → Properties.</p>}</section>

@@ -17,12 +17,14 @@ import { useSession } from '../auth/session'
 export interface Vendor {
   id: number; code: string; vendor_type: string; legal_name: string; address: string; city: string; pin: string; contact_person: string; mobile: string; email: string
   gst_registered: boolean; gstin: string; pan: string; state_code: string; msme: boolean; udyam: string; bank_holder: string; bank_account_masked: string; ifsc: string; fin_change?: string
-  bank_proof_file_id: number | null; msme_file_id: number | null; bank_verified: boolean; bank_verified_by: string; payment_terms: string; sheet_mode: string; sheet_time: string; sheet_channel: string
+  bank_proof_file_id: number | null; msme_file_id: number | null; bank_verified: boolean; bank_verified_by: string; payment_terms: string; opening_balance: number; opening_as_on: string; sheet_mode: string; sheet_time: string; sheet_channel: string
   active: boolean; inactive_reason: string; sub_category_ids: number[]; bill_type_ids: number[]; supplies: string[]
 }
 
 const blank = { vendor_type: 'goods', legal_name: '', address: '', city: '', pin: '', contact_person: '', mobile: '', email: '', gst_registered: true, gstin: '', pan: '',
-  state_code: '', msme: false, udyam: '', bank_holder: '', bank_account: '', bank_account_confirm: '', ifsc: '', payment_terms: 'Net 30', sub_category_ids: [] as number[], bill_type_ids: [] as number[] }
+  state_code: '', msme: false, udyam: '', bank_holder: '', bank_account: '', bank_account_confirm: '', ifsc: '', payment_terms: 'Net 30', sub_category_ids: [] as number[], bill_type_ids: [] as number[],
+  // Opening balance from before Purchase Desk (a vendor already in Zoho): kind '' none, 'adv' advance already paid (−), 'due' earlier bills owed (+).
+  opening_kind: '' as '' | 'adv' | 'due', opening_amount: '', opening_as_on: '' }
 
 export function VendorForm() {
   const { id } = useParams()
@@ -45,7 +47,8 @@ export function VendorForm() {
     if (!id) return
     get<Vendor>('/vendors/' + id).then((v) => {
       setOrig(v)
-      setF({ ...blank, ...v, bank_account: '', bank_account_confirm: '' })
+      setF({ ...blank, ...v, bank_account: '', bank_account_confirm: '', opening_kind: v.opening_balance < 0 ? 'adv' : v.opening_balance > 0 ? 'due' : '',
+        opening_amount: v.opening_balance ? String(Math.abs(v.opening_balance)) : '', opening_as_on: v.opening_as_on || '' })
     })
   }, [id])
   const set = <K extends keyof typeof f>(k: K, v: (typeof f)[K]) => setF({ ...f, [k]: v })
@@ -94,6 +97,16 @@ export function VendorForm() {
               <Field label="Cancelled cheque or bank letter"><input type="file" accept="image/*,application/pdf" onChange={(e) => setProof(e.target.files?.[0] || null)} /></Field>
               <Field label="Payment terms"><select value={f.payment_terms} onChange={(e) => set('payment_terms', e.target.value)}>{PAYMENT_TERMS.map((t) => <option key={t}>{t}</option>)}</select></Field>
             </div></section>
+          <section className="card"><h2>Opening balance</h2>
+            <p className="hint">For a vendor that already has a ledger (for example in Zoho) from before Purchase Desk. An <b>advance already paid</b> shows as − in the vendor's statement and is taken off its next invoices at payment approval; <b>earlier bills owed</b> show as +.</p>
+            <div className="grid3">
+              <Field label="Opening balance"><select value={f.opening_kind} onChange={(e) => setF({ ...f, opening_kind: e.target.value as typeof f.opening_kind, opening_amount: e.target.value ? f.opening_amount : '' })}>
+                <option value="">None</option><option value="adv">Advance already paid (−)</option><option value="due">Earlier bills owed (+)</option></select></Field>
+              {f.opening_kind && <Field label="Amount (₹)"><input type="number" min="0" step="0.01" inputMode="decimal" value={f.opening_amount} onChange={(e) => set('opening_amount', e.target.value)} placeholder="e.g. 700" /></Field>}
+              {f.opening_kind && <Field label="As on"><input type="date" max={new Date().toISOString().slice(0, 10)} value={f.opening_as_on} onChange={(e) => set('opening_as_on', e.target.value)} /></Field>}
+            </div>
+            {f.opening_kind && +f.opening_amount > 0 && <p className="note">The statement starts at {f.opening_kind === 'adv' ? '−' : ''}₹{(+f.opening_amount).toLocaleString('en-IN')}.</p>}
+          </section>
           <section className="card"><h2>What they supply</h2>
             {goods ? <>
               <Checks label="Sub-categories" placeholder="Choose sub-categories" value={f.sub_category_ids} onChange={(v) => set('sub_category_ids', v)} options={(l?.subCategories || []).filter((s) => s.active).map((s) => [s.id, `${s.name} (${s.category})`])} />
@@ -112,7 +125,9 @@ export function VendorForm() {
           <Errors list={a.errors} />
           {!canSave && <p className="note">View only: Accounts Payable adds and edits vendors, and Finance approves each change.</p>}
           {canSave && <button className="btn" disabled={a.busy} onClick={() => a.run(async () => {
-              const r: any = await upload(id ? '/vendors/' + id : '/vendors', id && f.ifsc.trim().toUpperCase() === (orig?.ifsc || '') ? { ...f, ifsc: '' } : f, { bank_proof: proof, msme_certificate: f.msme ? msmeCert : null }, id ? 'PUT' : 'POST')
+              const opening = f.opening_kind ? (f.opening_kind === 'adv' ? -1 : 1) * (+f.opening_amount || 0) : 0
+              const body = { ...f, opening_balance: opening, opening_as_on: opening ? f.opening_as_on : '' }
+              const r: any = await upload(id ? '/vendors/' + id : '/vendors', id && f.ifsc.trim().toUpperCase() === (orig?.ifsc || '') ? { ...body, ifsc: '' } : body, { bank_proof: proof, msme_certificate: f.msme ? msmeCert : null }, id ? 'PUT' : 'POST')
               if (!id && goods && portalOn) {
                 // The vendor is saved either way; a problem with the sign-in is fixed on its page.
                 try { r.portal = await post<any>(`/vendors/${r.id}/portal`, { email: (portalEmail ?? f.email).trim() }) } catch (e) { r.portalError = e instanceof ApiError ? e.errors.join(' ') : String(e) }

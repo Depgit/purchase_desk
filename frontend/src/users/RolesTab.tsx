@@ -22,8 +22,10 @@ interface Group { id: number; name: string; sort: number; roles: number }
 
 const RIGHTS: Record<string, string> = { raise: 'Raise request or bill', approve: 'Approve', issue_po: 'Issue PO', receive: 'Receive or dispatch goods', match: 'Match invoice',
   pay: 'Payment and Zoho', masters: 'Edit masters (properties, mapping, rates, bill types)', catalog: 'Create and edit items and vendors (Finance approves)', upload: 'Upload opening and bulk data' }
-const STEPS: [string, string][] = [['cc', 'Cost Controller: approves requests'], ['l2', 'Cluster Manager: approves event requests and bills'], ['preop', 'Pre-opening Team: approves warehouse and pre-opening orders'],
-  ['purchase', 'Purchase Team: issues POs'], ['store', 'Receiving / Store: receives goods'], ['wh', 'Warehouse Manager: dispatches and receives'], ['ap', 'Accounts Payable: matches invoices'],
+const STEPS: [string, string][] = [['al1', 'Approver L1: approves first (named per property and category on the Approval matrix)'], ['al2', 'Approver L2: approves after L1 (Approval matrix)'],
+  ['c1', 'Amount Approver C1: above the C1 amount, after L2'], ['c2', 'Amount Approver C2: above the C2 amount, after C1'], ['cc', 'Cost Controller: budgets (no longer approves new requests)'], ['l2', 'Cluster Manager: approves event requests and bills'], ['preop', 'Pre-opening Team: approves and receives pre-opening orders'],
+  ['purchase', 'Purchase Team: issues POs'], ['store', 'Receiving / Store: receives goods'], ['whl1', 'Warehouse Approver L1: approves warehouse requests by sub-category'],
+  ['whl2', 'Warehouse Approver L2: approves warehouse requests, runs stock and dispatch'], ['whs', 'Warehouse Staff: raises and receives at the warehouse'], ['ap', 'Accounts Payable: matches invoices'],
   ['finance', 'Finance: approves payment'], ['staff', 'Property staff: raises requests'], ['l1', 'Property Manager: raises requests'], ['', 'No step in the flow: view and reports only']]
 const stepName = (s: string) => s === 'admin' ? 'System Admin' : (STEPS.find(([k]) => k === s)?.[1].split(':')[0] || s || 'No step')
 const LEVELS: [Level, string][] = [['none', 'No access'], ['view', 'View'], ['edit', 'Edit']]

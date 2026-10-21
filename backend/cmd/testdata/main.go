@@ -218,7 +218,16 @@ var users = []user{
 	{"Manju Reddy", "manju.reddy@test.saltstayz.com", "", "Stores", "store", "P07;P09", ""},
 	{"Kavya Joshi", "kavya.joshi@test.saltstayz.com", "", "Finance", "ap", "all", ""},
 	{"Rohan Mehra", "rohan.mehra@test.saltstayz.com", "", "Finance", "finance", "all", ""},
-	{"Vikram Singh", "vikram.singh@test.saltstayz.com", "", "Warehouse", "wh", "all", ""},
+	{"Vikram Singh", "vikram.singh@test.saltstayz.com", "", "Head office", "c2", "all", ""},
+	{"Sanjay Kulkarni", "sanjay.kulkarni@test.saltstayz.com", "", "Operations", "c1", "all", ""},
+	// L1 / L2 of the approval matrix (15-approval-matrix.xlsx): each Property Manager is L1 at their properties,
+	// Anjali at the pre-opening property, Amit Bansal L2 everywhere.
+	{"Arun Verma", "arun.verma@test.saltstayz.com", "", "Operations", "al1", "P01;P02", ""},
+	{"Kiran Rao", "kiran.rao@test.saltstayz.com", "", "Operations", "al1", "P03;P04", ""},
+	{"Sameer Khan", "sameer.khan@test.saltstayz.com", "", "Operations", "al1", "P05;P06", ""},
+	{"Lakshmi N", "lakshmi.n@test.saltstayz.com", "", "Operations", "al1", "P07", ""},
+	{"Anjali Rao", "anjali.rao@test.saltstayz.com", "", "Projects", "al1", "P09", ""},
+	{"Amit Bansal", "amit.bansal@test.saltstayz.com", "", "Finance", "al2", "all", ""},
 	{"Ajay Thakur", "ajay.thakur@test.saltstayz.com", "", "Warehouse", "whs", "P08", ""},
 	{"Divya Menon", "divya.menon@test.saltstayz.com", "", "Warehouse", "whl1", "P08", ""},
 	{"Harish Bhat", "harish.bhat@test.saltstayz.com", "", "Warehouse", "whl1", "P08", ""},
@@ -502,5 +511,24 @@ func files(today time.Time) []file {
 	}
 	f14 := file{"14-request-item-list-P01.xlsx", []spreadsheet.Sheet{sheet("Request lines", []string{"sku_code", "item_name", "quantity", "rate"}, rl)}}
 
-	return []file{f01, f02, f03, f04, f05, f06, f07, f08, f09, f10, f11, f12, f13, f14, testPlan(codes)}
+	// 15 approval matrix: every live and pre-opening property × category gets its L1 and L2 (bill types are added
+	// by hand in part A, so their rows are filled on the Users & Rights screen afterwards).
+	matrix := [][]string{}
+	l1Of := map[string]string{"P09": "anjali.rao@test.saltstayz.com"}
+	for _, p := range properties {
+		if p.manager != "" {
+			l1Of[p.code] = p.manager
+		}
+	}
+	for _, p := range properties {
+		if p.stage != "live" && p.stage != "preopening" {
+			continue
+		}
+		for _, c := range cats {
+			matrix = append(matrix, []string{p.code, c[0], "", l1Of[p.code], "amit.bansal@test.saltstayz.com"})
+		}
+	}
+	f15 := file{"15-approval-matrix.xlsx", []spreadsheet.Sheet{sheet("Approval matrix", []string{"property_code", "category", "bill_type", "l1_login", "l2_login"}, matrix)}}
+
+	return []file{f01, f02, f03, f04, f05, f06, f07, f08, f09, f10, f11, f12, f13, f14, f15, testPlan(codes)}
 }

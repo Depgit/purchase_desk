@@ -163,6 +163,7 @@ func (s *Service) Routes(r chi.Router) {
 	for name, k := range s.corporateKinds() {
 		s.kinds[name] = k
 	}
+	s.kinds["approval_matrix"] = s.matrixKind()
 	r.Get("/uploads/{kind}/sample", httpjson.Wrap(s.sample))
 	r.Get("/uploads/{kind}/export", httpjson.Wrap(s.export))
 	r.Get("/uploads/{kind}/workbook", httpjson.Wrap(s.workbook))

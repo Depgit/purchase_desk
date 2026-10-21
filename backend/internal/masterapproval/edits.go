@@ -31,7 +31,7 @@ var labels = map[string]string{"item_name": "name", "gst_pct": "GST %", "hsn": "
 	"is_fb": "food & beverage", "legal_name": "legal name", "contact_person": "contact person", "gst_registered": "GST status", "gstin": "GSTIN",
 	"pan": "PAN", "state_code": "state code", "msme": "MSME", "udyam": "Udyam number", "msme_file_id": "MSME certificate", "bank_holder": "account holder",
 	"bank_account_enc": "bank account", "ifsc": "IFSC", "bank_proof_file_id": "bank proof", "payment_terms": "payment terms", "vendor_type": "vendor type",
-	"pin": "PIN code", "supplies": "what they supply"}
+	"pin": "PIN code", "supplies": "what they supply", "opening_balance": "opening balance", "opening_as_on": "opening balance date"}
 
 // Snapshot is a master's values now, to compare an edit with (table is the record's table).
 func Snapshot(ctx context.Context, q database.Q, table string, id int64) (map[string]any, error) {

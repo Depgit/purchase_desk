@@ -71,7 +71,7 @@ func c(key, label string) Column  { return Column{Key: key, Label: label} }
 func cr(key, label string) Column { return Column{Key: key, Label: label, Right: true} }
 
 var defs map[string]def
-var order = []string{"tracker", "three_way", "po_grn", "register", "budget", "budget_months", "category_cluster", "vendor_spend", "sku_spend", "ageing", "fnb", "bills", "payables", "rates"}
+var order = []string{"tracker", "three_way", "po_grn", "register", "budget", "budget_months", "over_budget", "category_cluster", "vendor_spend", "sku_spend", "ageing", "fnb", "bills", "payables", "rates"}
 
 func init() {
 	defs = map[string]def{
@@ -95,6 +95,9 @@ func init() {
 				cr("var", "Over or under"), cr("pct", "Achievement %"), c("status", "Status")}, budgetVsActual},
 		"budget_months": {"Budget against actual, month by month", "Trend per property", "Budget",
 			[]Column{c("month", "Month"), c("property", "Property"), c("category", "Category"), cr("budget", "Budget"), cr("spent", "Approved spend"), cr("var", "Over or under"), cr("pct", "Achievement %")}, budgetMonths},
+		"over_budget": {"Approved over budget", "Requests approved above the month budget: who approved them and why", "Budget",
+			[]Column{c("req", "Request"), c("date", "Approved on"), c("property", "Property"), c("cluster", "Cluster"), c("vendor", "Vendor"), cr("amount", "Amount incl. GST"),
+				c("by", "Approved by"), c("reason", "Reason"), c("note", "Remark"), c("status", "Stage")}, overBudget},
 		"category_cluster": {"Category summary by cluster", "Management view of budget against spend by category", "Budget",
 			[]Column{c("cluster", "Cluster"), c("category", "Category"), cr("budget", "Budget"), cr("spent", "Approved spend"), cr("var", "Over or under"), cr("pct", "Achievement %")}, categoryCluster},
 		"vendor_spend": {"Spend by vendor", "Vendor concentration: approved purchases and bills, and what is still to pay", "Vendors, items and bills",
@@ -477,9 +480,9 @@ func skuSpend(ctx context.Context, s *Service, f Filter) ([][]any, []int64, erro
 func ageing(ctx context.Context, s *Service, f Filter) ([][]any, []int64, error) {
 	w, a := place(f, 1)
 	rows, err := s.DB.Query(ctx, `SELECT coalesce(d.po_number, d.number), CASE d.kind WHEN 'bill' THEN 'Utility or AMC bill' WHEN 'corp_purchase' THEN 'Corporate purchase' WHEN 'corp_bill' THEN 'Corporate bill' ELSE CASE WHEN d.is_transfer THEN 'Warehouse transfer' ELSE 'Purchase' END END,
-		p.name, CASE d.status WHEN 'PENDING' THEN CASE d.route_steps[d.step_idx+1] WHEN 'cc' THEN 'Cost Controller' WHEN 'l2' THEN 'Cluster Manager' WHEN 'preop' THEN 'Pre-opening Team' WHEN 'cl1' THEN 'Department L1' WHEN 'cl2' THEN 'Department L2' ELSE 'Approver' END
+		p.name, CASE d.status WHEN 'PENDING' THEN CASE d.route_steps[d.step_idx+1] WHEN 'cc' THEN 'Cost Controller' WHEN 'l2' THEN 'Cluster Manager' WHEN 'preop' THEN 'Pre-opening Team' WHEN 'cl1' THEN 'L1 approver' WHEN 'cl2' THEN 'L2 approver' WHEN 'whl1' THEN 'Warehouse Approver L1' WHEN 'whl2' THEN 'Warehouse Approver L2' WHEN 'whx' THEN 'Warehouse Approver' WHEN 'c1' THEN 'C1 approver' WHEN 'c2' THEN 'C2 approver' WHEN 'cfo' THEN 'CFO' ELSE 'Approver' END
 			WHEN 'RETURNED' THEN 'Requester' WHEN 'APPROVED' THEN CASE WHEN d.kind IN ('bill','corp_bill') THEN 'Finance' ELSE 'Purchase Team' END
-			WHEN 'PO_ISSUED' THEN CASE WHEN d.is_transfer OR p.kind<>'live' THEN 'Warehouse Manager' WHEN d.kind='corp_purchase' THEN 'Requester' ELSE 'Receiving / Store' END
+			WHEN 'PO_ISSUED' THEN CASE WHEN d.is_transfer THEN 'Warehouse Approver' WHEN p.kind='warehouse' THEN 'Warehouse Approver L2' WHEN p.kind='preopening' THEN 'Requester / Pre-opening Team' WHEN d.kind='corp_purchase' THEN 'Requester' ELSE 'Receiving / Store' END
 			WHEN 'WH_SENT' THEN 'Receiving / Store' ELSE '' END,
 		`+stageSQL+`, current_date - d.updated_at::date,
 		CASE WHEN d.kind IN ('bill','corp_bill') THEN coalesce((SELECT i.amount FROM invoice i WHERE i.document_id=d.id AND i.status<>'VOID' LIMIT 1),0) ELSE (SELECT coalesce(sum(`+lineValue+`),0) FROM document_line l WHERE l.document_id=d.id) END, d.id
@@ -546,6 +549,15 @@ func bills(ctx context.Context, s *Service, f Filter) ([][]any, []int64, error) 
 		FROM document d JOIN bill_type bt ON bt.id=d.bill_type_id JOIN vendor v ON v.id=d.vendor_id LEFT JOIN invoice i ON i.document_id=d.id AND i.status<>'VOID'`+placeJoin+`
 		WHERE d.kind='bill' AND d.created_at >= $1 AND d.created_at < $2::date + 1`+w+` ORDER BY d.period_start DESC, d.number`, append([]any{f.From, f.To}, a...)...)
 	return collect(rows, err, 11)
+}
+
+func overBudget(ctx context.Context, s *Service, f Filter) ([][]any, []int64, error) {
+	w, a := place(f, 3)
+	rows, err := s.DB.Query(ctx, `SELECT d.number, coalesce(to_char(d.approved_at,'YYYY-MM-DD'),''), p.name, k.name, v.legal_name,
+		(SELECT coalesce(sum(`+lineValue+`),0) FROM document_line l WHERE l.document_id=d.id), d.over_budget_by, d.over_budget_reason, d.over_budget_note, `+stageSQL+`, d.id
+		FROM document d JOIN vendor v ON v.id=d.vendor_id`+placeJoin+`
+		WHERE d.over_budget_reason<>'' AND d.created_at >= $1 AND d.created_at < $2::date + 1`+w+` ORDER BY d.approved_at DESC NULLS LAST, d.number`, append([]any{f.From, f.To}, a...)...)
+	return collect(rows, err, 10)
 }
 
 func payables(ctx context.Context, s *Service, f Filter) ([][]any, []int64, error) {

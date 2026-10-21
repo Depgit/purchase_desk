@@ -223,6 +223,9 @@ type AtApproval struct {
 	Advance *advances.Ask     `json:"advance"`
 	// Terms are the payment terms the approver chose for this PO (blank: the vendor's own). "Advance" asks the advance.
 	Terms string `json:"payment_terms"`
+	// DeliverBy is the delivery date the approver gives (YYYY-MM-DD; blank: today + Flow Settings days). Once it has
+	// passed (by po_expiry_days) the undelivered balance is rejected (poexpiry).
+	DeliverBy string `json:"deliver_by"`
 }
 
 // AutoResult is what Auto did: the PO raised (sent to the vendor), or the PO held for Finance with the advance asked.
@@ -310,6 +313,13 @@ func Auto(ctx context.Context, tx pgx.Tx, u *access.User, role string, d *docume
 		return out, err
 	}
 	due := clock.Today().AddDate(0, 0, days)
+	if strings.TrimSpace(a.DeliverBy) != "" {
+		t, ok := clock.ParseDate(a.DeliverBy)
+		if !ok || t.Before(clock.Today()) {
+			return out, httpjson.Bad("Choose a delivery date for the PO, today or later.")
+		}
+		due = t
+	}
 	note := fmt.Sprintf("%s, deliver by %s", terms, due.Format("2 Jan"))
 	if len(confirmed) > 0 {
 		note += ". Rate confirmed: " + strings.Join(confirmed, "; ")

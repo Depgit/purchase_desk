@@ -3,7 +3,7 @@
 import { useLookups } from '../api/lookups'
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { post, put } from '../api/client'
+import { put } from '../api/client'
 import type { Doc } from '../api/types'
 import { useApi } from '../api/useApi'
 import { useSession } from '../auth/session'
@@ -11,13 +11,9 @@ import { UploadModal } from '../bulkupload/UploadModal'
 import { dateTime, day, inr, qty } from '../format/format'
 import { ActiveToggle } from '../ui/ActiveToggle'
 import { DataTable } from '../ui/DataTable'
-import { Errors } from '../ui/Errors'
-import { Field } from '../ui/Field'
-import { Modal } from '../ui/Modal'
 import { Pill } from '../ui/Pill'
-import { useAction } from '../ui/useAction'
 import { useToast } from '../ui/Toast'
-import { ScheduleModal, type Partner } from './DispatchPanel'
+import { PartnerModal, ScheduleModal, type Partner } from './DispatchPanel'
 import { useScreen } from '../screenaccess/screen'
 
 interface Stock { sku_id: number; sku_code: string; item: string; brand: string; pack_size: string; sub_category: string; opening: number; purchased: number; issued: number; pilferage: number; in_transit: number; closing: number; min_level: number; rate: number; value: number; pilferage_value: number; status: string
@@ -31,7 +27,8 @@ export function WarehousePage() {
   const nav = useNavigate()
   const { hasStep, hasRight } = useSession()
   const sc = useScreen('warehouse')
-  const wh = sc.edit && hasStep('wh')
+  const wh = sc.edit && hasStep('whl2') // stock, reorder levels, delivery partners: the Warehouse Approver L2
+  const dispatcher = sc.edit && hasStep('whl1', 'whl2') // either Warehouse Approver schedules and dispatches
   const [tab, setTab] = useState<Tab>('stock')
   const stock = useApi<Stock[]>('/warehouse/stock')
   const tr = useApi<T[]>('/warehouse/transfers')
@@ -39,7 +36,7 @@ export function WarehousePage() {
   const [buy, setBuy] = useState<Set<string | number>>(new Set()) // items ticked to buy for the shortfall
   const l = useLookups()
   const whProp = (l?.properties || []).find((p) => p.kind === 'warehouse' && p.active)
-  const raises = hasStep('wh', 'whs') && hasRight('raise')
+  const raises = hasStep('whl2', 'whs') && hasRight('raise')
   // The shortfall goes into a new warehouse request, pre-filled with the missing quantities (rounded up).
   const raiseShort = (items: Stock[]) => whProp && nav(`/requests/new?property=${whProp.id}&lines=${items.map((s) => `${s.sku_id}:${Math.ceil(s.short)}`).join(',')}`)
   const [trip, setTrip] = useState(false)
@@ -57,7 +54,7 @@ export function WarehousePage() {
     <>
       <div className="head"><div><h1>Warehouse</h1><p className="sub">Opening + purchased − issued to properties − pilferage − in transit = closing stock. Movements come from goods receipts and transfer orders, so the ledger always reconciles.</p></div>
         <div className="acts">{wh && hasRight('upload') && <button className="btn ghost" onClick={() => setUpload(true)}>Upload opening stock</button>}
-          {wh && <button className="btn" onClick={() => nav('/requests/new')}>+ Stock or pre-opening request</button>}</div></div>
+          {wh && <button className="btn" onClick={() => nav('/requests/new')}>+ Stock request</button>}</div></div>
       <div className="tiles">
         {tile('stock', 'Stock on hand', inr(value((s) => s.closing)))}
         {tile('dispatch', 'Orders to dispatch', toDispatch.length)}
@@ -70,7 +67,7 @@ export function WarehousePage() {
       <div className="tabs">{([['stock', 'Stock ledger'], ['dispatch', `To dispatch (${toDispatch.length})`], ['schedule', `Delivery schedule (${scheduled.length})`], ['transit', `In transit (${transit.length})`],
         ['incoming', `Incoming to warehouse (${incoming.length})`], ['moves', 'Movements'], ['partners', 'Delivery partners']] as [Tab, string][]).map(([k, l]) =>
         <button key={k} className={tab === k ? 'on' : ''} onClick={() => setTab(k)}>{l}</button>)}</div>
-      {tab === 'stock' && st.some((s) => s.short > 0) && <p className="note warn"><b>Properties have ordered more than the warehouse holds.</b> Short items are what is still to buy after stock and the warehouse's own open orders. {raises ? 'Tick them and raise a purchase for the shortfall; what is in stock can be sent now, the rest follows when it arrives.' : 'The Warehouse Manager or Warehouse Staff buy them.'}</p>}
+      {tab === 'stock' && st.some((s) => s.short > 0) && <p className="note warn"><b>Properties have ordered more than the warehouse holds.</b> Short items are what is still to buy after stock and the warehouse's own open orders. {raises ? 'Tick them and raise a purchase for the shortfall; what is in stock can be sent now, the rest follows when it arrives.' : 'The Warehouse Approver L2 or Warehouse Staff buy them.'}</p>}
       {tab === 'stock' && raises && buy.size > 0 && <div className="tools"><span style={{ flex: 1 }} /><button className="btn" disabled={!whProp} onClick={() => raiseShort(st.filter((s) => buy.has(s.sku_id) && s.short > 0))}>Raise purchase for shortfall ({buy.size})</button></div>}
       {tab === 'stock' && <DataTable screen="wh-stock" rows={st} rowKey={(s) => s.sku_id} search={(s) => [s.sku_code, s.item, s.brand].join(' ')}
         selectable={raises ? (s) => s.short > 0 : undefined} selected={buy} onSelect={setBuy}
@@ -94,8 +91,8 @@ export function WarehousePage() {
         ]} csvName="warehouse-stock" />}
       {tab === 'dispatch' && <>
         <p className="sub">Orders the properties are waiting for. Schedule each delivery with a partner, date and slot, then dispatch from the order. Tick several to put them on one trip.</p>
-        <DataTable screen="wh-dispatch" rows={toDispatch} rowKey={(d) => d.id} date={{ label: 'Raised', value: (d) => d.created_at }} onOpen={(d) => nav('/documents/' + d.id)} selectable={wh ? () => true : undefined} selected={sel} onSelect={setSel}
-          actions={wh ? <button className="btn" disabled={!sel.size} onClick={() => setTrip(true)}>Schedule {sel.size || ''} selected on one trip</button> : null}
+        <DataTable screen="wh-dispatch" rows={toDispatch} rowKey={(d) => d.id} date={{ label: 'Raised', value: (d) => d.created_at }} onOpen={(d) => nav('/documents/' + d.id)} selectable={dispatcher ? () => true : undefined} selected={sel} onSelect={setSel}
+          actions={dispatcher ? <button className="btn" disabled={!sel.size} onClick={() => setTrip(true)}>Schedule {sel.size || ''} selected on one trip</button> : null}
           search={(d) => [d.po_number, d.number, d.property].join(' ')}
           columns={[
             { key: 'wt', label: 'Order', render: (d) => <>{d.po_number}<br /><span className="hint">{d.number}</span></>, csv: (d) => d.po_number },
@@ -180,20 +177,3 @@ function Partners({ canEdit }: { canEdit: boolean }) {
   )
 }
 
-function PartnerModal({ p, onClose, onDone }: { p: Partner | null; onClose: () => void; onDone: () => void }) {
-  const [f, setF] = useState({ name: p?.name || '', kind: p?.kind || 'partner', driver: p?.driver || '', phone: p?.phone || '' })
-  const a = useAction()
-  return (
-    <Modal title={p ? 'Edit delivery partner' : 'Add delivery partner'} onClose={onClose}>
-      <div className="grid2">
-        <Field label="Name"><input value={f.name} onChange={(e) => setF({ ...f, name: e.target.value })} /></Field>
-        <Field label="Type"><select value={f.kind} onChange={(e) => setF({ ...f, kind: e.target.value })}><option value="own">Own vehicle</option><option value="partner">Delivery partner</option></select></Field>
-        <Field label="Driver or contact"><input value={f.driver} onChange={(e) => setF({ ...f, driver: e.target.value })} /></Field>
-        <Field label="Phone"><input value={f.phone} onChange={(e) => setF({ ...f, phone: e.target.value })} /></Field>
-      </div>
-      <Errors list={a.errors} />
-      <div className="btns"><button className="btn ghost" onClick={onClose}>Cancel</button>
-        <button className="btn" disabled={a.busy} onClick={() => a.run(() => p ? put('/delivery-partners/' + p.id, f) : post('/delivery-partners', f), () => { onDone(); return f.name + ' saved' })}>Save</button></div>
-    </Modal>
-  )
-}

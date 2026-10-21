@@ -45,7 +45,7 @@ func (s *Service) corporateKinds() map[string]*kind {
 		"expense_heads": {
 			title: "Expense heads", module: "Corporate", allowed: masters,
 			required: []string{"expense_head"},
-			sample:   "expense_head\nTravel and stay\nSoftware subscriptions\n",
+			sample:   "expense_head,sub_categories\nTravel and stay,\nOffice supplies;Stationery,ST\n",
 			keyOf:    key("expense_head"),
 			onSame:   seenAs("expense_head"),
 			export: func(ctx context.Context, q database.Q, r *http.Request) ([]string, [][]string, error) {
@@ -60,11 +60,30 @@ func (s *Service) corporateKinds() map[string]*kind {
 				if errs := corporate.ValidateHead(ctx, x.q, &name); len(errs) > 0 {
 					return bad("%s", strings.Join(errs, " "))
 				}
-				return result{ok: true, msg: "New expense head (waits for Finance's approval)", obj: name}
+				// The sub-categories it covers (names or 2-letter codes, separated by ;): their items fill this head.
+				subs := []int64{}
+				for _, c := range strings.Split(row.Get("sub_categories"), ";") {
+					if strings.TrimSpace(c) == "" {
+						continue
+					}
+					var id int64
+					if err := x.q.QueryRow(ctx, `SELECT id FROM sub_category WHERE norm_key(name)=norm_key($1) OR upper(code)=upper(trim($1)) ORDER BY (upper(code)=upper(trim($1))) DESC LIMIT 1`, c).Scan(&id); err != nil {
+						return bad("Unknown sub-category %q", c)
+					}
+					if x.dup("sub|" + fmt.Sprint(id)) {
+						return bad("Sub-category %q is given to two heads in this file", c)
+					}
+					subs = append(subs, id)
+				}
+				if errs := corporate.CheckHeadSubs(ctx, x.q, 0, subs); len(errs) > 0 {
+					return bad("%s", strings.Join(errs, " "))
+				}
+				return result{ok: true, msg: "New expense head (waits for Finance's approval)", obj: headRow{name, subs}}
 			},
 			commit: func(ctx context.Context, tx pgx.Tx, x *run, objs []any) error {
 				for _, o := range objs {
-					if _, err := corporate.SaveHead(ctx, tx, x.u, o.(string)); err != nil {
+					h := o.(headRow)
+					if _, err := corporate.SaveHead(ctx, tx, x.u, h.name, h.subs); err != nil {
 						return err
 					}
 				}
@@ -126,7 +145,7 @@ func (s *Service) corporateKinds() map[string]*kind {
 		// (nothing is saved). The rate comes from the chosen vendor's rate card when it has one, else from the file.
 		"corp_lines": {
 			title: "Corporate purchase lines", module: "Corporate", allowed: func(u *access.User) bool { return u.HasRight(access.Raise) },
-			required: []string{"sku_code", "expense_head", "quantity"},
+			required: []string{"sku_code", "quantity"}, // a blank expense_head takes the head covering the item's sub-category
 			sample:   "sku_code,item_name,expense_head,quantity,rate\nST-0001,A4 paper ream,Office supplies,10,\nEL-0002,LED tube 20 W,Office supplies,4,240\n",
 			check: func(ctx context.Context, x *run, row csvfile.Row) result {
 				if strings.TrimSpace(row.Get("sku_code")) == "" && row.Get("quantity") == "" {
@@ -138,7 +157,12 @@ func (s *Service) corporateKinds() map[string]*kind {
 				}
 				var head int64
 				var ok bool
-				if err := x.q.QueryRow(ctx, `SELECT id, active AND fin_status='approved' FROM expense_head WHERE norm_key(name)=norm_key($1)`, row.Get("expense_head")).Scan(&head, &ok); err != nil {
+				if strings.TrimSpace(row.Get("expense_head")) == "" {
+					if it.HeadID == nil {
+						return bad("%s: give the expense head (no head in Corporate Setup covers its sub-category %s)", it.Code, it.SubCat)
+					}
+					head, ok = *it.HeadID, true
+				} else if err := x.q.QueryRow(ctx, `SELECT id, active AND fin_status='approved' FROM expense_head WHERE norm_key(name)=norm_key($1)`, row.Get("expense_head")).Scan(&head, &ok); err != nil {
 					return bad("Unknown expense head %q. Use a name from Corporate Setup, Expense heads", row.Get("expense_head"))
 				}
 				if !ok {
@@ -164,4 +188,10 @@ func (s *Service) corporateKinds() map[string]*kind {
 			},
 		},
 	}
+}
+
+// headRow is a checked new expense head with the sub-categories it covers.
+type headRow struct {
+	name string
+	subs []int64
 }

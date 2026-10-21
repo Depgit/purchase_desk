@@ -127,7 +127,7 @@ export function NewBillPage() {
             bill_type_id: typeId, property_id: pid, vendor_id: vid, period_start: period, months: amc ? months : 1, invoice_number: invNo, invoice_date: invDate, invoice_amount: +amt, gst_pct: gst, remark,
           }, { invoice: file }), (r: any) => { draft.clear(); nav('/requests'); return r.message })}>Submit for approval</button></div>
         </section>
-        <section className="card"><h2>Approval route</h2><p>{data?.approver === 'cc' ? 'Cost Controller' : 'Cluster Manager'} → Finance payment approval → Zoho</p>
+        <section className="card"><h2>Approval route</h2><p>Cluster Manager → the bill type's L1 and L2 at this property (Users &amp; Rights › Approval matrix) → C1 / C2 above the Bills amounts → Finance payment approval → Zoho</p>
           <p className="hint">The system blocks a second bill for the same item, property and period, and a repeated invoice number for the same vendor.</p></section>
       </div>
     </>

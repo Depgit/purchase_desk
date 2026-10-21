@@ -33,7 +33,7 @@ const (
 var AllRights = []string{Raise, Approve, IssuePO, Receive, Match, Pay, Masters, Catalog, Upload}
 
 // Steps where a role can sit in the flow.
-var Steps = []string{"staff", "l1", "l2", "cc", "purchase", "store", "ap", "finance", "wh", "whs", "whl1", "whl2", "preop", "chef", "hchef", "creq", "dh", "capp", "admin", ""}
+var Steps = []string{"staff", "l1", "l2", "cc", "purchase", "store", "ap", "finance", "wh", "whs", "whl1", "whl2", "al1", "al2", "c1", "c2", "cfo", "preop", "chef", "hchef", "creq", "dh", "capp", "admin", ""}
 
 type Grant struct {
 	RoleID      int64    `json:"role_id"`
@@ -181,6 +181,21 @@ func covers(g Grant, propID, clusterID int64, cats []int64) bool {
 
 // Can returns the role that lets the user act at a flow step with a right, for a property and its categories,
 // or nil. An empty step or right matches any. The System Admin can act at every step.
+// WarehouseOnly reports a user whose every role is a warehouse role (Warehouse Staff, Warehouse Approver L1 or L2):
+// their lists show only the warehouse's own requests and the properties' orders on the warehouse, even when their
+// roles cover every property (so that they can approve and dispatch those orders).
+func (u *User) WarehouseOnly() bool {
+	if u.IsAdmin || len(u.Grants) == 0 {
+		return false
+	}
+	for _, g := range u.Grants {
+		if g.Step != "whs" && g.Step != "whl1" && g.Step != "whl2" {
+			return false
+		}
+	}
+	return true
+}
+
 func (u *User) Can(step, right string, propID, clusterID int64, cats []int64) *Grant {
 	if u.IsAdmin {
 		return &Grant{Name: "System Admin", Step: "admin"}

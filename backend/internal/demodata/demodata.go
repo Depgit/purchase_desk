@@ -59,6 +59,7 @@ func Load(ctx context.Context, db *pgxpool.Pool, box *encryption.Box) error {
 		if loaded < partWarehouse {
 			d.warehouse()
 		}
+		d.approvers()
 		// The sample masters (inserted without an author) count as approved by Finance.
 		for _, t := range []string{"category", "sub_category", "sku", "property", "bill_type", "expense_head"} {
 			d.ex(`UPDATE ` + t + ` SET fin_status='approved' WHERE fin_status='pending' AND created_by IS NULL`)
@@ -202,6 +203,8 @@ func (d *loader) core() {
 	user("Kavita Joshi", "kavita@demo.saltstayz.com", "", "Finance", "ap", "all", nil, nil, nil)
 	user("Rohit Mehra", "rohit@demo.saltstayz.com", "", "Finance", "finance", "all", nil, nil, nil)
 	user("Shalini Rao", "shalini@demo.saltstayz.com", "", "Projects", "preop", "all", nil, nil, nil)
+	user("Rahul Bose", "rahul@demo.saltstayz.com", "", "Operations", "c1", "all", nil, nil, nil) // C1: above the C1 limit, after L2
+	user("Kiran Desai", "kiran@demo.saltstayz.com", "", "Finance", "c2", "all", nil, nil, nil)   // C2: above the C2 limit, after C1
 	subs := map[string]int64{}
 	for _, s := range [][3]string{{"Guest Amenities", "Housekeeping", "GA"}, {"Cleaning Chemicals", "Housekeeping", "CC"}, {"Linen", "Housekeeping", "LN"},
 		{"Dry Groceries", "Food & Beverage", "GR"}, {"Dairy", "Food & Beverage", "DY"}, {"Electrical", "Engineering", "EL"}, {"Plumbing", "Engineering", "PL"},
@@ -306,13 +309,33 @@ func (d *loader) billsBudgetsCorporate() {
 	vendor("V021", "other", "Kapoor and Associates", "Delhi", "07AABFK4184K1ZC", true, true, "Net 15")
 }
 
+// approvers fills the approval matrix: Ravi is L1 and Amit L2 at every live property (each category and bill type);
+// at the pre-opening property Shalini is L1. C1 / C2 limits are set for the sample.
+func (d *loader) approvers() {
+	ex := d.ex
+	ex(`INSERT INTO user_role(user_id,role_id,scope) SELECT u.id, r.id, 'all' FROM app_user u, role r
+		WHERE (u.email, r.code) IN (('ravi@demo.saltstayz.com','al1'), ('shalini@demo.saltstayz.com','al1'), ('amit@demo.saltstayz.com','al2')) ON CONFLICT DO NOTHING`)
+	who := `(SELECT id FROM app_user WHERE email=$1)`
+	for _, kind := range []string{"live", "preopening"} {
+		l1 := "ravi@demo.saltstayz.com"
+		if kind == "preopening" {
+			l1 = "shalini@demo.saltstayz.com"
+		}
+		ex(`INSERT INTO approval_matrix(property_id,category_id,l1_user_id,l2_user_id) SELECT p.id, c.id, `+who+`, (SELECT id FROM app_user WHERE email='amit@demo.saltstayz.com')
+			FROM property p CROSS JOIN category c WHERE p.kind=$2 ON CONFLICT DO NOTHING`, l1, kind)
+		ex(`INSERT INTO approval_matrix(property_id,bill_type_id,l1_user_id,l2_user_id) SELECT p.id, b.id, `+who+`, (SELECT id FROM app_user WHERE email='amit@demo.saltstayz.com')
+			FROM property p CROSS JOIN bill_type b WHERE p.kind=$2 ON CONFLICT DO NOTHING`, l1, kind)
+	}
+	ex(`UPDATE setting SET value='{"property":{"c1":50000,"c2":100000},"preopening":{"c1":50000,"c2":100000},"warehouse":{"c1":100000,"c2":200000},"corporate":{"c1":100000,"c2":200000},"bills":{"c1":50000,"c2":100000}}'::jsonb WHERE key='amount_approvals'`)
+}
+
 // warehouse loads phase 4: the central warehouse, its manager, what it supplies, its rates, opening stock and delivery partners.
 func (d *loader) warehouse() {
 	ex, id := d.ex, d.id
 	gs := id(`SELECT id FROM cluster WHERE name='Gurugram South'`)
 	id(`INSERT INTO property(code,doc_code,name,ezee_code,cluster_id,kind) VALUES ('WH','WH','Central Warehouse, Gurugram','WH-001',$1,'warehouse') RETURNING id`, gs)
-	d.user("Vikas Tomar", "vikas@demo.saltstayz.com", "", "Warehouse", "wh", "all", nil, nil, nil)
-	// Warehouse purchases go to a Warehouse Approver L1 (every sub-category here), then L2 (the Warehouse Manager may act).
+	d.user("Vikas Tomar", "vikas@demo.saltstayz.com", "", "Warehouse", "whs", "all", nil, nil, nil)
+	// Warehouse purchases go to a Warehouse Approver L1 (every sub-category here), then L2 (who also runs stock and dispatch).
 	d.user("Manoj Rawat", "manoj@demo.saltstayz.com", "", "Warehouse", "whl1", "all", nil, nil, nil)
 	d.user("Seema Kaur", "seema@demo.saltstayz.com", "", "Warehouse", "whl2", "all", nil, nil, nil)
 	wh := id(`SELECT id FROM vendor WHERE vendor_type='warehouse' LIMIT 1`)

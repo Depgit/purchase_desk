@@ -14,6 +14,7 @@ import (
 	"purchasedesk/internal/access"
 	"purchasedesk/internal/activestatus"
 	"purchasedesk/internal/advances"
+	"purchasedesk/internal/approvalmatrix"
 	"purchasedesk/internal/approvals"
 	"purchasedesk/internal/auditlog"
 	"purchasedesk/internal/balancereject"
@@ -34,6 +35,7 @@ import (
 	"purchasedesk/internal/login"
 	"purchasedesk/internal/masterapproval"
 	"purchasedesk/internal/messaging"
+	"purchasedesk/internal/poexpiry"
 	"purchasedesk/internal/purchaseorders"
 	"purchasedesk/internal/purchaserequests"
 	"purchasedesk/internal/reports"
@@ -68,6 +70,7 @@ type Deps struct {
 
 // Built holds the services other parts of the program use, such as the scheduler.
 type Built struct {
+	Expiry   *poexpiry.Service // the po-expiry job
 	Handler  http.Handler
 	ZohoSync *zohosync.Service
 	ZohoPush *zohopush.Service
@@ -91,6 +94,8 @@ func New(d Deps) *Built {
 	sheets := &vendorsheets.Service{DB: d.DB, Messages: d.Messages}
 	portal := &vendorportal.Service{DB: d.DB, Tokens: d.Tokens, Files: files, Messages: d.Messages, BaseURL: d.BaseURL, Vendors: vendorSvc}
 	masterapproval.VendorChange = vendorSvc.DecideChange // Finance approves a vendor's own change under Masters to approve
+	balanceSvc := &balancereject.Service{DB: d.DB, Messages: d.Messages}
+	expiry := &poexpiry.Service{DB: d.DB, Balance: balanceSvc} // delivery dates: extend once, then the balance is rejected
 
 	r := chi.NewRouter()
 	r.Use(middleware.RealIP, middleware.RequestID, middleware.Logger, middleware.Recoverer, middleware.Timeout(120*time.Second))
@@ -121,13 +126,15 @@ func New(d Deps) *Built {
 			vendorSvc.Routes(r)
 			(&vendormapping.Service{DB: d.DB}).Routes(r)
 			(&users.Service{DB: d.DB, Guard: guard}).Routes(r)
+			(&approvalmatrix.Service{DB: d.DB}).Routes(r)
 			(&purchaserequests.Service{DB: d.DB, Guard: guard, Messages: d.Messages}).Routes(r)
 			poSvc := &purchaseorders.Service{DB: d.DB, Messages: d.Messages, Files: files, PortalURL: portal.URL()}
 			poSvc.Routes(r)
 			portal.StaffRoutes(r)
 			(&approvals.Service{DB: d.DB, Guard: guard, Messages: d.Messages, POSent: poSvc.Release}).Routes(r)
 			(&goodsreceipts.Service{DB: d.DB, Files: files}).Routes(r)
-			(&balancereject.Service{DB: d.DB, Messages: d.Messages}).Routes(r)
+			balanceSvc.Routes(r)
+			expiry.Routes(r)
 			advSvc := &advances.Service{DB: d.DB, Guard: guard, Files: files, Messages: d.Messages, POReleased: poSvc.Release}
 			advSvc.Routes(r)
 			zpush.Advances = advSvc // advances paid in Zoho are read back
@@ -147,7 +154,7 @@ func New(d Deps) *Built {
 			(&corporate.Service{DB: d.DB, Files: files}).Routes(r)
 			uploads.Register("warehouse_stock", "Warehouse opening stock", "Warehouse", []string{"sku_code", "opening_qty"},
 				"sku_code,item_name,opening_qty,reorder_level\nLN-0001,Bed sheet double,450,150\n",
-				func(u *access.User) bool { return u.HasRight(access.Upload) && u.HasStep("wh") },
+				func(u *access.User) bool { return u.HasStep("whl2") }, // opening stock: Warehouse Approver L2
 				warehouse.UploadCheck, warehouse.UploadCommit)
 			(&warehouse.Service{DB: d.DB, Guard: guard, Files: files, Messages: d.Messages}).Routes(r)
 			sheets.Routes(r)
@@ -156,7 +163,7 @@ func New(d Deps) *Built {
 			(&dashboard.Service{DB: d.DB, Guard: guard, Invoices: inv}).Routes(r)
 		})
 	})
-	return &Built{Handler: r, ZohoSync: zsync, ZohoPush: zpush, Uploads: uploads, Files: files, Guard: guard, Sheets: sheets, Journals: journals}
+	return &Built{Expiry: expiry, Handler: r, ZohoSync: zsync, ZohoPush: zpush, Uploads: uploads, Files: files, Guard: guard, Sheets: sheets, Journals: journals}
 }
 
 // cors allows the Vite dev server in development. In Docker the frontend is served from the same origin.

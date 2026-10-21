@@ -41,7 +41,10 @@ Every sample user signs in with the password `Demo@1234`. Emails end in `@demo.s
 | deepak            | Receiving / Store       | P01, P02                                    |
 | kavita            | Accounts Payable        | All                                         |
 | rohit             | Finance                 | All                                         |
-| vikas             | Warehouse Manager       | All                                         |
+| vikas             | Warehouse Staff         | All                                         |
+| manoj             | Warehouse Approver L1   | All (every sub-category)                    |
+| seema             | Warehouse Approver L2   | All (also stock and dispatch)               |
+| kiran             | CFO                     | All (approves first above the CFO limit)    |
 | shalini           | Pre-opening Team        | All                                         |
 | meera             | Corporate Requester     | Corporate Office                            |
 | rakesh, vivek     | Department Head (L1)    | Admin and IT departments                    |

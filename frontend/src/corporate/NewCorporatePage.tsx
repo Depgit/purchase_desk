@@ -1,9 +1,12 @@
 // Raise a corporate purchase (something still to buy: items from the item master, a PO follows) or a corporate bill (an
 // invoice already received). Lines only use existing items: nothing new is added to the item master from here.
-// Save draft keeps the half-filled form (invoice and quotation files too); ?draft=<id> opens it again.
+// Save draft keeps the half-filled form (invoice and quotation files too); ?draft=<id> opens it again. ?clone=<id> starts
+// from an earlier corporate purchase or bill (department, vendor, lines or expense head, reason), to change and send.
+// Picking an item fills its expense head from Corporate Setup (the head that covers its sub-category).
 import { useEffect, useState } from 'react'
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { get, upload } from '../api/client'
+import type { Doc } from '../api/types'
 import { DraftControls, DraftList, KeptFiles, useDraft, type Draft } from '../formdrafts/drafts'
 import { useApi } from '../api/useApi'
 import { UploadModal } from '../bulkupload/UploadModal'
@@ -17,11 +20,13 @@ import { useAction } from '../ui/useAction'
 
 interface Form {
   office: string; l1_only_below: number
+  /** C1 / C2 limits: corporate purchases, and bills. */
+  amount_limits: Record<'purchase' | 'bill', { c1: number; c2: number }>
   departments: { id: number; name: string; l1_user_id: number; l1: string; l2: string; backup: string; active: boolean }[]
   expense_heads: { id: number; name: string; active: boolean; fin_status: string }[]
   vendors: { id: number; name: string; vendor_type: string }[]
   /** Items the corporate office may order (active, approved, available there). */
-  items: { id: number; code: string; name: string; pack_size: string; gst_pct: number; sub_category: string; category: string }[]
+  items: { id: number; code: string; name: string; pack_size: string; gst_pct: number; sub_category: string; category: string; expense_head_id: number | null }[]
   /** Every vendor's current rate card per item. */
   rates: { vendor_id: number; sku_id: number; rate: number; gst_pct: number }[]
 }
@@ -47,7 +52,17 @@ export function NewCorporatePage() {
   const a = useAction()
   const [sp] = useSearchParams()
   const draftId = Number(sp.get('draft')) || 0
+  const cloneId = Number(sp.get('clone')) || 0
+  const [clonedFrom, setClonedFrom] = useState('')
   const draft = useDraft('corporate')
+  useEffect(() => {
+    if (!cloneId) return
+    get<{ document: Doc }>(`/documents/${cloneId}`).then(({ document: c }) => {
+      setKind(c.kind === 'corp_bill' ? 'bill' : 'purchase'); setDept(c.department_id || 0); setVendor(c.vendor_id); setNote(c.remark || '')
+      const ls = c.lines.filter((l) => l.sku_id && l.qty > 0).map((l) => ({ sku_id: l.sku_id, expense_head_id: l.expense_head_id || 0, qty: String(l.qty), rate: String(l.rate) }))
+      setLines(ls.length ? ls : [blank()]); setHead(c.expense_head_id || 0); setClonedFrom(c.number)
+    }).catch(() => {})
+  }, [cloneId])
   useEffect(() => {
     if (!draftId) return
     get<Draft<CorpFields>[]>('/drafts?form=corporate').then(async (list) => {
@@ -81,6 +96,7 @@ export function NewCorporatePage() {
       <div className="head"><div><button className="link" onClick={() => nav('/corporate')}>‹ Corporate</button><h1>{kind === 'purchase' ? 'New corporate purchase' : 'New corporate bill'}</h1>
         <p className="sub">{kind === 'purchase' ? 'For something still to buy: a PO goes to the vendor after approval.' : 'For an invoice already received, with no PO. Finance pays it after approval.'} Charged to {data?.office}.</p></div></div>
       {!draftId && <DraftList form="corporate" label="Your corporate drafts" onOpen={(x) => nav(`/corporate/new/${x.fields.kind}?draft=${x.id}`)} />}
+      {clonedFrom && <p className="note">Filled in from {clonedFrom}. Change what is different (quantities, rates, vendor, reason), then send it.</p>}
       {draftId > 0 && draft.savedAt && <p className="note">Your draft from {dateTime(draft.savedAt)} is filled in. Finish it and send it, or save the draft again.</p>}
       <Seg value={kind} onChange={setKind} items={[['purchase', 'Corporate purchase'], ['bill', 'Corporate bill']]} />
       <div className="cols">
@@ -94,7 +110,7 @@ export function NewCorporatePage() {
               <p className="hint" style={{ padding: '0 14px' }}>Pick items from the item master; nothing new is created here. An item that is missing is added under Items (and approved by Finance) first. {vendor ? 'Rates come from the vendor\'s rate card; type one only where it has none.' : 'Choose the vendor to fill in rates from its rate card.'}</p>
               <div className="scroll"><table><thead><tr><th>Item</th><th>Expense head</th><th className="r">Qty</th><th>Unit</th><th className="r">Rate before GST</th><th>GST</th><th className="r">Amount</th><th></th></tr></thead>
                 <tbody>{lines.map((l, i) => { const it = itemOf(l.sku_id); const p = priced(l); return <tr key={i}>
-                  <td style={{ minWidth: 260 }}><SearchSelect value={l.sku_id ? String(l.sku_id) : ''} items={itemChoices} onChange={(v) => set(i, { sku_id: +v, rate: '' })} placeholder="Type to find an item" ariaLabel={'Item ' + (i + 1)} /></td>
+                  <td style={{ minWidth: 260 }}><SearchSelect value={l.sku_id ? String(l.sku_id) : ''} items={itemChoices} onChange={(v) => set(i, { sku_id: +v, rate: '', expense_head_id: itemOf(+v)?.expense_head_id || l.expense_head_id })} placeholder="Type to find an item" ariaLabel={'Item ' + (i + 1)} /></td>
                   <td><select value={l.expense_head_id} onChange={(e) => set(i, { expense_head_id: +e.target.value })} aria-label={'Expense head ' + (i + 1)}><option value={0}>Choose</option>{heads.map((h) => <option key={h.id} value={h.id}>{h.name}</option>)}</select></td>
                   <td className="r"><input className="qty" style={{ width: 70 }} type="number" min="0" value={l.qty} onChange={(e) => set(i, { qty: e.target.value })} aria-label={'Quantity ' + (i + 1)} /></td>
                   <td>{it?.pack_size || '—'}</td>
@@ -124,7 +140,9 @@ export function NewCorporatePage() {
           {d && <>{isL1 && <p className="note">You are the L1 for {d.name}, so it goes straight to the L2.</p>}
             <p>1. L1, department head: <b>{d.l1}</b>{isL1 ? ' (skipped)' : ''}</p>
             <p>2. L2: <b>{d.l2}</b>{data && data.l1_only_below > 0 && total < data.l1_only_below && !isL1 ? ` (not needed below ${inr(data.l1_only_below)})` : ''}</p>
-            {d.backup && <p className="hint">Backup if either is away: {d.backup}</p>}</>}
+            {d.backup && <p className="hint">Backup if either is away: {d.backup}</p>}
+            {(() => { const lim = data?.amount_limits?.[kind as 'purchase' | 'bill']; if (!lim) return null; const c2 = lim.c2 > 0 && total > lim.c2; const c1 = (lim.c1 > 0 && total > lim.c1) || (c2 && lim.c1 > 0)
+              return <>{c1 && <p>3. C1: above {inr(lim.c1)}</p>}{c2 && <p>{c1 ? 4 : 3}. C2: above {inr(lim.c2)}</p>}</> })()}</>}
           <p className="hint">Then: {kind === 'purchase' ? 'the last approval raises the PO to the vendor, you confirm receipt with the invoice, Accounts matches, Finance approves payment and it goes to Zoho.' : 'Finance approves payment and it goes to Zoho.'}</p>
           <Errors list={a.errors} />
           <div className="btns"><DraftControls draft={draft} onSave={saveDraft} />

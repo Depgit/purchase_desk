@@ -1,19 +1,20 @@
 // One purchase request or bill: where it stands, what was asked and changed, and the next action for the signed-in user.
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
-import { fileUrl, post } from '../api/client'
+import { fileUrl, get, post } from '../api/client'
 import { useApi } from '../api/useApi'
 import { AdvancesCard } from '../advances/AdvancesCard'
 import { PAYMENT_TERMS } from '../api/types'
 import type { Doc, Invoice } from '../api/types'
 import { ReasonModal, type ReasonKind } from '../approvals/ReasonModal'
 import { useSession } from '../auth/session'
-import { dateTime, day, inr, lineValue, month, qty } from '../format/format'
+import { addDays, dateTime, day, inr, lineValue, month, qty, today } from '../format/format'
 import { AdvanceFields, advanceBody, advanceProblem, newAdvance, type AdvanceDraft } from '../advances/AdvanceFields'
 import { ReceivePanel, type SentBack } from '../goodsreceipts/ReceivePanel'
 import { BalanceDuePanel } from '../balancereject/RejectBalanceForm'
 import { IssuePOPanel } from '../purchaseorders/IssuePOPanel'
 import { Errors } from '../ui/Errors'
+import { Field } from '../ui/Field'
 import { Modal } from '../ui/Modal'
 import { Pill, statusTone } from '../ui/Pill'
 import { useAction } from '../ui/useAction'
@@ -33,6 +34,12 @@ interface Detail {
   vendor_portal: boolean
   /** Approving now is the last step and raises the PO (no Purchase Team step). */
   raises_po: boolean
+  /** Approving now goes this far over the month budget, so the approver must say why (0 = no reason needed). */
+  over_budget: number
+  /** Advances already paid to this vendor and carried forward from earlier POs: adjusted on its next invoice payment. */
+  vendor_advances: { number: string; po_number: string; open: number }[]
+  /** The vendor's balance now (its statement's closing balance): negative = advances paid, not yet billed. */
+  vendor_balance: number | null
 }
 
 function stepper(d: Doc, invoices: Invoice[]) {
@@ -57,6 +64,7 @@ export function DocumentPage() {
   const { data, reload, error } = useApi<Detail>(`/documents/${id}`)
   const inv = useApi<Invoice[]>(`/invoices?document_id=${id}`)
   const refresh = () => { reload(); inv.reload() }
+  const [extend, setExtend] = useState(false) // the Extend delivery date dialog (hooks stay above the early returns)
   if (error) return <p className="note bad">{error.message}</p>
   if (!data) return <p className="sub">Loading…</p>
   const d = data.document
@@ -76,13 +84,15 @@ export function DocumentPage() {
           {data.actions.includes('edit') && <button className="btn ghost" onClick={() => nav(`/requests/${d.id}/edit`)}>Edit</button>}
           {mine && <button className="btn ghost" onClick={() => nav(`/requests/new?clone=${d.id}`)} title="Start a new request with the same property and items">Clone</button>}
           {d.kind === 'bill' && <button className="btn ghost" onClick={() => nav(`/bills/new/${d.bill_section}?clone=${d.id}`)} title="Start the next bill with the same property, type and vendor">Clone</button>}
+          {(d.kind === 'corp_purchase' || d.kind === 'corp_bill') && d.requester_id === me?.id && <button className="btn ghost" onClick={() => nav(`/corporate/new/${d.kind === 'corp_bill' ? 'bill' : 'purchase'}?clone=${d.id}`)} title="Start a new one with the same department, vendor and items">Clone</button>}
           <Pill tone={statusTone(d.status)}>{d.status_label}</Pill></div>
       </div>
       {stepper(d, inv.data || [])}
       {d.modified_note && <p className="note warn"><b>Quantity changed by {d.modified_by}{d.modified_at ? ' on ' + day(d.modified_at) : ''}.</b> {d.modified_note}</p>}
       {d.event_reason && <p className="note"><b>Extra quantity for an event:</b> {d.event_reason} · {d.event_note}{d.cm_approved_at ? ' · approved by the Cluster Manager on ' + day(d.cm_approved_at) : ''}</p>}
       {d.routed_reason && <p className="note"><b>Sent to the Cluster Manager by the Cost Controller:</b> {d.routed_reason}{d.routed_note ? ' · ' + d.routed_note : ''}</p>}
-      {d.property_kind !== 'live' && d.status === 'PENDING' && <p className="note"><b>{d.property_kind === 'preopening' ? 'Pre-opening property order' : 'Warehouse stock order'}.</b> Waiting for {d.preop_user || 'the Pre-opening Team'}.</p>}
+      {(d.property_kind === 'preopening' || d.property_kind === 'warehouse') && d.status === 'PENDING' && <p className="note"><b>{d.property_kind === 'preopening' ? 'Pre-opening property order' : 'Warehouse stock order'}.</b> Waiting for {d.owner === 'preop' ? (d.preop_user || 'the Pre-opening Team') : 'the ' + d.owner_name}.</p>}
+      {d.over_budget_reason && <p className="note warn"><b>Approved over the month budget by {d.over_budget_by}:</b> {d.over_budget_reason}</p>}
       {rejected.length > 0 && <p className="note warn"><b>Undelivered balance rejected:</b> {rejected.map((l) => `${l.item_name} ${qty(l.rejected_qty)}`).join(', ')}. It will not be supplied on this PO; the reason is in the history. Raise a new request if it is still needed.</p>}
       {d.status === 'RETURNED' && <p className="note warn"><b>Returned:</b> {d.return_reason}{d.return_note ? ' · ' + d.return_note : ''}</p>}
       {d.status === 'REJECTED' && <p className="note bad"><b>Rejected:</b> {d.return_reason}{d.return_note ? ' · ' + d.return_note : ''}</p>}
@@ -94,6 +104,9 @@ export function DocumentPage() {
         : d.wait_until ? <p className="note warn"><b>The warehouse is waiting for stock.</b> Expected by {day(d.wait_until)}{d.wait_note ? ' · ' + d.wait_note : ''}.</p>
         : <p className="note">The warehouse has this order and has not scheduled the delivery yet.</p>)}
       {d.status === 'WH_BACK' && <p className="note bad"><b>The warehouse could not supply this order:</b> {d.return_reason}{d.return_note ? ' · ' + d.return_note : ''}. The budget is released. Raise it again when stock is back, or ask Purchase to change the mapping.</p>}
+      {(data.vendor_advances || []).length > 0 && ['PENDING', 'APPROVED', 'PO_ISSUED'].includes(d.status) && <p className="note"><b>Advance already paid to {d.vendor}: {inr(data.vendor_advances.reduce((t, x) => t + x.open, 0))}</b> ({data.vendor_advances.map((x) => `${x.number} from ${x.po_number}, ${inr(x.open)}`).join('; ')}). It was carried forward from an earlier PO and is adjusted on this vendor's next invoice at payment approval.</p>}
+      {d.status === 'PO_ISSUED' && !d.is_transfer && d.deliver_by && <p className="hint">If the goods are not delivered by {day(d.deliver_by)}, the undelivered balance is rejected automatically{d.deliver_by_extended ? '' : ' (Purchase or an approver can extend the date once)'}.</p>}
+      {extend && <ExtendModal doc={d} onClose={() => setExtend(false)} onDone={() => { setExtend(false); refresh() }} />}
       <div className="cols">
         <div className="stack">
           <ActionPanel detail={data} invoices={inv.data ?? (inv.error ? [] : null)} onDone={refresh} />
@@ -163,11 +176,13 @@ export function DocumentPage() {
             <dl className="kv">
               <dt>Property</dt><dd>{d.property}</dd><dt>Cluster</dt><dd>{d.cluster} · {d.city}</dd>
               <dt>Vendor</dt><dd>{d.vendor}{d.vendor_msme && <> <Pill tone="warn">MSME</Pill></>}</dd>
+              {data.vendor_balance != null && <><dt>Vendor balance</dt><dd><VendorBalance v={data.vendor_balance} /></dd></>}
               <dt>GST</dt><dd>{d.vendor_gst_registered ? 'Registered' : 'Unregistered'}</dd>
-              {d.deliver_by && <><dt>Deliver by</dt><dd>{day(d.deliver_by)}</dd></>}
+              {d.deliver_by && <><dt>Deliver by</dt><dd>{day(d.deliver_by)}{d.deliver_by_extended && <> <Pill>Extended</Pill></>}
+                {data.actions.includes('extend_delivery') && <> <button className="link" onClick={() => setExtend(true)}>Extend</button></>}</dd></>}
               {d.payment_terms && <><dt>Terms</dt><dd>{d.payment_terms}</dd></>}
               {d.po_number && !d.is_transfer && <><dt>Zoho purchase order</dt><dd><ZohoPOState d={d} onDone={refresh} /></dd></>}
-              {d.route_steps.length > 0 && <><dt>Approval route</dt><dd>{d.route_steps.map((s) => ({ l2: 'Cluster Manager', cc: 'Cost Controller', preop: 'Pre-opening Team', cl1: 'L1 ' + d.corp_l1, cl2: 'L2 ' + d.corp_l2 } as Record<string, string>)[s] || s).join(' → ')}</dd></>}
+              {d.route_steps.length > 0 && <><dt>Approval route</dt><dd>{d.route_steps.map((s) => ({ l2: 'Cluster Manager', cc: 'Cost Controller', preop: 'Pre-opening Team', cl1: 'L1 ' + d.corp_l1, cl2: 'L2 ' + d.corp_l2, whl1: 'Warehouse Approver L1', whl2: 'Warehouse Approver L2', c1: 'C1', c2: 'C2', cfo: 'CFO' } as Record<string, string>)[s] || s).join(' → ')}</dd></>}
               {corp && <><dt>Department</dt><dd>{d.department}</dd>{d.corp_backup && <><dt>Backup approver</dt><dd>{d.corp_backup}</dd></>}{d.kind === 'corp_purchase' && d.remark && <><dt>Why</dt><dd>{d.remark}</dd></>}
                 {d.quote_file_id && <><dt>Quotation</dt><dd><a className="link" href={fileUrl(d.quote_file_id)} target="_blank" rel="noreferrer">Open</a></dd></>}</>}
             </dl>
@@ -196,7 +211,7 @@ function ActionPanel({ detail, invoices, onDone }: { detail: Detail; invoices: I
   const d = detail.document
   const acts = detail.actions
   if (d.status === 'APPROVED' && d.advance_hold_po) return <p className="note warn"><b>{d.advance_hold_po} is prepared on Advance terms and waits for the advance to be {d.advance_approved ? 'paid' : 'approved and paid'}.</b> It is raised and sent to {d.vendor} only once the advance shows Paid: Finance marks it paid with the UTR, or it is read paid from Zoho (see Advance to vendor below). Until then there is no goods receipt. If Finance rejects the advance, the Purchase Team issues the PO again.</p>
-  if (acts.includes('approve')) return <ApprovePanel doc={d} canRoute={acts.includes('route')} canPreop={acts.includes('preop_approver')} raisesPO={!!detail.raises_po} onDone={onDone} />
+  if (acts.includes('approve')) return <ApprovePanel doc={d} canRoute={acts.includes('route')} canPreop={acts.includes('preop_approver')} raisesPO={!!detail.raises_po} overBudget={detail.over_budget || 0} vendorBalance={detail.vendor_balance} onDone={onDone} />
   if (acts.includes('resubmit')) return <ResubmitPanel doc={d} canEdit={acts.includes('edit')} onDone={onDone} />
   if (acts.includes('issue_po')) return <IssuePOPanel doc={d} onDone={onDone} />
   if (acts.includes('receive')) {
@@ -215,8 +230,13 @@ function ActionPanel({ detail, invoices, onDone }: { detail: Detail; invoices: I
   return <p className="note">Next step is with the <b>{owner}</b>{people?.length ? <>: {people.slice(0, 5).join(', ')}{people.length > 5 ? ` and ${people.length - 5} more` : ''}</> : ''}.</p>
 }
 
-function ApprovePanel({ doc, canRoute, canPreop, raisesPO, onDone }: { doc: Doc; canRoute: boolean; canPreop: boolean; raisesPO: boolean; onDone: () => void }) {
+function ApprovePanel({ doc, canRoute, canPreop, raisesPO, overBudget, vendorBalance, onDone }: { doc: Doc; canRoute: boolean; canPreop: boolean; raisesPO: boolean; overBudget: number; vendorBalance: number | null; onDone: () => void }) {
   const { me } = useSession()
+  // Over the month budget: the Cost Controller (or the last approver without one) says why, for tracking.
+  const [budgetReasons, setBudgetReasons] = useState<string[]>([])
+  useEffect(() => { if (overBudget > 0) get<Record<string, string[]>>('/pick-lists').then((l) => setBudgetReasons(l.over_budget_reasons || [])) }, [overBudget])
+  const [budgetReason, setBudgetReason] = useState('')
+  const [budgetNote, setBudgetNote] = useState('')
   const [q, setQ] = useState<Record<number, string>>(Object.fromEntries(doc.lines.map((l) => [l.id, String(l.qty)])))
   const [note, setNote] = useState('')
   const [reason, setReason] = useState<ReasonKind | null>(null)
@@ -228,6 +248,10 @@ function ApprovePanel({ doc, canRoute, canPreop, raisesPO, onDone }: { doc: Doc;
   const [rates, setRates] = useState<Record<number, string>>(Object.fromEntries(estimated.map((l) => [l.id, l.rate > 0 ? String(l.rate) : ''])))
   // The approver picks the PO's payment terms (the vendor's own by default); Advance asks the advance for Finance.
   const [terms, setTerms] = useState(PAYMENT_TERMS.includes(doc.vendor_terms) ? doc.vendor_terms : 'Net 30')
+  // The PO's delivery date, given by the approver who raises it (Flow Settings days ahead to start with); once it has
+  // passed, the undelivered balance is rejected automatically.
+  const [due, setDue] = useState(addDays(today(), 2))
+  useEffect(() => { if (raisesPO) get<{ auto_po_days: number }>('/settings').then((s) => setDue(addDays(today(), s.auto_po_days || 0))).catch(() => {}) }, [raisesPO])
   const advanceTerms = raisesPO && terms === 'Advance'
   const [adv, setAdv] = useState<AdvanceDraft>(newAdvance())
   const poValue = doc.lines.reduce((t, l) => t + lineValue(q[l.id] === undefined ? l.qty : +q[l.id] || 0, estimated.some((e) => e.id === l.id) ? +rates[l.id] || 0 : l.rate, l.gst_pct), 0)
@@ -235,14 +259,16 @@ function ApprovePanel({ doc, canRoute, canPreop, raisesPO, onDone }: { doc: Doc;
     const missing = estimated.filter((l) => !(+rates[l.id] > 0) && (+q[l.id] || 0) > 0)
     if (missing.length) return a.setErrors(missing.map((l) => `Confirm the rate for ${l.item_name}: it has no rate card.`))
     if (advanceTerms) { const p = advanceProblem(adv, poValue, poValue); if (p) return a.setErrors([p]) }
+    if (overBudget > 0 && !budgetReason) return a.setErrors([`This request is ${inr(overBudget)} over the month budget: choose why you approve it anyway.`])
     a.run(() => post(`/documents/${doc.id}/approve`, {
-      quantities: changed, note,
-      ...(raisesPO ? { payment_terms: terms, rates: Object.fromEntries(estimated.map((l) => [l.id, +rates[l.id] || 0])), advance: advanceTerms ? advanceBody(adv, poValue) : undefined } : {}),
+      quantities: changed, note, budget_reason: budgetReason, budget_note: budgetNote,
+      ...(raisesPO ? { deliver_by: due, payment_terms: terms, rates: Object.fromEntries(estimated.map((l) => [l.id, +rates[l.id] || 0])), advance: advanceTerms ? advanceBody(adv, poValue) : undefined } : {}),
     }), (r: any) => { onDone(); return r.message })
   }
   return (
     <section className="card act">
       <h2>{me?.is_admin ? `Decision (acting for the ${doc.owner_name})` : 'Your decision'}</h2>
+      {vendorBalance != null && vendorBalance !== 0 && <p className={'note' + (vendorBalance < 0 ? ' warn' : '')}><b>{doc.vendor}: <VendorBalance v={vendorBalance} /></b>{vendorBalance < 0 ? ' — advances already paid and not yet billed; they are taken off this vendor\'s next invoices.' : ' — bills not yet paid.'}</p>}
       {doc.kind === 'purchase' && <>
         <div className="grid2">{doc.lines.map((l) => (
           <label className="field" key={l.id}><span>{l.item_name} ({l.pack_size})</span>
@@ -256,6 +282,8 @@ function ApprovePanel({ doc, canRoute, canPreop, raisesPO, onDone }: { doc: Doc;
       {raisesPO && <label className="field"><span>Payment terms for this PO</span>
         <select value={terms} onChange={(e) => setTerms(e.target.value)}>{PAYMENT_TERMS.map((t) => <option key={t} value={t}>{t}{t === doc.vendor_terms ? ' (vendor\'s usual)' : ''}</option>)}</select>
         <span className="hint">Choose Advance when the vendor must be paid before it dispatches; you then say how much.</span></label>}
+      {raisesPO && <label className="field"><span>Deliver by</span><input type="date" min={today()} value={due} onChange={(e) => setDue(e.target.value)} />
+        <span className="hint">The date agreed with {doc.vendor}. If the goods have not come by then, the undelivered balance is rejected automatically (it can be extended once).</span></label>}
       {estimated.length > 0 && <div className="grid2">{estimated.map((l) => (
         <label className="field" key={l.id}><span>Rate for {l.item_name} (₹, before GST)</span>
           <input type="number" min="0" step="0.01" inputMode="decimal" value={rates[l.id]} onChange={(e) => setRates({ ...rates, [l.id]: e.target.value })} />
@@ -263,6 +291,12 @@ function ApprovePanel({ doc, canRoute, canPreop, raisesPO, onDone }: { doc: Doc;
       </div>}
       {advanceTerms && <><h3>Advance to ask Finance for</h3>
         <AdvanceFields a={adv} onChange={setAdv} poValue={poValue} room={poValue} poLabel="this PO" noFile /></>}
+      {overBudget > 0 && <div className="xpbox">
+        <p className="note warn"><b>Over the month budget by {inr(overBudget)}.</b> Approving needs a reason; it is kept on the request and in the Approved over budget report.</p>
+        <div className="grid2">
+          <Field label="Why approve over budget"><select value={budgetReason} onChange={(e) => setBudgetReason(e.target.value)}><option value="">Choose a reason</option>{budgetReasons.map((r) => <option key={r}>{r}</option>)}</select></Field>
+          <Field label={budgetReason.startsWith('Other') ? 'Details' : 'Details (optional)'}><input value={budgetNote} onChange={(e) => setBudgetNote(e.target.value)} placeholder="e.g. 92% occupancy this week" /></Field>
+        </div></div>}
       <label className="field"><span>Remark (optional)</span><textarea value={note} onChange={(e) => setNote(e.target.value)} /></label>
       <Errors list={a.errors} />
       <div className="btns">
@@ -340,4 +374,29 @@ function ZohoPOState({ d, onDone }: { d: Doc; onDone: () => void }) {
       <Errors list={a.errors} />
     </>
   )
+}
+
+/** Moves a PO's delivery date once, with a reason (poexpiry). */
+function ExtendModal({ doc, onClose, onDone }: { doc: Doc; onClose: () => void; onDone: () => void }) {
+  const [date, setDate] = useState(addDays(doc.deliver_by || today(), 3))
+  const [reason, setReason] = useState('')
+  const a = useAction()
+  return (
+    <Modal title={'Extend the delivery date of ' + (doc.po_number || doc.number)} onClose={onClose}>
+      <p className="sub">Now due by {day(doc.deliver_by)}. The date can be moved once; after the new date the undelivered balance is rejected automatically.</p>
+      <div className="grid2">
+        <Field label="New delivery date"><input type="date" min={addDays(doc.deliver_by || today(), 1)} value={date} onChange={(e) => setDate(e.target.value)} /></Field>
+        <Field label="Why"><input value={reason} onChange={(e) => setReason(e.target.value)} placeholder="e.g. Vendor short of stock, confirmed for Friday" /></Field>
+      </div>
+      <Errors list={a.errors} />
+      <div className="btns"><button className="btn ghost" onClick={onClose}>Cancel</button>
+        <button className="btn" disabled={a.busy} onClick={() => a.run(() => post(`/documents/${doc.id}/deliver-by`, { deliver_by: date, reason }), (r: any) => { onDone(); return r.message })}>Extend</button></div>
+    </Modal>
+  )
+}
+
+/** A vendor's balance in words: negative = advance paid, not yet billed; positive = due to the vendor. */
+function VendorBalance({ v }: { v: number }) {
+  if (Math.abs(v) < 0.005) return <>Nothing due either way</>
+  return v < 0 ? <>−{inr(-v)} advance paid, not yet billed</> : <>{inr(v)} due to the vendor</>
 }

@@ -500,8 +500,8 @@ func (s *Service) send(w http.ResponseWriter, r *http.Request) error {
 	u := access.From(r)
 	// Whoever approves requests sends the order sheets (there is no Purchase Team step): the Cluster Manager, the Cost
 	// Controller, the pre-opening team, and Purchase or the Admin where they still work.
-	if !u.IsAdmin && !u.HasStep("cc") && !u.HasStep("l2") && !u.HasStep("preop") && !u.HasStep("wh") && !u.HasStep("whl2") && !u.HasStep("purchase") {
-		return httpjson.Forbidden("Whoever approves purchase requests last (Cluster Manager, Cost Controller, pre-opening team, Warehouse Approver L2 or Warehouse Manager) sends order sheets.")
+	if !u.IsAdmin && !u.HasStep("cc") && !u.HasStep("l2") && !u.HasStep("preop") && !u.HasStep("whl2") && !u.HasStep("purchase") {
+		return httpjson.Forbidden("Whoever approves purchase requests last (Cluster Manager, Cost Controller, pre-opening team or Warehouse Approver L2) sends order sheets.")
 	}
 	id, err := httpjson.ID(r, "id")
 	if err != nil {

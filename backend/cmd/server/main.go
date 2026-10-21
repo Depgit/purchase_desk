@@ -106,6 +106,8 @@ func main() {
 		scheduler.Job{Name: "vendor-sheets", Every: time.Minute, Run: app.Sheets.RunAuto},
 		// After a month ends, each property's warehouse journal for the rest of that month is posted to Zoho.
 		scheduler.Job{Name: "warehouse-journals", Every: time.Hour, Run: app.Journals.PostMonthEnds},
+		// A vendor PO whose delivery date passed (by Flow Settings po_expiry_days) has its undelivered balance rejected.
+		scheduler.Job{Name: "po-expiry", Every: time.Hour, Run: app.Expiry.Run},
 	}
 	scheduler.Start(ctx, jobs...)
 

@@ -52,7 +52,24 @@ type Settings struct {
 	AutoPODays         int     `json:"auto_po_days"`         // delivery date of a PO issued automatically: approval day + this
 	POOnApproval       bool    `json:"po_on_approval"`       // no Purchase Team step: the final approval raises every request's PO
 	ReceiptByRequester bool    `json:"receipt_by_requester"` // goods are received by the person who raised the request
+	POExpiryDays       int     `json:"po_expiry_days"`       // an undelivered balance is rejected this many days after the PO's delivery date
+	// AmountApprovals: per request type (AmountTypes), above C1 the request also goes to C1 after its L2, above C2 to
+	// C1 then C2 (incl. GST; 0 = off).
+	AmountApprovals map[string]Limits `json:"amount_approvals"`
 }
+
+// Limits are one request type's C1 and C2 amounts.
+type Limits struct {
+	C1 float64 `json:"c1"`
+	C2 float64 `json:"c2"`
+}
+
+// AmountType is a request type with its own C1 / C2 limits; PropertyKind is where its approvers must have access
+// ("" = any property).
+type AmountType struct{ Key, Label, PropertyKind string }
+
+var AmountTypes = []AmountType{{"property", "Property purchases", "live"}, {"preopening", "Pre-opening purchases", "preopening"},
+	{"warehouse", "Warehouse purchases", "warehouse"}, {"corporate", "Corporate purchases", "corporate"}, {"bills", "Bills (utility, AMC, corporate)", ""}}
 
 // Load reads the current flow settings.
 func Load(ctx context.Context, q database.Q) (Settings, error) {
@@ -120,6 +137,18 @@ func (s *Service) putSettings(w http.ResponseWriter, r *http.Request) error {
 	}
 	if next.L2Above < 0 || next.MatchTolPct < 0 || next.MatchTolPct > 50 || next.MSMEDays <= 0 || next.BillJumpPct < 0 || next.AMCWarnDays < 0 || next.CorpL1OnlyBelow < 0 {
 		return httpjson.Bad("Numbers must be 0 or more, and the tolerance at most 50%%.")
+	}
+	for _, t := range AmountTypes {
+		l := next.AmountApprovals[t.Key]
+		if l.C1 < 0 || l.C2 < 0 {
+			return httpjson.Bad("C1 and C2 limits must be 0 or more.")
+		}
+		if l.C1 > 0 && l.C2 > 0 && l.C2 < l.C1 {
+			return httpjson.Bad("%s: the C2 limit must be at least the C1 limit (C2 is for larger amounts).", t.Label)
+		}
+	}
+	if next.POExpiryDays < 0 || next.POExpiryDays > 90 {
+		return httpjson.Bad("Days after the delivery date must be between 0 and 90.")
 	}
 	if next.AutoPODays < 0 || next.AutoPODays > 60 {
 		return httpjson.Bad("Delivery days for an automatic PO must be between 0 and 60.")

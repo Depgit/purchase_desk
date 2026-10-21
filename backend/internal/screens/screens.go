@@ -131,8 +131,8 @@ func Defaults(rights []string, step string) map[string]int {
 		"payments":         lv(has("pay")),
 		"bills_utility":    lv(has("raise")),
 		"bills_amc":        lv(has("raise")),
-		"corporate":        lv(at("creq", "dh", "capp")),
-		"warehouse":        lv(at("wh")),
+		"corporate":        lv(at("creq", "dh", "capp", "c1", "c2")), // C1 / C2 approve large corporate requests
+		"warehouse":        lv(at("whl1", "whl2")),                   // dispatch by either Warehouse Approver, stock by L2 (Warehouse Staff view it, below)
 		"vendors":          lv(has("catalog") || at("finance", "cc")),
 		"items":            lv(has("catalog")),
 		"vendor_mapping":   lv(has("masters")),
@@ -150,10 +150,13 @@ func Defaults(rights []string, step string) map[string]int {
 		"templates":        View,
 		"activity":         None,
 	}
-	if at("l2", "cc", "preop", "wh", "whl1", "whl2") { // the warehouse approvers (and the Warehouse Manager) approve warehouse requests
+	if at("l2", "cc", "preop", "whl1", "whl2", "al1", "al2", "c1", "c2") { // Cluster Manager, L1 / L2 (matrix and warehouse), C1 / C2
 		m["approvals"] = lv(has("approve"))
 	}
-	if at("cc", "l2", "preop", "wh", "whl2", "purchase") { // the final approvers send the vendor order sheets
+	if at("whs") && m["warehouse"] == None {
+		m["warehouse"] = View
+	}
+	if at("cc", "l2", "preop", "whl2", "purchase") { // the final approvers send the vendor order sheets
 		m["vendor_sheets"] = Edit
 	}
 	if has("masters") {

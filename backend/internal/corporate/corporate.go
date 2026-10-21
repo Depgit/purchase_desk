@@ -41,6 +41,7 @@ func (s *Service) Routes(r chi.Router) {
 	r.Put("/corporate/departments/{id}", httpjson.Wrap(s.saveDepartment))
 	r.Get("/corporate/expense-heads", httpjson.Wrap(s.listHeads))
 	r.Post("/corporate/expense-heads", httpjson.Wrap(s.createHead))
+	r.Put("/corporate/expense-heads/{id}/sub-categories", httpjson.Wrap(s.setHeadSubs))
 	r.Get("/corporate/form", httpjson.Wrap(s.form))
 	r.Post("/corporate/requests", httpjson.Wrap(s.create))
 }
@@ -156,24 +157,75 @@ func (s *Service) saveDepartment(w http.ResponseWriter, r *http.Request) error {
 }
 
 type Head struct {
-	ID        int64  `json:"id"`
-	Name      string `json:"name"`
-	Active    bool   `json:"active"`
-	Used      int    `json:"used"`
-	FinStatus string `json:"fin_status"` // pending until Finance approves a new head
+	ID        int64   `json:"id"`
+	Name      string  `json:"name"`
+	Active    bool    `json:"active"`
+	Used      int     `json:"used"`
+	FinStatus string  `json:"fin_status"`       // pending until Finance approves a new head
+	SubCatIDs []int64 `json:"sub_category_ids"` // the sub-categories it covers: a corporate line's item fills its head from these
+	SubCats   string  `json:"sub_categories"`
 }
 
 func (s *Service) heads(ctx context.Context) ([]Head, error) {
 	rows, err := s.DB.Query(ctx, `SELECT h.id, h.name, h.active,
 		(SELECT count(*) FROM document_line l WHERE l.expense_head_id=h.id) + (SELECT count(*) FROM document d WHERE d.expense_head_id=h.id)
-		, h.fin_status FROM expense_head h ORDER BY h.name`)
+		, h.fin_status, h.sub_category_ids, coalesce((SELECT string_agg(sc.name, ', ' ORDER BY sc.name) FROM sub_category sc WHERE sc.id=ANY(h.sub_category_ids)),'')
+		FROM expense_head h ORDER BY h.name`)
 	if err != nil {
 		return nil, err
 	}
 	return pgx.CollectRows(rows, func(row pgx.CollectableRow) (Head, error) {
 		var x Head
-		return x, row.Scan(&x.ID, &x.Name, &x.Active, &x.Used, &x.FinStatus)
+		return x, row.Scan(&x.ID, &x.Name, &x.Active, &x.Used, &x.FinStatus, &x.SubCatIDs, &x.SubCats)
 	})
+}
+
+// CheckHeadSubs refuses sub-categories that are unknown or already covered by another active expense head (each
+// sub-category leads to one head). headID 0 is a new head.
+func CheckHeadSubs(ctx context.Context, q database.Q, headID int64, ids []int64) []string {
+	errs := []string{}
+	for _, id := range ids {
+		var name, other string
+		if err := q.QueryRow(ctx, `SELECT sc.name, coalesce((SELECT h.name FROM expense_head h WHERE h.active AND h.id<>$2 AND sc.id=ANY(h.sub_category_ids) LIMIT 1),'')
+			FROM sub_category sc WHERE sc.id=$1`, id, headID).Scan(&name, &other); err != nil {
+			errs = append(errs, fmt.Sprintf("Unknown sub-category %d.", id))
+			continue
+		}
+		if other != "" {
+			errs = append(errs, fmt.Sprintf("%s is already under the expense head %s. Take it off there first.", name, other))
+		}
+	}
+	return errs
+}
+
+// setHeadSubs sets the sub-categories an expense head covers.
+func (s *Service) setHeadSubs(w http.ResponseWriter, r *http.Request) error {
+	u := access.From(r)
+	if err := access.NeedRight(u, access.Masters, "edit masters"); err != nil {
+		return err
+	}
+	id, err := httpjson.ID(r, "id")
+	if err != nil {
+		return err
+	}
+	var in struct {
+		IDs []int64 `json:"sub_category_ids"`
+	}
+	if err := httpjson.Decode(r, &in); err != nil {
+		return err
+	}
+	in.IDs = textclean.Uniq(in.IDs)
+	if errs := CheckHeadSubs(r.Context(), s.DB, id, in.IDs); len(errs) > 0 {
+		return httpjson.Invalid(errs)
+	}
+	var name string
+	if err := s.DB.QueryRow(r.Context(), `UPDATE expense_head SET sub_category_ids=$2 WHERE id=$1 RETURNING name`, id, in.IDs).Scan(&name); err != nil {
+		return httpjson.NotFound("Expense head")
+	}
+	if err := auditlog.Write(r.Context(), s.DB, u, "Corporate", "Expense head sub-categories set", name, fmt.Sprint(len(in.IDs), " sub-categories")); err != nil {
+		return err
+	}
+	return httpjson.OK(w, map[string]string{"message": name + " saved: its sub-categories' items now fill this head on corporate lines"})
 }
 
 func (s *Service) listHeads(w http.ResponseWriter, r *http.Request) error {
@@ -198,10 +250,14 @@ func ValidateHead(ctx context.Context, q database.Q, name *string) []string {
 	return nil
 }
 
-// SaveHead adds a validated expense head. It waits for Finance's approval before it can be used.
-func SaveHead(ctx context.Context, q database.Q, u *access.User, name string) (int64, error) {
+// SaveHead adds a validated expense head, with the sub-categories it covers (checked by CheckHeadSubs). It waits for
+// Finance's approval before it can be used.
+func SaveHead(ctx context.Context, q database.Q, u *access.User, name string, subs []int64) (int64, error) {
 	var id int64
-	if err := q.QueryRow(ctx, `INSERT INTO expense_head(name,created_by) VALUES ($1,$2) RETURNING id`, name, u.ID).Scan(&id); err != nil {
+	if subs == nil {
+		subs = []int64{}
+	}
+	if err := q.QueryRow(ctx, `INSERT INTO expense_head(name,created_by,sub_category_ids) VALUES ($1,$2,$3) RETURNING id`, name, u.ID, subs).Scan(&id); err != nil {
 		return 0, err
 	}
 	return id, auditlog.Write(ctx, q, u, "Corporate", "Expense head added", name, "Map it to a Zoho account under Settings, Zoho Books")
@@ -213,7 +269,8 @@ func (s *Service) createHead(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 	var in struct {
-		Name string `json:"name"`
+		Name string  `json:"name"`
+		Subs []int64 `json:"sub_category_ids"`
 	}
 	if err := httpjson.Decode(r, &in); err != nil {
 		return err
@@ -221,7 +278,11 @@ func (s *Service) createHead(w http.ResponseWriter, r *http.Request) error {
 	if errs := ValidateHead(r.Context(), s.DB, &in.Name); len(errs) > 0 {
 		return httpjson.Bad("%s", errs[0])
 	}
-	id, err := SaveHead(r.Context(), s.DB, u, in.Name)
+	in.Subs = textclean.Uniq(in.Subs)
+	if errs := CheckHeadSubs(r.Context(), s.DB, 0, in.Subs); len(errs) > 0 {
+		return httpjson.Invalid(errs)
+	}
+	id, err := SaveHead(r.Context(), s.DB, u, in.Name, in.Subs)
 	if err != nil {
 		return err
 	}
@@ -249,6 +310,7 @@ type Item struct {
 	GST      float64 `json:"gst_pct"`
 	SubCat   string  `json:"sub_category"`
 	Category string  `json:"category"`
+	HeadID   *int64  `json:"expense_head_id"` // the active, approved expense head covering its sub-category, if any
 }
 
 // Rate is a vendor's current rate card for an item.
@@ -259,7 +321,8 @@ type Rate struct {
 	GST      float64 `json:"gst_pct"`
 }
 
-const officeItemsSQL = `SELECT k.id, k.code, concat_ws(' ', b.name, k.item_name), ps.name, k.gst_pct::float8, sc.name, c.name
+const officeItemsSQL = `SELECT k.id, k.code, concat_ws(' ', b.name, k.item_name), ps.name, k.gst_pct::float8, sc.name, c.name,
+	(SELECT h.id FROM expense_head h WHERE h.active AND h.fin_status='approved' AND k.sub_category_id=ANY(h.sub_category_ids) ORDER BY h.id LIMIT 1)
 	FROM sku k JOIN sub_category sc ON sc.id=k.sub_category_id JOIN category c ON c.id=sc.category_id JOIN pack_size ps ON ps.id=k.pack_size_id
 	LEFT JOIN brand b ON b.id=k.brand_id
 	WHERE k.active AND sc.active AND k.fin_status='approved' AND sc.fin_status='approved' AND c.fin_status='approved'
@@ -342,7 +405,7 @@ func (s *Service) form(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
-	return httpjson.OK(w, map[string]any{"office": office, "departments": deps, "expense_heads": heads, "vendors": vs, "l1_only_below": st.CorpL1OnlyBelow, "items": items, "rates": rates})
+	return httpjson.OK(w, map[string]any{"office": office, "departments": deps, "expense_heads": heads, "vendors": vs, "l1_only_below": st.CorpL1OnlyBelow, "amount_limits": map[string]flowsettings.Limits{"purchase": st.AmountApprovals["corporate"], "bill": st.AmountApprovals["bills"]}, "items": items, "rates": rates})
 }
 
 // lineIn is one corporate purchase line: an existing item, its expense head, quantity and (when the vendor has no rate
@@ -431,6 +494,9 @@ func (s *Service) create(w http.ResponseWriter, r *http.Request) error {
 			}
 			it := found[0]
 			l.Description, l.Unit, l.GST = it.Name, it.Pack, it.GST
+			if l.HeadID == 0 && it.HeadID != nil {
+				l.HeadID = *it.HeadID // the head that covers the item's sub-category
+			}
 			if rate, gst, ok := vendormapping.CurrentRate(ctx, s.DB, in.VendorID, l.SKUID); ok {
 				l.Rate, l.GST = rate, gst // the vendor's rate card decides the rate
 			}
@@ -487,7 +553,11 @@ func (s *Service) create(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
-	steps := approvals.CorpSteps(st, amount, u.ID, dept.L1ID)
+	amountKind := "corporate"
+	if in.Kind == "bill" {
+		amountKind = "bills"
+	}
+	steps := approvals.WithAmount(st, amountKind, approvals.CorpSteps(st, amount, u.ID, dept.L1ID, dept.L2ID), amount)
 	var number, voucher string
 	var id int64
 	err = pgx.BeginFunc(ctx, s.DB, func(tx pgx.Tx) error {
@@ -538,7 +608,7 @@ func (s *Service) create(w http.ResponseWriter, r *http.Request) error {
 			}
 		}
 		note := dept.Name
-		if len(steps) == 1 && steps[0] == "cl2" {
+		if steps[0] == "cl2" {
 			note += " · raised by the L1, so it goes straight to the L2"
 		}
 		return auditlog.Doc(ctx, tx, u, g.Name, id, number, "Corporate", "Raised", note)

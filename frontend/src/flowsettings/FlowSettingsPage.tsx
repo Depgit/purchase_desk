@@ -5,8 +5,10 @@ import { useSession } from '../auth/session'
 import { useToast } from '../ui/Toast'
 
 type S = Record<string, any>
+// C1 / C2 limits per request type (Flow Settings amount_approvals).
+const AMOUNT_TYPES: [string, string][] = [['property', 'Property purchases'], ['preopening', 'Pre-opening purchases'], ['warehouse', 'Warehouse purchases'], ['corporate', 'Corporate purchases'], ['bills', 'Bills (utility, AMC, corporate)']]
 const LISTS: [string, string][] = [['event_reasons', 'Event reasons on a request'], ['return_reasons', 'Reasons to return a request'], ['reject_reasons', 'Reasons to reject'],
-  ['route_reasons', 'Reasons to send to the Cluster Manager'], ['balance_reasons', 'Reasons to reject an undelivered PO balance'], ['advance_reasons', 'Reasons for a vendor advance'], ['wh_back_reasons', 'Reasons the warehouse cannot supply'], ['delivery_slots', 'Delivery time slots']]
+  ['over_budget_reasons', 'Reasons to approve over budget'], ['balance_reasons', 'Reasons to reject an undelivered PO balance'], ['advance_reasons', 'Reasons for a vendor advance'], ['wh_back_reasons', 'Reasons the warehouse cannot supply'], ['delivery_slots', 'Delivery time slots']]
 
 export function FlowSettingsPage() {
   const { me } = useSession()
@@ -28,17 +30,24 @@ export function FlowSettingsPage() {
       <div className="head"><div><h1>Flow Settings</h1><p className="sub">{ed ? 'Change a setting and it applies to new requests at once; every change is logged.' : 'Only the System Admin can change these.'}</p></div></div>
       <div className="grid2">
         <section className="card"><h2>Purchase request approval</h2>
-          {ck('evt_l2', 'Event requests go to the Cluster Manager first')}
-          {num('l2_above', 'Also send to the Cluster Manager above this amount (₹)', '0 means never by amount.')}
-          {ck('cc_all', 'The Cost Controller approves every request', 'If off, a request that already went to the Cluster Manager skips the Cost Controller.')}
-          {ck('wh_approval', 'Property orders on the warehouse need approval', 'If off, they become a transfer order as soon as they are raised.')}
+          <p className="hint">Every request goes to its <b>L1 then L2</b>: at a property or pre-opening property those of its items' category (Users &amp; Rights › Approval matrix), at the warehouse the Warehouse Approvers L1 / L2, at the corporate office the department's. The same person as L1 and L2 approves once. Then C1 / C2 by amount (below).</p>
+          {ck('evt_l2', 'Event requests go to the Cluster Manager first', 'Then L1 and L2.')}
+          <p className="hint">A property's order on the Central Warehouse goes to its L1 and L2 (and C1 / C2 by amount), then to a Warehouse Approver (L1 or L2), who approves and dispatches it.</p>
           {ck('qty_up', 'Approvers may increase a quantity', 'They can always reduce it or drop an item.')}
           {ck('week_flag', 'Flag requests that take the week over its budget')}
           {ck('po_on_approval', 'The final approval raises the PO (no Purchase Team step)', 'The last approver confirms rates without a rate card and, for Advance-terms vendors, the advance. Off: only sub-categories ticked in Item Setup get their PO at approval; the rest wait for Purchase.')}
-          {num('auto_po_days', 'PO raised at approval: deliver this many days later')}
-          {ck('receipt_by_requester', 'Goods are received by the person who raised the request', 'The goods receipt is their step (badge, "next step"). Anyone you give the Receiving / Store role at a property can still receive there; warehouse and pre-opening properties stay with the Warehouse Manager. Off: it is the Receiving / Store team\'s step.')}</section>
+          {num('auto_po_days', 'PO raised at approval: deliver this many days later', 'The date the Approve box starts with; the approver can change it.')}
+          {num('po_expiry_days', 'Reject an undelivered PO balance this many days after its delivery date', '0 = the morning after. Nothing delivered: the PO is cancelled; a paid advance is carried forward to the vendor\'s next PO. Purchase or an approver can extend a delivery date once.')}
+          {ck('receipt_by_requester', 'Goods are received by the person who raised the request', 'The goods receipt is their step (badge, "next step"). Anyone you give the Receiving / Store role at a property can still receive there; at the warehouse the Warehouse Approver L2 and Warehouse Staff receive, at a pre-opening property the Pre-opening Team too. Off: it is the Receiving / Store team\'s (Pre-opening Team\'s, warehouse\'s) step.')}</section>
+        <section className="card"><h2>Amount approvals (C1 / C2)</h2>
+          <p className="hint">After L2: above the C1 amount the request also goes to the Amount Approver C1; above the C2 amount to C1 and then C2. Amounts include GST; 0 means off. Give people the Amount Approver C1 / C2 roles under Users &amp; Rights.</p>
+          <div className="scroll"><table><thead><tr><th>Request type</th><th className="r">C1 above (₹)</th><th className="r">C2 above (₹)</th></tr></thead>
+            <tbody>{AMOUNT_TYPES.map(([k, label]) => { const l = s.amount_approvals?.[k] || { c1: 0, c2: 0 }; const set = (patch: Record<string, number>) => save({ amount_approvals: { ...s.amount_approvals, [k]: { ...l, ...patch } } })
+              return <tr key={k}><td>{label}</td>
+                <td className="r"><input className="qty" type="number" min="0" step="1000" style={{ width: 120 }} defaultValue={l.c1} key={'c1' + l.c1} disabled={!ed} onBlur={(e) => { if (+e.target.value !== l.c1) set({ c1: +e.target.value }) }} aria-label={label + ' C1'} /></td>
+                <td className="r"><input className="qty" type="number" min="0" step="1000" style={{ width: 120 }} defaultValue={l.c2} key={'c2' + l.c2} disabled={!ed} onBlur={(e) => { if (+e.target.value !== l.c2) set({ c2: +e.target.value }) }} aria-label={label + ' C2'} /></td></tr> })}</tbody></table></div></section>
         <section className="card"><h2>Utility and AMC bills</h2>
-          <label className="field"><span>Bills are approved by</span><select value={s.bill_approver} disabled={!ed} onChange={(e) => save({ bill_approver: e.target.value })}><option value="l2">Cluster Manager</option><option value="cc">Cost Controller</option></select></label>
+          <p className="hint">A bill at a property goes to the Cluster Manager, then the L1 and L2 of its bill type there (Approval matrix), then C1 / C2 by the Bills amounts.</p>
           {num('bill_jump_pct', 'Flag a bill this much above the previous bill (%)')}
           {num('amc_warn_days', 'Warn this many days before an AMC ends')}
           <label className="field"><span>AMC durations offered (months)</span><input defaultValue={(s.amc_durations || []).join(', ')} key={(s.amc_durations || []).join()} disabled={!ed}

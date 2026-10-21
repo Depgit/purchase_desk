@@ -96,7 +96,7 @@ var activeScreen = map[string]string{"city": "cities", "cluster": "cities", "pro
 
 // uploadScreens maps a bulk upload kind to the screens it belongs to.
 var uploadScreens = map[string][]string{"items": {"items"}, "rates": {"vendor_mapping"}, "mappings": {"vendor_mapping"}, "budgets": {"budgets"},
-	"fb_sales": {"budgets"}, "property_pct": {"properties", "budgets"}, "properties": {"properties"}, "users": {"users"}, "vendors": {"vendors"},
+	"fb_sales": {"budgets"}, "property_pct": {"properties", "budgets"}, "properties": {"properties"}, "users": {"users"}, "approval_matrix": {"users"}, "vendors": {"vendors"},
 	"request_lines": {"requests"}, "zoho_tags": {"zoho"}, "warehouse_stock": {"warehouse"},
 	"cities": {"cities"}, "clusters": {"cities"}, "categories": {"item_setup"}, "sub_categories": {"item_setup"}, "pack_sizes": {"item_setup"},
 	"expense_heads": {"corporate_setup"}, "corp_departments": {"corporate_setup"}, "corp_lines": {"corporate"}}
@@ -132,6 +132,7 @@ var rules = func() []rule {
 		R("W", d+`/receive-transfer`, E, doc, fixed("goods_receipts")),
 		R("W", d+`/advances`, E, doc, byKind("purchase_orders", "purchase_orders", "purchase_orders")),
 		R("W", d+`/vendor-confirm`, E, doc, fixed("purchase_orders", "approvals", "corporate")), // Purchase, or the approvers who raised it
+		R("W", d+`/deliver-by`, E, doc, fixed("purchase_orders", "approvals", "corporate")),     // extend the delivery date once (poexpiry)
 		R("W", `/requests/\d+`, E, doc, fixed("requests")),
 		R("W", `/requests`, E, none, fixed("requests")),
 		R("GET", `/requests`, V, none, listScreen),
@@ -194,6 +195,8 @@ var rules = func() []rule {
 		R("GET", `/reports.*`, V, none, fixed("reports")),
 		R("GET", `/users(/.*)?`, V, none, fixed("users")),
 		R("W", `/users.*`, E, none, fixed("users")),
+		R("GET", `/approval-matrix`, V, none, fixed("users")),
+		R("W", `/approval-matrix`, E, none, fixed("users")),
 		R("W", `/masters/[a-z_]+/\d+/active`, E, none, func(r *http.Request, _ rec) []string {
 			if s, ok := activeScreen[seg(r, 1)]; ok {
 				return []string{s}
